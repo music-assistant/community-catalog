@@ -208,6 +208,10 @@ def test_a_change_of_an_existing_provider(files: Files, github: FakeGitHub, tmp_
     assert report.needed
     assert report.findings[0].text == "The pull request changes the existing provider sample_music"
     assert _failed(report) == []
+    # the latest release is a version already: the results its version file records count
+    passed, text = check_admission(load_registry(files.root), report, [])
+    assert passed
+    assert "- ✅ nightly: passed" in text
 
 
 def test_only_a_status_change_needs_no_admission(

@@ -81,17 +81,25 @@ def check_admission(
     """
     Return whether every admission check passed, and the result in Markdown for a person.
 
-    The latest release passes when it passed on at least one server line that is tested.
+    The latest release passes when it passed on at least one server line that is tested. A line
+    without a result in the results files takes the result the version file records, for a
+    provider whose latest release is a version already.
 
-    :param registry: The registry.
+    :param registry: The registry of the base branch.
     :param report: The admission checks of the prepare step.
     :param results: The results files of the check step.
     """
     findings = list(report.findings)
     passed_on_a_line = False
     if report.version is not None:
+        known = registry.providers.get(report.domain)
+        recorded = known.versions.get(report.version) if known else None
         by_line = {
-            file.line: result
+            line: (check.passed, check.reason)
+            for line, check in (recorded.checks.items() if recorded else [])
+        }
+        by_line |= {
+            file.line: (result.passed, result.reason)
             for file in results
             for result in file.results
             if (result.domain, result.version) == (report.domain, report.version)
@@ -99,13 +107,12 @@ def check_admission(
         for line, config in sorted(registry.server_lines.items()):
             if config.frozen:
                 continue
-            if (result := by_line.get(line)) is None:
+            if line not in by_line:
                 findings.append(Finding(passed=False, text=f"{line}: the checks did not run"))
                 continue
-            findings.append(
-                Finding(passed=result.passed, text=f"{line}: {result.reason or 'passed'}")
-            )
-            passed_on_a_line = passed_on_a_line or result.passed
+            passed, reason = by_line[line]
+            findings.append(Finding(passed=passed, text=f"{line}: {reason or 'passed'}"))
+            passed_on_a_line = passed_on_a_line or passed
     passed = not report.needed or (
         passed_on_a_line and all(finding.passed for finding in report.findings)
     )
