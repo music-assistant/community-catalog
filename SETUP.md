@@ -53,9 +53,10 @@ the ruleset, so nothing is merged without a registry maintainer, who sees a chan
       and only on `main`.
 - [ ] Store the app's private key as the secret `MUSIC_ASSISTANT_BOT_PRIVATE_KEY` of the
       environment `releases`, so a run on any other branch cannot read it, and do not make the
-      organisation secret of that name available to this repository. The workflow reads the
-      app's client id from the organisation variable `MUSIC_ASSISTANT_BOT_CLIENT_ID`; make it
-      available to this repository.
+      organisation secret of that name available to this repository.
+- [ ] Create the repository variable `MUSIC_ASSISTANT_BOT_CLIENT_ID` with the client id of the
+      app (Settings → Secrets and variables → Actions → Variables). The Releases workflow reads
+      it as a variable, as the workflows of the server repository do.
 - [ ] Run the Releases workflow once by hand on `main` (Actions → Releases → Run workflow) and
       check that every job succeeds; with no provider yet it records nothing.
 - [ ] To have failures reported to the maintainers: create a GitHub account of its own for the
