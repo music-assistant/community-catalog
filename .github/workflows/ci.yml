@@ -16,12 +16,23 @@ jobs:
   check:
     name: Lint, types, tests and validation
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # the merge commit of a pull request and its first parent, the base branch
+          fetch-depth: 2
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
       - run: uv sync --locked
+      # only the release pipeline writes version files and refusals
+      - name: Refuse changes to generated files
+        if: github.event_name == 'pull_request'
+        run: |
+          git diff --name-only -z HEAD^1 HEAD > "$RUNNER_TEMP/changed"
+          uv run python -m registry check-changes "$RUNNER_TEMP/changed"
       - run: uv run ruff check --no-fix .
       - run: uv run ruff format --check .
       - run: uv run mypy

@@ -1,0 +1,4 @@
+# Every change needs the review of a registry maintainer: an admission, a block, and above all
+# the code and the workflows, which run with the tokens of the registry. The team name is a
+# placeholder until the team exists (see SETUP.md).
+* @music-assistant/community-catalog-maintainers
