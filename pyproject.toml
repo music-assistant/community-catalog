@@ -75,3 +75,8 @@ convention = "pep257"
   "FBT001", # parametrized expectations
   "PLR2004", # magic values are the expectations
 ]
+
+[tool.codespell]
+# a domain of the server
+ignore-words-list = "hass"
+skip = "uv.lock,LICENSE"
