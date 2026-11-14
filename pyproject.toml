@@ -1,0 +1,74 @@
+[project]
+name = "community-catalog"
+version = "0.0.0"
+description = "The registry of the Music Assistant community catalog"
+authors = [
+  {name = "The Music Assistant Authors", email = "marcelveldt@users.noreply.github.com"},
+]
+license = "Apache-2.0"
+requires-python = ">=3.14"
+dependencies = [
+  "mashumaro==3.22",
+]
+
+[dependency-groups]
+dev = [
+  "codespell==2.4.3",
+  "mypy==2.3.0",
+  "pre-commit==4.6.2",
+  "pytest==9.1.1",
+  "ruff==0.16.5",
+]
+
+[tool.uv]
+# the registry is run from its own checkout, never installed
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.14"
+files = ["registry", "tests"]
+strict = true
+enable_error_code = [
+  "ignore-without-code",
+  "possibly-undefined",
+  "redundant-self",
+  "truthy-iterable",
+]
+warn_unreachable = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN401", # dict[str, Any] holds JSON as it is read
+  "C901", # the branch and statement limits of pylint apply
+  "COM812", # conflicts with the formatter
+  "CPY001", # no copyright header per file
+  "D203", # conflicts with D211
+  "D212", # multi-line docstrings start on the line after the quotes
+  "D417", # false positives
+  "EM101", # just annoying
+  "EM102", # just annoying
+  "S101", # assert is used in tests and to narrow types
+  "T201", # the command line prints
+  "TC003", # just annoying
+  "TRY003", # just annoying
+  "TRY004", # content of the wrong type is invalid content, a ValueError to the caller
+]
+
+[tool.ruff.lint.pydocstyle]
+# Sphinx-style docstrings with :param:
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004"]
