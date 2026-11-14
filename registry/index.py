@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from registry.files import dumps, read_object
-from registry.formats import format_date, version_key
+from registry.formats import format_date, is_date, version_key
 from registry.models import INDEX_SCHEMA, CatalogIndex, IndexProvider, IndexVersion
 from registry.registry import INDEX_FOLDER
 
@@ -82,7 +82,8 @@ def stale_index_files(registry: Registry, rendered: dict[Path, bytes]) -> list[s
     problems += [
         f"{path.relative_to(registry.root).as_posix()}: is no index of a line in server_lines.json"
         for path in sorted(folder.iterdir() if folder.is_dir() else [])
-        if path not in rendered
+        # a hidden file is not published
+        if path not in rendered and not path.name.startswith(".")
     ]
     return problems
 
@@ -141,7 +142,8 @@ def _read_current(path: Path) -> dict[str, Any] | None:
         current = read_object(path)
     except OSError, ValueError:
         return None
-    return current if isinstance(current.get("generated"), str) else None
+    generated = current.get("generated")
+    return current if isinstance(generated, str) and is_date(generated) else None
 
 
 def _without_generated(index: dict[str, Any]) -> dict[str, Any]:

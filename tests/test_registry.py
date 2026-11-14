@@ -194,6 +194,7 @@ def test_unexpected_files(files: Files) -> None:
     files.write(f"providers/{DOMAIN}/README.md", "x")
     files.write(f"providers/{DOMAIN}/versions/notes.txt", "x")
     files.write("providers/stray.json", "{}")
+    files.write(f"providers/{DOMAIN}/versions/.DS_Store", "")
 
     assert _problems(files) == [
         f"providers/{DOMAIN}/README.md: is not a file of the registry",

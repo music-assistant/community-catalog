@@ -82,7 +82,7 @@ def load_registry(root: Path) -> Registry:
         raise InvalidRegistryError(problems)
     providers: dict[str, Provider] = {}
     folder = root / PROVIDERS_FOLDER
-    for path in sorted(folder.iterdir()) if folder.is_dir() else []:
+    for path in _entries(folder):
         if provider := _load_provider(root, path, lines.lines, reserved, problems):
             providers[provider.file.domain] = provider
     if problems:
@@ -112,7 +112,7 @@ def _load_provider(
         return None
     problems += [
         f"{where}/{path.name}: is not a file of the registry"
-        for path in sorted(folder.iterdir())
+        for path in _entries(folder)
         if path.name not in {PROVIDER_FILE, VERSIONS_FOLDER}
     ]
     provider = _load(root, folder / PROVIDER_FILE, ProviderFile, problems)
@@ -123,7 +123,7 @@ def _load_provider(
     problems += [f"{where}/{PROVIDER_FILE}: {p}" for p in check_provider(provider, reserved)]
     versions: dict[str, VersionFile] = {}
     versions_folder = folder / VERSIONS_FOLDER
-    for path in sorted(versions_folder.iterdir()) if versions_folder.is_dir() else []:
+    for path in _entries(versions_folder):
         file = path.relative_to(root).as_posix()
         if path.suffix != ".json" or path.is_symlink() or not path.is_file():
             problems.append(f"{file}: is not a version file")
@@ -140,6 +140,19 @@ def _load_provider(
         if version not in versions
     ]
     return Provider(provider, versions)
+
+
+def _entries(folder: Path) -> list[Path]:
+    """
+    Return what a folder holds, sorted; nothing when it does not exist.
+
+    Names starting with a dot, such as .DS_Store, are no part of the registry and are skipped.
+
+    :param folder: The folder.
+    """
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.iterdir() if not path.name.startswith("."))
 
 
 def _load[T: StrictModel](root: Path, path: Path, model: type[T], problems: list[str]) -> T | None:
