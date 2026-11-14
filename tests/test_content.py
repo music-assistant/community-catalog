@@ -198,3 +198,23 @@ def test_folder_refuses_a_missing_or_invalid_manifest(tmp_path: Path) -> None:
     (tmp_path / "manifest.json").write_text("[]")
     with pytest.raises(ValueError, match=r"manifest\.json is not a JSON object"):
         read_folder(tmp_path)
+
+
+def test_archive_refuses_a_provider_folder_beyond_the_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider folder that unpacks to more than the limit is refused before it fills a disk."""
+    monkeypatch.setattr("registry.content.MAX_FOLDER_SIZE", 1000)
+    archive = tmp_path / "repo.tar.gz"
+    archive.write_bytes(
+        build_archive(
+            {
+                "provider/manifest.json": json.dumps(manifest("provider")).encode(),
+                "provider/data.bin": b"\0" * 2000,
+                "other/large.bin": b"\0" * 5000,
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="the provider folder holds more than 1000 bytes"):
+        read_archive(archive, "provider")

@@ -127,6 +127,8 @@ def test_json_the_server_refuses(files: Files, value: str) -> None:
     ("changes", "problem"),
     [
         ({"status": None}, "status: is missing"),
+        ({"repository_id": None}, "repository_id: is missing"),
+        ({"owner_id": "201"}, "owner_id: expected int, got str"),
         ({"homepage": "x"}, "unknown key homepage"),
         ({"maintainers": "someone"}, "must be a list"),
         ({"maintainers": [1]}, "maintainers: expected str, got int"),
@@ -157,6 +159,9 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
         (DOMAIN, {"maintainers": []}, "maintainers: there is none"),
         (DOMAIN, {"maintainers": ["@someone"]}, "maintainers: '@someone' is not a GitHub handle"),
         (DOMAIN, {"maintainers": ["Someone", "someone"]}, "maintainers: a handle appears twice"),
+        (DOMAIN, {"maintainers": [f"m{n}" for n in range(11)]}, "maintainers: more than 10"),
+        (DOMAIN, {"repository_id": 0}, "repository_id: 0 is not an id GitHub gives"),
+        (DOMAIN, {"owner_id": -1}, "owner_id: -1 is not an id GitHub gives"),
         (DOMAIN, {"reason": "x"}, "reason: a listed provider has no reason or reason_url"),
         (DOMAIN, {"status": "blocked"}, "reason: a blocked provider needs a reason"),
         (
@@ -251,6 +256,28 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
         ({"manifest": {**manifest(), "name": ""}}, "manifest.name: is missing or empty"),
         ({"manifest": {**manifest(), "codeowners": "@x"}}, "manifest.codeowners: is not a list"),
         (
+            {"manifest": {**manifest(), "codeowners": [f"@m{n}" for n in range(11)]}},
+            "manifest.codeowners: more than 10",
+        ),
+        (
+            {"manifest": {**manifest(), "description": "x" * 16_384}},
+            "manifest: 16507 bytes as JSON, more than 16384",
+        ),
+        (
+            {
+                "manifest": manifest(requirements=[f"package-{n}==1.0" for n in range(51)]),
+                "requirements": [f"package-{n}==1.0" for n in range(51)],
+            },
+            "manifest.requirements: more than 50",
+        ),
+        (
+            {
+                "manifest": manifest(requirements=["p" * 96 + "==1.0"]),
+                "requirements": ["p" * 96 + "==1.0"],
+            },
+            "manifest.requirements: one is longer than 100 characters",
+        ),
+        (
             {
                 "manifest": manifest(requirements=["x @ https://x"]),
                 "requirements": ["x @ https://x"],
@@ -279,6 +306,18 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
         (
             {"checks": {"nightly": {"passed": True, "checked": "today"}}},
             "checks.nightly.checked: 'today' is not a date",
+        ),
+        (
+            {
+                "checks": {
+                    "nightly": {
+                        "passed": False,
+                        "checked": "2026-11-02T03:00:00Z",
+                        "reason": "load: " + "x" * 1_000_000,
+                    }
+                }
+            },
+            "checks.nightly.reason: is not one line of at most 300 printable characters",
         ),
     ],
 )
@@ -376,6 +415,7 @@ def test_refused_releases(files: Files) -> None:
         ("2.0.0", _refused(tag="v2.0.1"), "tag: 'v2.0.1' does not name the version 2.0.0"),
         ("2.0.0", _refused(commit="x"), "commit: 'x' is not a full commit SHA"),
         ("2.0.0", _refused(reason=" "), "reason: a refused release needs a reason"),
+        ("2.0.0", _refused(reason="x" * 2001), "reason: is longer than 2000 characters"),
         ("2.0.0", _refused(refused="today"), "refused: 'today' is not a date"),
         ("2.0.1", _refused(), "version: 2.0.0 is not 2.0.1"),
     ],

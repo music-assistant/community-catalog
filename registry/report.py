@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from typing import TYPE_CHECKING
 
+from registry.markdown import code_block, code_span
 from registry.models import Issue
 
 if TYPE_CHECKING:
@@ -15,25 +15,33 @@ if TYPE_CHECKING:
 # where an issue goes when the repository of a provider has issues switched off
 REGISTRY_REPOSITORY = "music-assistant/community-catalog"
 README_URL = f"https://github.com/{REGISTRY_REPOSITORY}#readme"
+# GitHub takes 65536 characters in the body of an issue; the end of the output is kept
+_MAX_OUTPUT = 40_000
 
 
 def build_issues(
     registry: Registry, fetched: FetchReport, results: list[LineResults]
 ) -> list[Issue]:
     """
-    Return an issue for every release refused in this run and every version that failed a check.
+    Return an issue for every release refused or version failed, and every repository moved.
+
+    A repository moved when it is not the one that was admitted: its ids differ.
 
     :param registry: The registry, with the refused releases of the fetch step.
     :param fetched: What the fetch step found.
-    :param results: The results files of the check step.
+    :param results: The results of the check step, as read_results returns them.
     """
     issues: list[Issue] = []
+    for _, provider in sorted(registry.providers.items()):
+        if (issue := _repository_issue(fetched, provider)) is not None:
+            issues.append(issue)
     for refused in fetched.refused:
         provider = registry.providers[refused.domain]
         release = provider.refused[refused.version]
         text = (
-            f"The Music Assistant community catalog could not take release `{release.tag}` "
-            f"(commit `{release.commit}`) of `{refused.domain}`:\n\n{_code(release.reason)}\n"
+            f"The Music Assistant community catalog could not take release "
+            f"{code_span(release.tag)} (commit `{release.commit}`) of `{refused.domain}`:\n\n"
+            f"{code_block(release.reason)}\n"
             "This release is not offered to any server and is not tried again. Publish a new "
             "release once it is fixed."
         )
@@ -72,40 +80,70 @@ def _check_issue(
     text = (
         f"The Music Assistant community catalog checked version {version} (commit `{commit}`) "
         f"of `{domain}` in the server image of the `{line}` line, and it did not pass:\n\n"
-        f"{_code(result.reason or '')}\n{effect}"
+        f"{code_block(result.reason or '')}\n{effect}"
     )
     if result.output and result.output != (result.reason or ""):
-        text += f"\n\n<details><summary>Output</summary>\n\n{_code(result.output)}\n</details>"
+        output = result.output[-_MAX_OUTPUT:]
+        text += f"\n\n<details><summary>Output</summary>\n\n{code_block(output)}\n</details>"
     return _issue(fetched, provider, f"check {version} {line}", title, text)
 
 
-def _issue(fetched: FetchReport, provider: Provider, what: str, title: str, text: str) -> Issue:
+def _repository_issue(fetched: FetchReport, provider: Provider) -> Issue | None:
+    """Return the issue for a provider whose repository has other ids than when it was admitted."""
+    file = provider.file
+    state = fetched.repositories.get(file.repository)
+    if state is None or (state.repository_id, state.owner_id) == (
+        file.repository_id,
+        file.owner_id,
+    ):
+        return None
+    found = f"repository_id {state.repository_id}, owner_id {state.owner_id}"
+    text = (
+        f"The repository `{file.repository}` of `{file.domain}` is not the repository that was "
+        f"admitted: GitHub gives it {found}, while `provider.json` has repository_id "
+        f"{file.repository_id}, owner_id {file.owner_id}. It was renamed, transferred or "
+        "replaced by another one under the same name. Nothing of it is fetched until a "
+        "registry maintainer updates `provider.json`."
+    )
+    title = f"The repository of {file.domain} is not the one that was admitted"
+    return _issue(fetched, provider, f"repository {found}", title, text, registry=True)
+
+
+def _issue(
+    fetched: FetchReport,
+    provider: Provider,
+    what: str,
+    title: str,
+    text: str,
+    *,
+    registry: bool = False,
+) -> Issue:
     """
     Return an issue, on the repository of the provider or on the registry when it has none.
+
+    Only the maintainers of the provider.json are mentioned, and only in an issue on the
+    registry.
 
     :param fetched: What the fetch step found of the repositories.
     :param provider: The provider.
     :param what: What failed, which with the domain makes the key of the issue.
     :param title: The title of the issue.
     :param text: What failed and what it means, in Markdown.
+    :param registry: Whether the issue is for the registry, whatever the repository has.
     """
     domain, repository = provider.file.domain, provider.file.repository
     key = hashlib.sha256(f"{domain} {what}".encode()).hexdigest()[:16]
     body = f"{text}\n\nWhat the checks do: {README_URL}\n"
     state = fetched.repositories.get(repository)
-    if state is None or not state.has_issues:
+    if registry or state is None or not state.has_issues:
         mentions = " ".join(f"@{handle}" for handle in provider.file.maintainers)
-        body += (
-            f"\nThis issue is opened here because `{repository}` has issues switched off. "
-            f"{mentions}\n"
-        )
+        if registry:
+            body += f"\n{mentions}\n"
+        else:
+            body += (
+                f"\nThis issue is opened here because `{repository}` has issues switched off. "
+                f"{mentions}\n"
+            )
         repository = REGISTRY_REPOSITORY
     body += f"\n<!-- community-catalog: {key} -->\n"
     return Issue(key=key, repository=repository, title=title, body=body)
-
-
-def _code(text: str) -> str:
-    """Return text as a Markdown code block, fenced so nothing in it ends the block."""
-    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
-    fence = "`" * max(3, longest + 1)
-    return f"{fence}\n{text}\n{fence}\n"

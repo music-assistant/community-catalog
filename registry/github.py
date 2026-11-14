@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 
 from registry.formats import is_commit
 
@@ -25,10 +26,15 @@ USER_AGENT = "music-assistant-community-catalog"
 BATCH_SIZE = 50
 # the releases read per repository, newest first; also for a repository with several providers
 RELEASES_PER_REPOSITORY = 30
+# the largest archive of a commit that is downloaded; a larger one is refused
+MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
+# far more than any answer of the API the registry asks for
+_MAX_ANSWER_SIZE = 10 * 1024 * 1024
+_CHUNK_SIZE = 64 * 1024
 _TIMEOUT = 60
 _REPOSITORY_FIELDS = f"""
-    isPrivate isArchived hasIssuesEnabled
-    owner {{ login }}
+    databaseId isPrivate isArchived hasIssuesEnabled
+    owner {{ login ... on User {{ databaseId }} ... on Organization {{ databaseId }} }}
     licenseInfo {{ key }}
     releases(first: {RELEASES_PER_REPOSITORY}, orderBy: {{field: CREATED_AT, direction: DESC}}) {{
       nodes {{ tagName isDraft isPrerelease publishedAt tagCommit {{ oid }} }}
@@ -37,11 +43,11 @@ _REPOSITORY_FIELDS = f"""
 
 
 class Transport(Protocol):
-    """Sends a request and returns the status and the body of the response."""
+    """Sends a request and returns the status and the body of the response, to be read."""
 
-    def __call__(self, request: urllib.request.Request) -> tuple[int, bytes]:
+    def __call__(self, request: urllib.request.Request) -> tuple[int, BinaryIO]:
         """
-        Send a request.
+        Send a request; the caller closes the body.
 
         :param request: The request.
         :raises OSError: The request could not be sent.
@@ -50,6 +56,10 @@ class Transport(Protocol):
 
 class GitHubError(OSError):
     """GitHub did not answer as expected."""
+
+
+class ArchiveTooLargeError(GitHubError):
+    """The archive of a commit is larger than the registry downloads."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +77,8 @@ class RepositoryInfo:
     """What the registry reads of a repository."""
 
     owner: str
+    repository_id: int
+    owner_id: int
     private: bool
     archived: bool
     has_issues: bool
@@ -76,7 +88,7 @@ class RepositoryInfo:
     releases: list[Release]
 
 
-def urlopen(request: urllib.request.Request) -> tuple[int, bytes]:
+def urlopen(request: urllib.request.Request) -> tuple[int, BinaryIO]:
     """
     Send a request over the network.
 
@@ -84,10 +96,14 @@ def urlopen(request: urllib.request.Request) -> tuple[int, bytes]:
     :raises OSError: The request could not be sent.
     """
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:  # noqa: S310 - https only
-            return response.status, response.read()
+        response = urllib.request.urlopen(request, timeout=_TIMEOUT)  # noqa: S310 - https only
     except urllib.error.HTTPError as err:
-        return err.code, err.read()
+        # the error is the response, with its body to read
+        return err.code, cast("BinaryIO", err)
+    except http.client.HTTPException as err:
+        msg = f"{request.full_url}: {err!r}"
+        raise GitHubError(msg) from err
+    return response.status, response
 
 
 class GitHub:
@@ -102,15 +118,18 @@ class GitHub:
         """
         self._token = token
         self._transport = transport
+        self._login: str | None = None
 
-    def repositories(self, names: Sequence[str]) -> dict[str, RepositoryInfo | None]:
+    def repositories(self, names: Sequence[str]) -> dict[str, RepositoryInfo | GitHubError | None]:
         """
         Return what the registry reads of repositories, with their releases, in a few requests.
 
+        Each repository is None when it does not exist or is not public, and a GitHubError when
+        it could not be read this time; the others are read all the same.
+
         :param names: The repositories, as owner/name.
-        :raises GitHubError: GitHub refused a request or answered what cannot be read.
         """
-        result: dict[str, RepositoryInfo | None] = {}
+        result: dict[str, RepositoryInfo | GitHubError | None] = {}
         for start in range(0, len(names), BATCH_SIZE):
             batch = names[start : start + BATCH_SIZE]
             # the names are passed as variables, never written into the query
@@ -122,10 +141,22 @@ class GitHub:
                 parts.append(f"{_REPOSITORY_FIELDS}}}")
             arguments = ", ".join(f"${key}: String!" for key in variables)
             query = f"query({arguments}) {{\n{'\n'.join(parts)}\n}}"
-            data = self._graphql(query, variables)
+            try:
+                data, errors = self._graphql(query, variables)
+            except OSError as err:
+                failure = err if isinstance(err, GitHubError) else GitHubError(str(err))
+                result |= dict.fromkeys(batch, failure)
+                continue
             for number, name in enumerate(batch):
-                node = data.get(f"r{number}")
-                result[name] = None if node is None else _repository(node)
+                if (error := errors.get(f"r{number}")) is not None:
+                    result[name] = GitHubError(f"GitHub could not answer {name}: {error}")
+                elif (node := data.get(f"r{number}")) is None:
+                    result[name] = None
+                else:
+                    try:
+                        result[name] = _repository(node)
+                    except GitHubError as err:
+                        result[name] = err
         return result
 
     def download_archive(self, repository: str, commit: str, target: Path) -> None:
@@ -142,22 +173,47 @@ class GitHub:
             msg = f"{commit!r} is not a commit"
             raise GitHubError(msg)
         url = ARCHIVE_URL.format(repository=repository, commit=commit)
-        status, body = self._transport(self._request(url, authenticated=False))
-        if status != 200:  # noqa: PLR2004
-            msg = f"{url} answered {status}"
-            raise GitHubError(msg)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(body)
+        partial = target.with_name(f"{target.name}.part")
+        try:
+            status, body = self._transport(self._request(url, authenticated=False))
+            with body, partial.open("wb") as file:
+                if status != 200:  # noqa: PLR2004
+                    msg = f"{url} answered {status}"
+                    raise GitHubError(msg)
+                size = 0
+                while chunk := _read(body, _CHUNK_SIZE):
+                    size += len(chunk)
+                    if size > MAX_ARCHIVE_SIZE:
+                        msg = f"the archive of the commit is larger than {MAX_ARCHIVE_SIZE} bytes"
+                        raise ArchiveTooLargeError(msg)
+                    file.write(chunk)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
+
+    def login(self) -> str:
+        """
+        Return the handle of the account the token belongs to.
+
+        :raises GitHubError: GitHub refused the request.
+        """
+        if self._login is None:
+            self._login = str(self._json(self._request(f"{API_URL}/user")).get("login"))
+        return self._login
 
     def issue_exists(self, repository: str, key: str) -> bool:
         """
-        Return whether a repository has an issue, open or closed, whose body holds a key.
+        Return whether the account of the token opened an issue with a key on a repository.
+
+        The issue may be open or closed; the key is in its body.
 
         :param repository: The repository, as owner/name.
         :param key: The key of the issue.
         :raises GitHubError: GitHub refused the request.
         """
-        query = urllib.parse.urlencode({"q": f'"{key}" repo:{repository} is:issue in:body'})
+        search = f'"{key}" repo:{repository} is:issue in:body author:{self.login()}'
+        query = urllib.parse.urlencode({"q": search})
         found = self._json(self._request(f"{API_URL}/search/issues?{query}"))
         return bool(found.get("total_count"))
 
@@ -174,23 +230,34 @@ class GitHub:
         request = self._request(f"{API_URL}/repos/{repository}/issues", content)
         return str(self._json(request, expected=201).get("html_url"))
 
-    def _graphql(self, query: str, variables: dict[str, str]) -> dict[str, Any]:
+    def _graphql(
+        self, query: str, variables: dict[str, str]
+    ) -> tuple[dict[str, Any], dict[str, str]]:
         """
-        Run a GraphQL query and return its data; a repository that does not exist is None.
+        Run a GraphQL query and return its data and the errors by the field they are about.
+
+        A repository that does not exist is None in the data and no error.
 
         :param query: The query.
         :param variables: The values of its variables.
-        :raises GitHubError: GitHub refused the query or reported another error.
+        :raises GitHubError: GitHub refused the query, or reported an error about no field.
         """
         content = json.dumps({"query": query, "variables": variables}).encode()
         answer = self._json(self._request(GRAPHQL_URL, content))
-        # a repository that does not exist, or is not public, is an error of its own and null
-        errors = [error for error in answer.get("errors") or [] if error.get("type") != "NOT_FOUND"]
         data = answer.get("data")
-        if errors or not isinstance(data, dict):
-            msg = f"GitHub refused the query: {errors or answer}"
+        errors: dict[str, str] = {}
+        for error in answer.get("errors") or []:
+            path = error.get("path") if isinstance(error, dict) else None
+            # a repository that does not exist, or is not public, is an error of its own and null
+            if isinstance(path, list) and path and isinstance(path[0], str):
+                if error.get("type") != "NOT_FOUND":
+                    errors.setdefault(path[0], str(error.get("message") or error)[:500])
+            else:
+                data = None
+        if not isinstance(data, dict):
+            msg = f"GitHub refused the query: {str(answer)[:500]}"
             raise GitHubError(msg)
-        return data
+        return data, errors
 
     def _json(self, request: urllib.request.Request, expected: int = 200) -> dict[str, Any]:
         """
@@ -200,9 +267,14 @@ class GitHub:
         :param expected: The status of a successful answer.
         :raises GitHubError: GitHub answered another status or no JSON object.
         """
-        status, body = self._transport(request)
+        status, answer = self._transport(request)
+        with answer:
+            body = _read(answer, _MAX_ANSWER_SIZE + 1)
         if status != expected:
             msg = f"{request.full_url} answered {status}: {body[:500]!r}"
+            raise GitHubError(msg)
+        if len(body) > _MAX_ANSWER_SIZE:
+            msg = f"{request.full_url} answered more than {_MAX_ANSWER_SIZE} bytes"
             raise GitHubError(msg)
         try:
             data = json.loads(body)
@@ -232,19 +304,17 @@ class GitHub:
         return urllib.request.Request(url, content, headers)  # noqa: S310 - https only
 
 
-def post_issue(issue: Issue, token: str, transport: Transport = urlopen) -> str | None:
+def post_issue(issue: Issue, github: GitHub) -> str | None:
     """
-    Open an issue on GitHub, unless an issue with its key exists already.
+    Open an issue on GitHub, unless the same account opened an issue with its key before.
 
     Returns the address of the new issue, or None when it was reported before.
 
     :param issue: The issue.
-    :param token: A token that may open issues on the repository of the issue.
-    :param transport: What sends the requests.
+    :param github: A client whose token may open issues on the repository of the issue.
     :raises GitHubError: GitHub refused a request.
     :raises OSError: A request could not be sent.
     """
-    github = GitHub(token, transport)
     if github.issue_exists(issue.repository, issue.key):
         return None
     return github.create_issue(issue.repository, issue.title, issue.body)
@@ -271,6 +341,8 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
         ]
         return RepositoryInfo(
             owner=node["owner"]["login"],
+            repository_id=_id(node["databaseId"]),
+            owner_id=_id(node["owner"]["databaseId"]),
             private=node["isPrivate"],
             archived=node["isArchived"],
             has_issues=node["hasIssuesEnabled"],
@@ -279,4 +351,32 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
         )
     except (KeyError, TypeError, AttributeError) as err:
         msg = f"GitHub answered a repository that cannot be read: {err!r}"
+        raise GitHubError(msg) from err
+
+
+def _id(value: object) -> int:
+    """
+    Return an id GitHub answered.
+
+    :param value: The id in the answer.
+    :raises TypeError: It is no id.
+    """
+    if type(value) is not int:
+        msg = f"{value!r} is no id"
+        raise TypeError(msg)
+    return value
+
+
+def _read(body: BinaryIO, size: int) -> bytes:
+    """
+    Return up to size bytes of the body of a response.
+
+    :param body: The body.
+    :param size: The most bytes to read.
+    :raises GitHubError: The response broke off.
+    """
+    try:
+        return body.read(size)
+    except http.client.HTTPException as err:
+        msg = f"the answer broke off: {err!r}"
         raise GitHubError(msg) from err

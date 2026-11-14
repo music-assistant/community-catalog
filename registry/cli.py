@@ -13,6 +13,7 @@ from registry.edit import (
     CommandError,
     add_version,
     block_version,
+    get_provider,
     now,
     read_source,
     record_check,
@@ -21,17 +22,34 @@ from registry.edit import (
 )
 from registry.fetch import fetch
 from registry.files import dumps, load_model
+from registry.formats import format_date
 from registry.github import GitHub, post_issue
 from registry.index import render_indexes, stale_index_files
-from registry.models import AdmissionReport, FetchReport, Issue, ProviderStatus, ReservedDomains
+from registry.models import (
+    AdmissionReport,
+    FetchReport,
+    Issue,
+    LineResults,
+    ProviderStatus,
+    ReservedDomains,
+    VersionResult,
+)
 from registry.pipeline import (
     ADMISSION_REPORT,
     FETCH_REPORT,
     ISSUES_FOLDER,
     apply_results,
+    archive_path,
+    read_plan,
     read_results,
 )
-from registry.registry import RESERVED_DOMAINS_FILE, InvalidRegistryError, load_registry
+from registry.registry import (
+    REFUSED_FOLDER,
+    RESERVED_DOMAINS_FILE,
+    VERSIONS_FOLDER,
+    InvalidRegistryError,
+    load_registry,
+)
 from registry.report import build_issues
 from registry.reserved import add_server_domains
 
@@ -125,20 +143,44 @@ def _fetch(args: argparse.Namespace) -> None:
 
 
 def _check(args: argparse.Namespace) -> None:
-    """Run the checks of a server line, inside its server image; writes only the results file."""
+    """Run a stage of the checks of a version, inside the server image of a line."""
     # the server is installed in its image only
-    from registry.check import check_line  # noqa: PLC0415
+    from registry.check import CheckUnavailableError, install_version, load_version  # noqa: PLC0415
 
     registry = load_registry(args.root)
-    if (line := registry.server_lines.get(args.line)) is None:
-        msg = f"{args.line!r} is not a line in server_lines.json"
+    if (line := registry.server_lines.get(args.line)) is None or line.frozen:
+        msg = f"{args.line!r} is not a server line that is tested"
         raise CommandError(msg)
-    if line.frozen:
-        print(f"{args.line} is frozen: nothing is checked")
-    results = asyncio.run(check_line(registry, args.line, args.work, now()))
-    args.output.parent.mkdir(parents=True, exist_ok=True)
+    name = f"{args.domain} {args.version}"
+    if (file := get_provider(registry, args.domain).versions.get(args.version)) is None:
+        msg = f"there is no version {name}"
+        raise CommandError(msg)
+    if not (archive := archive_path(args.work, args.domain, args.version)).is_file():
+        msg = f"{name}: its archive is not in the work folder"
+        raise CommandError(msg)
+    if args.stage == "install":
+        try:
+            outcome = asyncio.run(install_version(archive, file, args.domain, args.scratch))
+        except CheckUnavailableError as err:
+            msg = f"{name}: the check could not run: {err}"
+            raise CommandError(msg) from err
+        if outcome is None:
+            print(f"{name}: ready to load")
+            return
+    else:
+        outcome = asyncio.run(load_version(archive, file, args.domain, args.scratch))
+    previous = file.checks.get(args.line)
+    result = VersionResult(
+        domain=args.domain,
+        version=args.version,
+        passed=outcome.passed,
+        reason=outcome.reason,
+        output=outcome.output,
+        passed_before=previous is not None and previous.passed,
+    )
+    results = LineResults(line=args.line, checked=format_date(now()), results=[result])
     args.output.write_bytes(dumps(results.to_dict()))
-    print(f"wrote {args.output}")
+    print(f"{name}: {'passed' if outcome.passed else outcome.reason}")
 
 
 def _check_folder(args: argparse.Namespace) -> int:
@@ -156,14 +198,15 @@ def _check_folder(args: argparse.Namespace) -> int:
 
 
 def _apply_results(args: argparse.Namespace) -> None:
-    """Record the results files of the check step and write the index files."""
-    apply_results(load_registry(args.root), read_results(args.results))
+    """Record the results of the check step that follow the plan, and write the index files."""
+    apply_results(load_registry(args.root), read_results(args.results, read_plan(args.work)))
 
 
 def _report(args: argparse.Namespace) -> None:
     """Write an issue for every release that failed a check or was refused."""
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
-    issues = build_issues(load_registry(args.root), fetched, read_results(args.results))
+    results = read_results(args.results, read_plan(args.work))
+    issues = build_issues(load_registry(args.root), fetched, results)
     folder = args.work / ISSUES_FOLDER
     folder.mkdir(parents=True, exist_ok=True)
     for issue in issues:
@@ -172,21 +215,44 @@ def _report(args: argparse.Namespace) -> None:
     print(f"{len(issues)} issue(s) written to {folder}")
 
 
-def _post_issues(args: argparse.Namespace) -> None:
+def _post_issues(args: argparse.Namespace) -> int:
     """Open the issues the report step wrote, each one unless it was reported before."""
-    token = _token()
+    github = GitHub(_token())
+    failed = 0
     for path in sorted((args.work / ISSUES_FOLDER).glob("*.json")):
         issue = _load(path, Issue)
-        url = post_issue(issue, token)
+        try:
+            url = post_issue(issue, github)
+        except OSError as err:
+            failed += 1
+            print(f"warning: {issue.repository}: {err}: {issue.title}", file=sys.stderr)
+            continue
         print(f"{issue.repository}: {url or 'reported before'}: {issue.title}")
+    return 1 if failed else 0
+
+
+def _check_changes(args: argparse.Namespace) -> int:
+    """Refuse a pull request that writes what only the release pipeline writes."""
+    paths = args.changed.read_bytes().decode(errors="replace").split("\0")
+    generated = sorted(
+        path
+        for path in paths
+        if (parts := path.split("/"))[0] == "providers"
+        and len(parts) > 2  # noqa: PLR2004 - providers/<domain>/<folder>
+        and parts[2] in {VERSIONS_FOLDER, REFUSED_FOLDER}
+    )
+    for path in generated:
+        print(f"{path!r}: only the release pipeline writes version files and refusals")
+    return 1 if generated else 0
 
 
 def _prepare_admission(args: argparse.Namespace) -> None:
     """Run the admission checks that need GitHub and add the latest release of the provider."""
+    changed = args.changed.read_text(encoding="utf-8").splitlines()
     report = prepare_admission(
         args.root,
         args.pull_request,
-        args.domain,
+        changed,
         author=args.author,
         github=GitHub(_token()),
         work=args.work,
@@ -195,16 +261,15 @@ def _prepare_admission(args: argparse.Namespace) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(dumps(report.to_dict()))
     for finding in report.findings:
-        print(f"{'passed' if finding.passed else 'failed'}: {finding.text}")
+        detail = f": {finding.detail!r}" if finding.detail is not None else ""
+        print(f"{'passed' if finding.passed else 'failed'}: {finding.text}{detail}")
 
 
 def _check_admission(args: argparse.Namespace) -> int:
     """Print the result of the admission checks of a provider, with the checks of its release."""
     report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
-    if report.domain != args.domain:
-        msg = f"{ADMISSION_REPORT} is about {report.domain}, not {args.domain}"
-        raise CommandError(msg)
-    passed, text = check_admission(load_registry(args.root), report, read_results(args.results))
+    results = read_results(args.results, read_plan(args.work))
+    passed, text = check_admission(load_registry(args.root), report, results)
     print(text)
     return 0 if passed else 1
 
@@ -306,14 +371,27 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
 
     command = commands.add_parser("check", help=_check.__doc__, parents=[work])
     command.add_argument("--line", required=True, help="the server line of this server image")
-    command.add_argument("--output", type=Path, required=True, help="the results file to write")
+    command.add_argument("--domain", required=True)
+    command.add_argument("--version", required=True)
+    command.add_argument(
+        "--stage",
+        required=True,
+        choices=["install", "load"],
+        help="install: the content and the requirements, without provider code; load: the import",
+    )
+    command.add_argument(
+        "--scratch", type=Path, required=True, help="where install keeps the requirements for load"
+    )
+    command.add_argument(
+        "--output", type=Path, required=True, help="the results file to write, when there is one"
+    )
     command.set_defaults(run=_check)
 
     command = commands.add_parser("check-folder", help=_check_folder.__doc__)
     command.add_argument("folder", type=Path, help="the provider folder, named after its domain")
     command.set_defaults(run=_check_folder)
 
-    command = commands.add_parser("apply-results", help=_apply_results.__doc__)
+    command = commands.add_parser("apply-results", help=_apply_results.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")
     command.set_defaults(run=_apply_results)
 
@@ -324,18 +402,28 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command = commands.add_parser("post-issues", help=_post_issues.__doc__, parents=[work])
     command.set_defaults(run=_post_issues)
 
+    command = commands.add_parser("check-changes", help=_check_changes.__doc__)
+    command.add_argument(
+        "changed", type=Path, help="a file with the changed paths, separated by NUL characters"
+    )
+    command.set_defaults(run=_check_changes)
+
     command = commands.add_parser(
         "prepare-admission", help=_prepare_admission.__doc__, parents=[work]
     )
-    command.add_argument("domain")
     command.add_argument(
         "--pull-request", type=Path, required=True, help="a checkout of the pull request"
+    )
+    command.add_argument(
+        "--changed",
+        type=Path,
+        required=True,
+        help="a file with the files the pull request changes, one per line",
     )
     command.add_argument("--author", required=True, help="the author of the pull request")
     command.set_defaults(run=_prepare_admission)
 
     command = commands.add_parser("check-admission", help=_check_admission.__doc__, parents=[work])
-    command.add_argument("domain")
     command.add_argument("results", type=Path, help="the folder with the results files")
     command.set_defaults(run=_check_admission)
 

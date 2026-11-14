@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING, Any
 
 from registry import formats
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from registry.models import (
+        CheckResult,
         ProviderFile,
         RefusedRelease,
         ReservedDomains,
@@ -22,6 +24,14 @@ if TYPE_CHECKING:
 
 # the provider types of a manifest a community provider can have; core is for the server itself
 PROVIDER_TYPES = frozenset({"music", "player", "metadata", "plugin", "audio_analysis"})
+# every server downloads the manifest of each provider in its index, within a few seconds
+MAX_MANIFEST_SIZE = 16 * 1024
+MAX_REQUIREMENTS = 50
+MAX_REQUIREMENT_LENGTH = 100
+# the maintainers of a provider.json and the code owners of a manifest
+MAX_MAINTAINERS = 10
+# the reason of a refused release goes into an issue for the maintainer
+MAX_REFUSAL = 2000
 
 
 def check_server_lines(lines: ServerLines) -> list[str]:
@@ -79,6 +89,14 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
         problems.append(f"domain: {domain} is {reason}")
     if not formats.is_repository(provider.repository):
         problems.append(f"repository: {provider.repository!r} is not a GitHub owner/name")
+    problems += [
+        f"{key}: {value} is not an id GitHub gives"
+        for key, value in (
+            ("repository_id", provider.repository_id),
+            ("owner_id", provider.owner_id),
+        )
+        if value < 1
+    ]
     if not formats.is_provider_folder(provider.folder, domain):
         problems.append(_folder_problem(provider.folder, domain))
     if not formats.is_tag_prefix(provider.tag_prefix):
@@ -137,13 +155,7 @@ def check_version(
         except ValueError as err:
             problems.append(f"icon_svg: {err}")
     for line, result in version.checks.items():
-        if line not in lines:
-            problems.append(f"checks: {line!r} is not a line in server_lines.json")
-        if result.passed and result.reason is not None:
-            problems.append(f"checks.{line}: a version that passed has no reason")
-        if not result.passed and not (result.reason or "").strip():
-            problems.append(f"checks.{line}: a version that did not pass needs a reason")
-        problems += _date_problems(f"checks.{line}.checked", result.checked)
+        problems += _check_result_problems(line, result, lines)
     return problems
 
 
@@ -163,6 +175,8 @@ def check_refused(release: RefusedRelease, provider: ProviderFile) -> list[str]:
     problems += _date_problems("refused", release.refused)
     if not release.reason.strip():
         problems.append("reason: a refused release needs a reason")
+    if len(release.reason) > MAX_REFUSAL:
+        problems.append(f"reason: is longer than {MAX_REFUSAL} characters")
     return problems
 
 
@@ -186,10 +200,46 @@ def check_manifest(manifest: Mapping[str, Any], domain: str) -> list[str]:
         for key in ("name", "description")
         if not isinstance(manifest.get(key), str) or not manifest[key].strip()
     ]
-    for key, required in (("codeowners", True), ("requirements", False)):
+    for key, required, limit in (
+        ("codeowners", True, MAX_MAINTAINERS),
+        ("requirements", False, MAX_REQUIREMENTS),
+    ):
         value = manifest.get(key, None if required else [])
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             problems.append(f"manifest.{key}: is not a list of text")
+        elif len(value) > limit:
+            problems.append(f"manifest.{key}: more than {limit}")
+    requirements = manifest.get("requirements")
+    if isinstance(requirements, list) and any(
+        isinstance(requirement, str) and len(requirement) > MAX_REQUIREMENT_LENGTH
+        for requirement in requirements
+    ):
+        problems.append(
+            f"manifest.requirements: one is longer than {MAX_REQUIREMENT_LENGTH} characters"
+        )
+    size = len(json.dumps(manifest, ensure_ascii=False, separators=(",", ":")).encode())
+    if size > MAX_MANIFEST_SIZE:
+        problems.append(f"manifest: {size} bytes as JSON, more than {MAX_MANIFEST_SIZE}")
+    return problems
+
+
+def _check_result_problems(
+    line: str, result: CheckResult, lines: Mapping[str, ServerLine]
+) -> list[str]:
+    """Return what is wrong in the result of the checks of a version on a server line."""
+    problems: list[str] = []
+    if line not in lines:
+        problems.append(f"checks: {line!r} is not a line in server_lines.json")
+    if result.passed and result.reason is not None:
+        problems.append(f"checks.{line}: a version that passed has no reason")
+    if not result.passed and not (result.reason or "").strip():
+        problems.append(f"checks.{line}: a version that did not pass needs a reason")
+    elif result.reason is not None and not formats.is_reason(result.reason):
+        problems.append(
+            f"checks.{line}.reason: is not one line of at most {formats.MAX_REASON} printable "
+            "characters"
+        )
+    problems += _date_problems(f"checks.{line}.checked", result.checked)
     return problems
 
 
@@ -217,6 +267,8 @@ def _handle_problems(key: str, handles: list[str]) -> list[str]:
         problems.append(f"{key}: there is none")
     if len({handle.lower() for handle in handles}) != len(handles):
         problems.append(f"{key}: a handle appears twice")
+    if len(handles) > MAX_MAINTAINERS:
+        problems.append(f"{key}: more than {MAX_MAINTAINERS}")
     return problems
 
 

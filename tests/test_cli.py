@@ -110,18 +110,22 @@ def test_add_version_refuses_a_manifest_the_server_cannot_read(
     assert load_registry(files.root).providers[DOMAIN].versions == {}
 
 
-def test_record_check_refuses_what_is_no_plain_json(
-    files: Files, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize("reason", ["\udcff", "load: one\nload: two", "x" * 301, "\x1b[2J"])
+def test_record_check_refuses_a_reason_that_is_not_one_line(
+    files: Files, capsys: pytest.CaptureFixture[str], reason: str
 ) -> None:
-    """A reason that cannot be written as plain JSON, such as a lone surrogate, is refused."""
+    """A reason is one line of at most 300 printable characters, and plain JSON."""
     files.provider()
     path = files.version(lines={})
     before = path.read_bytes()
 
-    assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", "\udcff") == 1
+    assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", reason) == 1
 
-    assert "1.0.0.json: not plain JSON: " in capsys.readouterr().err
+    assert "checks.nightly.reason: is not one line of at most 300 printable characters" in (
+        capsys.readouterr().err
+    )
     assert path.read_bytes() == before
+    assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", "x" * 300) == 0
 
 
 def test_add_version_leaves_out_an_icon_that_is_not_allowed(
@@ -303,30 +307,116 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     report = {
         "domain": DOMAIN,
         "version": "1.0.0",
-        "needed": True,
-        "findings": [{"passed": True, "text": "The domain sample_music is free"}],
+        "findings": [{"passed": True, "text": "The domain is free", "detail": DOMAIN}],
     }
     files.write("work/admission.json", report)
+    entry = [{"domain": DOMAIN, "version": "1.0.0"}]
+    files.write("work/plan.json", {"lines": {"nightly": entry, "beta": entry}})
     failed = {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": "load: x"}
     files.write(
-        "results/nightly.json",
+        f"results/nightly/{DOMAIN}-1.0.0.json",
         {"line": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [failed]},
     )
     results = str(files.root / "results")
 
-    assert _run(files, "check-admission", DOMAIN, results) == 1
+    assert _run(files, "check-admission", results) == 1
     out = capsys.readouterr().out
-    assert "- ❌ nightly: load: x" in out
+    assert "- ✅ The domain is free: ` sample_music `" in out
+    assert "- ❌ nightly: failed: ` load: x `" in out
     assert "- ❌ beta: the checks did not run" in out
     files.write(
-        "results/beta.json",
+        f"results/beta/{DOMAIN}-1.0.0.json",
         {
             "line": "beta",
             "checked": "2026-11-15T03:00:00Z",
             "results": [{"domain": DOMAIN, "version": "1.0.0", "passed": True}],
         },
     )
-    assert _run(files, "check-admission", DOMAIN, results) == 0
+    assert _run(files, "check-admission", results) == 0
     assert "Every check passed." in capsys.readouterr().out
-    assert _run(files, "check-admission", "other_music", results) == 1
-    assert "admission.json is about sample_music, not other_music" in capsys.readouterr().err
+
+
+def test_a_manifest_beyond_the_limits_is_refused_everywhere(
+    files: Files, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """add-version refuses a manifest of more than 16 KiB, and validate a version file with one."""
+    files.provider()
+    folder = tmp_path / DOMAIN
+    huge = {**manifest(), "description": "y" * 20_000_000}
+    write_tree(folder, {**PROVIDER, "manifest.json": json.dumps(huge).encode()})
+
+    assert _add(files, folder) == 1
+    assert "manifest: 20000" in capsys.readouterr().err
+    assert load_registry(files.root).providers[DOMAIN].versions == {}
+    files.version("1.0.0", manifest={**manifest(requirements=["some-package==1.0"]), **huge})
+    assert _run(files, "validate") == 1
+    assert "bytes as JSON, more than 16384" in capsys.readouterr().err
+
+
+def test_an_index_beyond_the_limit_is_refused(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Build and validate refuse an index that a server may not download within 10 seconds."""
+    files.provider()
+    files.version("1.0.0")
+    assert _run(files, "build") == 0
+    monkeypatch.setattr("registry.index.MAX_INDEX_SIZE", 1000)
+
+    assert _run(files, "build") == 1
+    assert "site/v1/nightly.json: 1199 bytes, more than" in capsys.readouterr().err
+    assert _run(files, "validate") == 1
+    assert "more than the 1000 bytes a server is sure to download" in capsys.readouterr().err
+
+
+def test_blocks_and_withdrawals_reach_a_frozen_line(files: Files) -> None:
+    """A frozen line is no longer checked, while a block or a withdrawal still reach its index."""
+    files.write(
+        "server_lines.json",
+        {"lines": {"2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True}}},
+    )
+    files.provider()
+    files.version("1.0.0", lines={"2.11": True})
+    files.version("1.1.0", lines={"2.11": True})
+    index = files.root / "site" / "v1" / "2.11.json"
+
+    assert _run(files, "block-version", DOMAIN, "1.1.0", "--reason", "Sends data elsewhere") == 0
+    provider = json.loads(index.read_text())["providers"][DOMAIN]
+    assert (provider["latest"], provider["blocked_versions"]) == (
+        "1.0.0",
+        {"1.1.0": "Sends data elsewhere"},
+    )
+    assert _run(files, "set-status", DOMAIN, "withdrawn", "--reason", "No longer kept up") == 0
+    assert json.loads(index.read_text())["providers"][DOMAIN]["status"] == "withdrawn"
+    assert _run(files, "set-status", DOMAIN, "blocked", "--reason", "Sends data elsewhere") == 0
+    assert json.loads(index.read_text())["providers"][DOMAIN]["status"] == "blocked"
+
+
+@pytest.mark.parametrize(
+    ("changed", "refused"),
+    [
+        (["providers/sample_music/provider.json", "site/v1/nightly.json"], []),
+        (["registry/cli.py"], []),
+        (
+            ["providers/sample_music/versions/1.0.0.json", "providers/x/refused/1.0.0.json"],
+            ["providers/sample_music/versions/1.0.0.json", "providers/x/refused/1.0.0.json"],
+        ),
+        (["providers/x/versions/new\nline.json"], ["providers/x/versions/new\nline.json"]),
+    ],
+)
+def test_check_changes(
+    files: Files,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    changed: list[str],
+    refused: list[str],
+) -> None:
+    """A pull request that adds or changes a version file or a refusal is refused."""
+    listing = tmp_path / "changed"
+    listing.write_bytes("\0".join(changed).encode() + b"\0")
+
+    assert _run(files, "check-changes", str(listing)) == (1 if refused else 0)
+
+    out = capsys.readouterr().out
+    assert out.splitlines() == [
+        f"{path!r}: only the release pipeline writes version files and refusals" for path in refused
+    ]

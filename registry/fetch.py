@@ -5,9 +5,11 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
+from registry.checks import MAX_REFUSAL
 from registry.edit import CommandError, add_version, now, refuse_release
 from registry.files import dumps
 from registry.formats import format_date, is_date, release_version
+from registry.github import ArchiveTooLargeError, GitHubError
 from registry.models import (
     FetchReport,
     ProviderStatus,
@@ -15,11 +17,17 @@ from registry.models import (
     RefusedRelease,
     RepositoryState,
 )
-from registry.pipeline import FETCH_REPORT, archive_path, versions_to_check
+from registry.pipeline import (
+    FETCH_REPORT,
+    archive_path,
+    make_plan,
+    versions_to_check,
+    write_plan,
+)
 from registry.registry import InvalidRegistryError, load_registry
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Collection, Sequence
     from pathlib import Path
 
     from registry.github import GitHub, Release, RepositoryInfo
@@ -32,13 +40,14 @@ def fetch(registry: Registry, github: GitHub, work: Path) -> FetchReport:
 
     Only the most recently published release counts, and only when it has neither a version
     file nor a refusal yet; a release that cannot become a version is recorded as refused.
-    The archives of every version the check step needs are downloaded into the work folder,
-    and what was found is written to fetch.json there.
+    Nothing is fetched of a provider whose repository is not the one that was admitted (its
+    ids differ), or could not be read; the others are fetched all the same. The archives of
+    every version the check step needs are downloaded into the work folder, the plan of the
+    check step and what was found are written there.
 
     :param registry: The registry.
     :param github: The GitHub client.
     :param work: The work folder.
-    :raises GitHubError: GitHub refused to list the releases.
     """
     providers = [
         provider
@@ -47,14 +56,24 @@ def fetch(registry: Registry, github: GitHub, work: Path) -> FetchReport:
     ]
     infos = github.repositories(sorted({provider.file.repository for provider in providers}))
     report = FetchReport(repositories={}, refused=[])
+    admitted: set[str] = set()
     for provider in sorted(providers, key=lambda provider: provider.file.domain):
         domain, repository = provider.file.domain, provider.file.repository
-        if (info := infos[repository]) is None:
-            print(
-                f"warning: {domain}: {repository} does not exist or is not public", file=sys.stderr
-            )
+        info = infos[repository]
+        if info is None or isinstance(info, GitHubError):
+            problem = info or f"{repository} does not exist or is not public"
+            print(f"warning: {domain}: {problem}", file=sys.stderr)
             continue
         report.repositories[repository] = repository_state(info)
+        ids = (info.repository_id, info.owner_id)
+        if ids != (provider.file.repository_id, provider.file.owner_id):
+            print(
+                f"warning: {domain}: {repository} is not the repository that was admitted: "
+                f"repository_id {ids[0]}, owner_id {ids[1]}",
+                file=sys.stderr,
+            )
+            continue
+        admitted.add(domain)
         if (release := newest_release(info.releases, provider.file.tag_prefix)) is None:
             continue
         try:
@@ -65,7 +84,9 @@ def fetch(registry: Registry, github: GitHub, work: Path) -> FetchReport:
             continue
         if refused is not None:
             report.refused.append(ProviderVersion(domain=domain, version=refused.version))
-    download_archives(load_registry(registry.root), github, work)
+    registry = load_registry(registry.root)
+    download_archives(registry, github, work, admitted)
+    write_plan(make_plan(registry, work), work)
     path = work / FETCH_REPORT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(dumps(report.to_dict()))
@@ -112,8 +133,8 @@ def take_release(
         return None
     released = release.published if is_date(release.published) else format_date(now())
     archive = archive_path(work, domain, version)
-    github.download_archive(provider.file.repository, release.commit, archive)
     try:
+        github.download_archive(provider.file.repository, release.commit, archive)
         add_version(
             registry,
             domain,
@@ -123,29 +144,36 @@ def take_release(
             commit=release.commit,
             released=released,
         )
-    except (CommandError, InvalidRegistryError) as err:
+    except (ArchiveTooLargeError, CommandError, InvalidRegistryError) as err:
         problems = err.problems if isinstance(err, InvalidRegistryError) else [str(err)]
         # the path of the archive in the work folder means nothing to the maintainer
         problems = [problem.removeprefix(f"{archive}: ") for problem in problems]
+        # a name in the archive can hold what plain JSON cannot
+        reason = "\n".join(problems).encode(errors="replace").decode()
+        if len(reason) > MAX_REFUSAL:
+            reason = f"{reason[: MAX_REFUSAL - 1]}…"
         refused = RefusedRelease(
             version=version,
             tag=release.tag,
             commit=release.commit,
             released=released,
             refused=format_date(now()),
-            # a name in the archive can hold what plain JSON cannot
-            reason="\n".join(problems).encode(errors="replace").decode(),
+            reason=reason,
         )
         refuse_release(registry, domain, refused)
-        print(f"{domain} {release.tag}: refused: {refused.reason}")
+        # every line of the log starts with the domain, whatever the reason holds
+        for line in refused.reason.splitlines():
+            print(f"{domain} {release.tag}: refused: {line}")
         return refused
     print(f"{domain} {release.tag}: added version {version}")
     return None
 
 
-def download_archives(registry: Registry, github: GitHub, work: Path) -> None:
+def download_archives(
+    registry: Registry, github: GitHub, work: Path, domains: Collection[str]
+) -> None:
     """
-    Download the archive of every version the check step needs on a line that is tested.
+    Download the archive of every version of some providers the check step needs.
 
     An archive in the work folder already is kept; one that cannot be downloaded is left out,
     and its version is checked on another night.
@@ -153,9 +181,13 @@ def download_archives(registry: Registry, github: GitHub, work: Path) -> None:
     :param registry: The registry.
     :param github: The GitHub client.
     :param work: The work folder.
+    :param domains: The providers whose archives are downloaded.
     """
     needed = {
-        version for line in registry.server_lines for version in versions_to_check(registry, line)
+        (domain, version)
+        for line in registry.server_lines
+        for domain, version in versions_to_check(registry, line)
+        if domain in domains
     }
     for domain, version in sorted(needed):
         if (path := archive_path(work, domain, version)).is_file():
@@ -177,6 +209,8 @@ def repository_state(info: RepositoryInfo) -> RepositoryState:
     """
     return RepositoryState(
         owner=info.owner,
+        repository_id=info.repository_id,
+        owner_id=info.owner_id,
         private=info.private,
         archived=info.archived,
         has_issues=info.has_issues,

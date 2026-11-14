@@ -9,9 +9,12 @@ the line decides.
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import signal
 import sys
 import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,24 +29,21 @@ from music_assistant.controllers.community_catalog.dependencies import (
 from registry import formats
 from registry.checks import check_manifest, reserved_reason
 from registry.content import content_hash, read_folder, unpack
-from registry.formats import format_date
-from registry.models import LineResults, VersionResult
-from registry.pipeline import archive_path, versions_to_check
+from registry.formats import MAX_REASON
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from datetime import datetime
 
     from registry.models import ReservedDomains, VersionFile
-    from registry.registry import Registry
 
 # an import that takes longer than this hangs
 LOAD_TIMEOUT = 300
 # the folder that holds the registry package, which the load process imports
 _CODE_ROOT = Path(__file__).parent.parent
-# a version file keeps one short line; the issue for the maintainer gets the output
-_MAX_REASON = 300
+# the issue for the maintainer gets the end of the output
 _MAX_OUTPUT = 50_000
+# where the requirements are installed, in the scratch folder of a version
+_CACHE = "cache"
 
 
 class CheckUnavailableError(Exception):
@@ -59,43 +59,42 @@ class Outcome:
     output: str | None = None
 
 
-async def check_line(registry: Registry, line: str, work: Path, now: datetime) -> LineResults:
+async def install_version(
+    archive: Path, file: VersionFile, domain: str, scratch: Path
+) -> Outcome | None:
     """
-    Run the checks for every version that needs a result on a server line.
+    Check the content of a version and install its requirements the way the server does.
 
-    A version whose archive is not in the work folder, or whose check could not run, gets no
-    result and is checked on another night.
+    Runs no provider code. Returns the outcome when the version fails here, None when it is
+    ready for load_version.
 
-    :param registry: The registry.
-    :param line: The server line, which must be the line of this server image.
-    :param work: The work folder with the archives of the fetch step.
-    :param now: When the versions are checked.
+    :param archive: The GitHub archive of the commit of the version.
+    :param file: The version file.
+    :param domain: The domain of the provider.
+    :param scratch: An empty folder that keeps the installed requirements for load_version.
+    :raises CheckUnavailableError: uv failed or the package index could not be reached.
     """
-    results: list[VersionResult] = []
-    for domain, version in versions_to_check(registry, line):
-        file = registry.providers[domain].versions[version]
-        archive = archive_path(work, domain, version)
-        if not archive.is_file():
-            print(f"{domain} {version}: skipped, its archive is not in the work folder")
-            continue
-        try:
-            outcome = await _check_archive(archive, domain, file)
-        except CheckUnavailableError as err:
-            print(f"{domain} {version}: skipped, the check could not run: {err}")
-            continue
-        previous = file.checks.get(line)
-        results.append(
-            VersionResult(
-                domain=domain,
-                version=version,
-                passed=outcome.passed,
-                reason=outcome.reason,
-                output=outcome.output,
-                passed_before=previous is not None and previous.passed,
-            )
-        )
-        print(f"{domain} {version}: {'passed' if outcome.passed else outcome.reason}")
-    return LineResults(line=line, checked=format_date(now), results=results)
+    with tempfile.TemporaryDirectory() as folder:
+        location = Path(folder, "providers")
+        if (failed := _unpack_version(archive, file, location / domain)) is not None:
+            return failed
+    return await _install(domain, file.requirements, scratch / _CACHE)
+
+
+async def load_version(archive: Path, file: VersionFile, domain: str, scratch: Path) -> Outcome:
+    """
+    Import a version the way the server does, with the requirements install_version installed.
+
+    :param archive: The GitHub archive of the commit of the version.
+    :param file: The version file.
+    :param domain: The domain of the provider.
+    :param scratch: The folder install_version installed the requirements in; only read.
+    """
+    with tempfile.TemporaryDirectory() as folder:
+        location = Path(folder, "providers")
+        if (failed := _unpack_version(archive, file, location / domain)) is not None:
+            return failed
+        return await _load(location, domain, scratch / _CACHE, Path(folder))
 
 
 async def check_folder(folder: Path, reserved: ReservedDomains) -> Outcome:
@@ -128,45 +127,41 @@ async def check_folder(folder: Path, reserved: ReservedDomains) -> Outcome:
     with tempfile.TemporaryDirectory() as scratch:
         location = Path(scratch, "providers")
         shutil.copytree(folder, location / domain)
-        return await _check_provider(location, domain, requirements, Path(scratch))
+        cache = Path(scratch, _CACHE)
+        if (failed := await _install(domain, requirements, cache)) is not None:
+            return failed
+        return await _load(location, domain, cache, Path(scratch))
 
 
-async def _check_archive(archive: Path, domain: str, file: VersionFile) -> Outcome:
+def _unpack_version(archive: Path, file: VersionFile, target: Path) -> Outcome | None:
     """
-    Run the checks on the provider folder in the archive of a version.
+    Unpack the provider folder of a version, and return the outcome when it is not as listed.
 
     :param archive: The GitHub archive of the commit of the version.
-    :param domain: The domain of the provider.
     :param file: The version file.
-    :raises CheckUnavailableError: A check could not run, for a reason that is not the provider's.
+    :param target: The folder to unpack to, which must not exist.
     """
-    with tempfile.TemporaryDirectory() as scratch:
-        location = Path(scratch, "providers")
-        try:
-            unpack(archive, file.folder, location / domain)
-            found = content_hash(location / domain)
-        except (ValueError, OSError) as err:
-            return _failed("content", str(err))
-        if found != file.content_hash:
-            return _failed(
-                "content", f"the archive has the content hash {found}, not the listed one"
-            )
-        return await _check_provider(location, domain, file.requirements, Path(scratch))
+    try:
+        unpack(archive, file.folder, target)
+        found = content_hash(target)
+    except (ValueError, OSError) as err:
+        return _failed("content", str(err))
+    if found != file.content_hash:
+        return _failed("content", f"the archive has the content hash {found}, not the listed one")
+    return None
 
 
-async def _check_provider(
-    location: Path, domain: str, requirements: Sequence[str], scratch: Path
-) -> Outcome:
+async def _install(domain: str, requirements: Sequence[str], cache: Path) -> Outcome | None:
     """
-    Resolve and install the requirements of a provider the way the server does, then import it.
+    Resolve and install the requirements of a provider the way the server does.
 
-    :param location: The folder that holds the provider folder.
-    :param domain: The domain of the provider, also the name of its folder.
+    Returns the outcome when they clash with the server or cannot be installed, else None.
+
+    :param domain: The domain of the provider.
     :param requirements: The requirements of its manifest.
-    :param scratch: A folder for the installed requirements.
+    :param cache: The folder to install them in.
     :raises CheckUnavailableError: uv failed or the package index could not be reached.
     """
-    cache = scratch / "cache"
     dependencies = CommunityDependencies(SimpleNamespace(cache_path=str(cache)))
     try:
         await dependencies.sync(await dependencies.resolve({domain: list(requirements)}))
@@ -174,31 +169,57 @@ async def _check_provider(
         return _failed("dependencies", str(err))
     except DependenciesUnavailable as err:
         raise CheckUnavailableError(str(err)) from err
-    process = await asyncio.create_subprocess_exec(
-        sys.executable,
-        "-m",
-        "registry.load",
-        str(location),
-        domain,
-        str(cache),
-        cwd=_CODE_ROOT,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-    try:
-        stdout, _ = await asyncio.wait_for(process.communicate(), LOAD_TIMEOUT)
-    except TimeoutError:
-        process.kill()
-        await process.wait()
-        return _failed("load", f"the import did not finish within {LOAD_TIMEOUT} seconds")
+    return None
+
+
+async def _load(location: Path, domain: str, cache: Path, scratch: Path) -> Outcome:
+    """
+    Import a provider in a process of its own, the way the server does.
+
+    :param location: The folder that holds the provider folder.
+    :param domain: The domain of the provider, also the name of its folder.
+    :param cache: The folder its requirements were installed in.
+    :param scratch: A folder for the output of the import.
+    """
+    log = scratch / "load.log"
+    with log.open("wb") as output:
+        # a session of its own, so the processes the import starts end with it
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-m",
+            "registry.load",
+            str(location),
+            domain,
+            str(cache),
+            cwd=_CODE_ROOT,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=output,
+            stderr=asyncio.subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            await asyncio.wait_for(process.wait(), LOAD_TIMEOUT)
+        except TimeoutError:
+            return _failed("load", f"the import did not finish within {LOAD_TIMEOUT} seconds")
+        finally:
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            await process.wait()
     if process.returncode == 0:
         return Outcome(passed=True)
-    output = stdout.decode(errors="replace").strip()
-    last = output.splitlines()[-1] if output else ""
+    output_text = _tail(log).strip()
+    last = output_text.splitlines()[-1] if output_text else ""
     stage, separator, message = last.partition(": ")
     if not separator or stage not in {"manifest", "load"}:
         stage, message = "load", f"the import ended with exit code {process.returncode}"
-    return _failed(stage, message, output)
+    return _failed(stage, message, output_text)
+
+
+def _tail(path: Path) -> str:
+    """Return the end of a file, at most the output an issue gets."""
+    with path.open("rb") as file:
+        file.seek(max(0, file.seek(0, os.SEEK_END) - _MAX_OUTPUT))
+        return file.read().decode(errors="replace")
 
 
 def _failed(stage: str, message: str, output: str | None = None) -> Outcome:
@@ -209,14 +230,11 @@ def _failed(stage: str, message: str, output: str | None = None) -> Outcome:
     :param message: Why it failed.
     :param output: The full output of the check, when it has more than the message.
     """
-    # a name in an archive or an output can hold what plain JSON cannot
-    message = message.encode(errors="replace").decode()
-    line = " ".join(message.split())
-    if len(line) > _MAX_REASON:
-        line = f"{line[: _MAX_REASON - 1]}…"
+    # a name in an archive or an output can hold what plain JSON or one line cannot
+    line = " ".join(message.encode(errors="replace").decode().split())
+    line = "".join(char if char.isprintable() else "\ufffd" for char in line)
+    reason = f"{stage}: {line}"
+    if len(reason) > MAX_REASON:
+        reason = f"{reason[: MAX_REASON - 1]}…"
     full = (output or message).encode(errors="replace").decode()
-    return Outcome(
-        passed=False,
-        reason=f"{stage}: {line}",
-        output=full[-_MAX_OUTPUT:] if len(full) > _MAX_OUTPUT else full,
-    )
+    return Outcome(passed=False, reason=reason, output=full[-_MAX_OUTPUT:])

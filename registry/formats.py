@@ -9,6 +9,8 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# the longest reason of a failed check a version file keeps
+MAX_REASON = 300
 
 _DOMAIN = re.compile(r"[a-z][a-z0-9_]*")
 _VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -191,6 +193,15 @@ def is_requirement(value: str) -> bool:
     """
     # \s in the expression of the server also matches line breaks and other control characters
     return value.isprintable() and bool(_REQUIREMENT.fullmatch(value))
+
+
+def is_reason(value: str) -> bool:
+    """
+    Return whether a value is the reason of a check that failed: one line of printable text.
+
+    :param value: The value to check.
+    """
+    return bool(value.strip()) and len(value) <= MAX_REASON and value.isprintable()
 
 
 def is_https_url(value: str) -> bool:

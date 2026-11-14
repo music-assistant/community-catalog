@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import zipfile
 from pathlib import Path
@@ -13,12 +14,22 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from registry.cli import main
 from registry.edit import add_version, record_check
 from registry.files import load_model
 from registry.models import LineResults
-from registry.pipeline import archive_path
+from registry.pipeline import archive_path, make_plan, read_results, write_plan
 from registry.registry import load_registry
-from tests.conftest import COMMIT, ROOT, build_archive, manifest, write_tree
+from tests.conftest import (
+    COMMIT,
+    ROOT,
+    build_archive,
+    can_run_check_line,
+    docker_runs,
+    manifest,
+    run_check_line,
+    write_tree,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import Files
@@ -30,9 +41,12 @@ SERVER_PYTHON = SERVER / ".venv" / "bin" / "python"
 # runs a command of the registry with uv pointed at the wheels the test built, as the server's
 # own tests do; nothing reaches the network
 RUN_OFFLINE = """
-import sys
+import os, sys
 from music_assistant.controllers.community_catalog import dependencies
 dependencies._UV_INDEX_ARGS[:] = ["--no-index", "--find-links", sys.argv[1]]
+if "CHECK_LOAD_TIMEOUT" in os.environ:
+    import registry.check
+    registry.check.LOAD_TIMEOUT = int(os.environ["CHECK_LOAD_TIMEOUT"])
 from registry.cli import main
 sys.exit(main(sys.argv[2:]))
 """
@@ -68,10 +82,12 @@ def wheels(tmp_path_factory: pytest.TempPathFactory) -> Path:
     return folder
 
 
-def _run(wheels: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run(wheels: Path, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
     """Run a command of the registry with the interpreter of the server checkout."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
     environment["UV_OFFLINE"] = "1"
+    if timeout is not None:
+        environment["CHECK_LOAD_TIMEOUT"] = str(timeout)
     return subprocess.run(
         [SERVER_PYTHON, "-c", RUN_OFFLINE, str(wheels), *args],
         cwd=ROOT,
@@ -101,8 +117,21 @@ def _release(
     add_version(registry, domain, version, archive, tag=f"v{version}", commit=COMMIT)
 
 
-def test_check_a_line(files: Files, wheels: Path) -> None:
-    """Each version that needs a result gets the verdict of the server's own code."""
+def _check(
+    files: Files, wheels: Path, domain: str, stage: str, **run: int
+) -> subprocess.CompletedProcess[str]:
+    """Run a stage of the checks of version 1.0.0 of a provider on nightly, as a container does."""
+    scratch = files.root / "scratch" / domain
+    scratch.mkdir(parents=True, exist_ok=True)
+    return _run(wheels, "--root", str(files.root), "check", "--line", "nightly",
+                "--domain", domain, "--version", "1.0.0", "--stage", stage,
+                "--scratch", str(scratch), "--output", str(scratch / f"{stage}.json"),
+                **run)  # fmt: skip
+
+
+@pytest.mark.skipif(not can_run_check_line(), reason="needs bash, jq and timeout")
+def test_check_a_line(files: Files, wheels: Path, tmp_path: Path) -> None:
+    """Each version of the plan gets the verdict of the server's own code, in containers."""
     _release(files, "good_music", "1.0.0", "import helper_lib\n", ["helper-lib==1.0"])
     _release(files, "clash_music", "1.0.0", "", ["needs-old-orjson==1.0"])
     _release(files, "missing_music", "1.0.0", "", ["not-on-the-index==1.0"])
@@ -110,7 +139,7 @@ def test_check_a_line(files: Files, wheels: Path) -> None:
     _release(files, "exiting_music", "1.0.0", "raise SystemExit(0)\n")
     # passed before and is the latest on nightly, so it is checked again; it fails now
     _release(files, "stopping_music", "1.0.0", "import does_not_exist\n")
-    # failed before and is not the latest: not checked again
+    # failed before and is below the latest: not checked again
     _release(files, "stopping_music", "0.9.0", "")
     registry = load_registry(files.root)
     record_check(registry, "stopping_music", "1.0.0", "nightly", reason=None)
@@ -120,28 +149,32 @@ def test_check_a_line(files: Files, wheels: Path) -> None:
     archive_path(files.root / "work", "changed_music", "1.0.0").write_bytes(
         build_archive({"providers/changed_music/manifest.json": b"{}"})
     )
-    # without an archive in the work folder: no result
+    # without an archive in the work folder: not in the plan
     _release(files, "absent_music", "1.0.0", "")
     archive_path(files.root / "work", "absent_music", "1.0.0").unlink()
-    output = files.root / "results" / "nightly.json"
+    # the registry code travels with the files, as in the artifact of the fetch step
+    shutil.copytree(ROOT / "registry", files.root / "registry")
+    plan = make_plan(load_registry(files.root), files.root / "work")
+    write_plan(plan, files.root / "work")
+    log = tmp_path / "docker.log"
 
-    run = _run(wheels, "--root", str(files.root), "check", "--line", "nightly",
-               "--output", str(output))  # fmt: skip
+    run = run_check_line(
+        files.root, "nightly", [str(SERVER_PYTHON), "-c", RUN_OFFLINE, str(wheels)], log
+    )
 
     assert run.returncode == 0, run.stderr
-    assert "absent_music 1.0.0: skipped, its archive is not in the work folder" in run.stdout
-    results = load_model(output, LineResults)
-    assert results.line == "nightly"
-    found = {(r.domain, r.version): r for r in results.results}
-    assert set(found) == {
-        ("good_music", "1.0.0"),
-        ("clash_music", "1.0.0"),
-        ("missing_music", "1.0.0"),
+    assert [(e.domain, e.version) for e in plan.lines["nightly"]] == [
         ("broken_music", "1.0.0"),
-        ("exiting_music", "1.0.0"),
-        ("stopping_music", "1.0.0"),
         ("changed_music", "1.0.0"),
-    }
+        ("clash_music", "1.0.0"),
+        ("exiting_music", "1.0.0"),
+        ("good_music", "1.0.0"),
+        ("missing_music", "1.0.0"),
+        ("stopping_music", "1.0.0"),
+    ]
+    results = read_results(files.root / "results", plan)
+    found = {(r.domain, r.version): r for file in results for r in file.results}
+    assert set(found) == {(e.domain, e.version) for e in plan.lines["nightly"]}
     assert found["good_music", "1.0.0"].passed
     clash = found["clash_music", "1.0.0"]
     assert not clash.passed
@@ -163,25 +196,63 @@ def test_check_a_line(files: Files, wheels: Path) -> None:
     changed = found["changed_music", "1.0.0"].reason
     assert changed is not None
     assert changed.startswith("content: the archive has the content hash")
-    # the check step writes nothing but its results file
+    # a version that fails before its code runs gets no load stage
+    loaded = {call[call.index("--domain") + 1] for call in docker_runs(log) if "load" in call}
+    assert loaded == {"broken_music", "exiting_music", "good_music", "stopping_music"}
+    # the check step writes nothing but its results files
     assert load_registry(files.root).providers["good_music"].versions["1.0.0"].checks == {}
+    assert main(["--root", str(files.root), "apply-results", str(files.root / "results")]) == 0
+    assert main(["--root", str(files.root), "validate"]) == 0
 
 
-def test_a_frozen_line_is_not_checked(files: Files, wheels: Path) -> None:
-    """A frozen line gets an empty results file."""
-    files.write(
-        "server_lines.json",
-        {"lines": {"nightly": {"image": "ghcr.io/music-assistant/server:nightly", "frozen": True}}},
+def test_a_check_that_cannot_run_gives_no_result(files: Files, tmp_path: Path) -> None:
+    """When uv cannot reach the package index, the install stage writes no results file."""
+    _release(files, "good_music", "1.0.0", "", ["helper-lib==1.0"])
+
+    run = _check(files, tmp_path / "no-such-index", "good_music", "install")
+
+    assert run.returncode == 1
+    assert "good_music 1.0.0: the check could not run: " in run.stderr
+    assert not (files.root / "scratch" / "good_music" / "install.json").exists()
+
+
+def test_the_load_timeout_ends_every_process_of_the_import(
+    files: Files, wheels: Path, tmp_path: Path
+) -> None:
+    """An import that hangs fails after the timeout, and what it started is ended with it."""
+    pid_file = tmp_path / "child.pid"
+    code = (
+        "import subprocess, time\n"
+        "child = subprocess.Popen(['sleep', '600'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(600)\n"
     )
-    _release(files, "good_music", "1.0.0", "")
-    output = files.root / "nightly.json"
+    _release(files, "hanging_music", "1.0.0", code)
 
-    run = _run(wheels, "--root", str(files.root), "check", "--line", "nightly",
-               "--output", str(output))  # fmt: skip
+    assert _check(files, wheels, "hanging_music", "install").returncode == 0
+    run = _check(files, wheels, "hanging_music", "load", timeout=3)
 
     assert run.returncode == 0, run.stderr
-    assert "nightly is frozen" in run.stdout
-    assert load_model(output, LineResults).results == []
+    result = load_model(files.root / "scratch" / "hanging_music" / "load.json", LineResults)
+    assert result.results[0].reason == "load: the import did not finish within 3 seconds"
+    pid = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
+
+
+def test_the_output_of_a_load_keeps_its_end(files: Files, wheels: Path) -> None:
+    """A provider that prints a lot keeps the last 50 kB of its output, with the error."""
+    code = "print('x' * 200_000)\nraise RuntimeError('boom')\n"
+    _release(files, "noisy_music", "1.0.0", code)
+
+    assert _check(files, wheels, "noisy_music", "install").returncode == 0
+    assert _check(files, wheels, "noisy_music", "load").returncode == 0
+
+    [result] = load_model(files.root / "scratch" / "noisy_music" / "load.json", LineResults).results
+    assert result.reason == "load: RuntimeError: boom"
+    assert result.output is not None
+    assert len(result.output) <= 50_000
+    assert result.output.rstrip().endswith("load: RuntimeError: boom")
 
 
 def test_check_folder(files: Files, wheels: Path, tmp_path: Path) -> None:

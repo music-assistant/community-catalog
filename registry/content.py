@@ -16,6 +16,8 @@ from registry.files import loads
 
 ICON_FILE = "icon.svg"
 MANIFEST_FILE = "manifest.json"
+# the most the files of a provider folder may hold together, so an archive cannot fill a disk
+MAX_FOLDER_SIZE = 100 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,10 +110,12 @@ def unpack(archive: Path, folder: str, target: Path) -> None:
     :param folder: The folder in the repository to take.
     :param target: The folder to write to, which must not exist.
     :raises ValueError: A member leaves the repository, the folder holds anything but regular
-        files and folders, or the folder is not in the archive.
+        files and folders or more than MAX_FOLDER_SIZE bytes, or the folder is not in the
+        archive.
     """
-    # the same rules as _unpack in installer.py of the server
+    # the same rules as _unpack in installer.py of the server, and a limit on the size
     prefix = PurePosixPath(folder).parts
+    size = 0
     with tarfile.open(archive, "r:gz") as tar:
         for member in tar:
             name = PurePosixPath(member.name)
@@ -130,6 +134,10 @@ def unpack(archive: Path, folder: str, target: Path) -> None:
             if member.isdir():
                 path.mkdir(parents=True, exist_ok=True)
             elif member.isfile() and (source := tar.extractfile(member)) is not None:
+                size += member.size
+                if size > MAX_FOLDER_SIZE:
+                    msg = f"the provider folder holds more than {MAX_FOLDER_SIZE} bytes"
+                    raise ValueError(msg)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with source, path.open("xb") as file:
                     shutil.copyfileobj(source, file)

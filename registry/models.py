@@ -83,6 +83,10 @@ class ProviderFile(StrictModel):
     domain: str
     # owner/name of the repository on GitHub
     repository: str
+    # the ids GitHub gives the repository and its owner, which a rename or transfer keeps and a
+    # new repository under the same name does not have
+    repository_id: int
+    owner_id: int
     # the folder of the provider in the repository, named after the domain
     folder: str
     maintainers: list[str]
@@ -202,6 +206,8 @@ class RepositoryState(StrictModel):
     """What the fetch step learned of a repository on GitHub."""
 
     owner: str
+    repository_id: int
+    owner_id: int
     private: bool
     archived: bool
     has_issues: bool
@@ -228,11 +234,21 @@ class FetchReport(StrictModel):
 
 
 @dataclass
+class CheckPlan(StrictModel):
+    """`plan.json`: the versions the check step checks, by server line."""
+
+    lines: dict[str, list[ProviderVersion]]
+
+
+@dataclass
 class Finding(StrictModel):
     """The outcome of one admission check."""
 
     passed: bool
+    # our own words
     text: str
+    # what the provider or its repository holds, shown as code
+    detail: str | None = None
 
 
 @dataclass
@@ -243,8 +259,9 @@ class AdmissionReport(StrictModel):
     findings: list[Finding]
     # the version of the latest release, when it became a version file
     version: str | None = None
-    # False when the pull request only changes the status or the blocked versions
-    needed: bool = True
+    # the keys of an existing provider the pull request changes that only a registry maintainer
+    # changes, such as its status or repository
+    maintainer_keys: list[str] = field(default_factory=list)
 
 
 @dataclass

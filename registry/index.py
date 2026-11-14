@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 # how many versions of a provider the index of a line lists
 LISTED_VERSIONS = 5
+# a server gives up on an index it cannot download within 10 seconds, and keeps its old copy
+MAX_INDEX_SIZE = 4 * 1024 * 1024
 
 
 def build_index(registry: Registry, line: str, generated: str) -> CatalogIndex:
@@ -52,7 +54,8 @@ def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
 
     :param registry: The registry.
     :param now: When a changed index is generated.
-    :raises InvalidRegistryError: An index is not plain JSON the server reads.
+    :raises InvalidRegistryError: An index is not plain JSON the server reads, or is larger
+        than a server downloads in time.
     """
     result: dict[Path, bytes] = {}
     for line in sorted(registry.server_lines):
@@ -65,6 +68,12 @@ def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
             result[path] = dumps(index)
         except ValueError as err:
             raise InvalidRegistryError([f"{INDEX_FOLDER}/{line}.json: {err}"]) from err
+        if (size := len(result[path])) > MAX_INDEX_SIZE:
+            msg = (
+                f"{INDEX_FOLDER}/{line}.json: {size} bytes, more than the {MAX_INDEX_SIZE} bytes "
+                "a server is sure to download within its 10 seconds"
+            )
+            raise InvalidRegistryError([msg])
     return result
 
 
