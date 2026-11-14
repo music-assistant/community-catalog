@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from registry.registry import InvalidRegistryError, load_registry
-from tests.conftest import DOMAIN, ROOT, manifest, provider_file, version_file
+from tests.conftest import DOMAIN, NIGHTLY_IMAGE, ROOT, manifest, provider_file, version_file
 
 if TYPE_CHECKING:
     from tests.conftest import Files
@@ -66,9 +66,21 @@ def test_missing_file(files: Files, file: str, problem: str) -> None:
 @pytest.mark.parametrize(
     ("lines", "problem"),
     [
-        ({"lines": {"stable": {}}}, "'stable' is not a server line"),
+        ({"lines": {"stable": {"image": NIGHTLY_IMAGE}}}, "'stable' is not a server line"),
         ({"lines": {}}, "there is no server line"),
-        ({"lines": {"nightly": {"frozen": "no"}}}, "lines.frozen: expected bool, got str"),
+        (
+            {"lines": {"nightly": {"image": NIGHTLY_IMAGE, "frozen": "no"}}},
+            "lines.frozen: expected bool, got str",
+        ),
+        ({"lines": {"nightly": {}}}, "lines.image: is missing"),
+        (
+            {"lines": {"nightly": {"image": "--privileged"}}},
+            "lines.nightly.image: '--privileged' is not a container image with a tag",
+        ),
+        (
+            {"lines": {"nightly": {"image": "ghcr.io/music-assistant/server"}}},
+            "is not a container image with a tag",
+        ),
     ],
 )
 def test_server_lines(files: Files, lines: dict[str, Any], problem: str) -> None:
@@ -332,3 +344,50 @@ def test_every_problem_is_reported(files: Files) -> None:
     assert any(p.startswith(f"{PROVIDER}: repository") for p in problems)
     assert any(p.startswith(f"{VERSION}: commit") for p in problems)
     assert any(p.startswith("providers/other_music/provider.json: ") for p in problems)
+
+
+def _refused(version: str = "2.0.0", **changes: Any) -> dict[str, Any]:
+    """Return the content of a valid file of a refused release."""
+    data = {
+        "version": version,
+        "tag": f"v{version}",
+        "commit": "1" * 40,
+        "released": "2026-11-01T12:00:00Z",
+        "refused": "2026-11-02T03:00:00Z",
+        "reason": "the repository has no folder providers/sample_music",
+    }
+    return {**data, **changes}
+
+
+def test_refused_releases(files: Files) -> None:
+    """A refused release is read with its provider."""
+    files.provider()
+    files.write(f"providers/{DOMAIN}/refused/2.0.0.json", _refused())
+
+    provider = load_registry(files.root).providers[DOMAIN]
+
+    assert provider.refused["2.0.0"].reason == "the repository has no folder providers/sample_music"
+
+
+@pytest.mark.parametrize(
+    ("name", "content", "problem"),
+    [
+        ("1.0.0", _refused("1.0.0"), "version: 1.0.0 has a version file as well"),
+        ("2.0.0", _refused(tag="v2.0.1"), "tag: 'v2.0.1' does not name the version 2.0.0"),
+        ("2.0.0", _refused(commit="x"), "commit: 'x' is not a full commit SHA"),
+        ("2.0.0", _refused(reason=" "), "reason: a refused release needs a reason"),
+        ("2.0.0", _refused(refused="today"), "refused: 'today' is not a date"),
+        ("2.0.1", _refused(), "version: 2.0.0 is not 2.0.1"),
+    ],
+)
+def test_refused_release_rules(
+    files: Files, name: str, content: dict[str, Any], problem: str
+) -> None:
+    """A refused release names a version without a version file, with its tag, commit and reason."""
+    files.provider()
+    files.version("1.0.0")
+    files.write(f"providers/{DOMAIN}/refused/{name}.json", content)
+
+    [found] = _problems(files)
+    assert found.startswith(f"providers/{DOMAIN}/refused/{name}.json: ")
+    assert problem in found

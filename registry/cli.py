@@ -3,28 +3,40 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import os
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
-from registry.checks import check_version
-from registry.content import ProviderContent, read_archive, read_folder
-from registry.files import dumps, load_model
-from registry.formats import format_date
-from registry.icon import check_icon
-from registry.index import render_indexes, stale_index_files
-from registry.models import CheckResult, ReservedDomains, VersionFile
-from registry.registry import (
-    RESERVED_DOMAINS_FILE,
-    InvalidRegistryError,
-    Registry,
-    load_registry,
+from registry.admission import check_admission, prepare_admission
+from registry.edit import (
+    CommandError,
+    add_version,
+    block_version,
+    now,
+    read_source,
+    record_check,
+    set_status,
+    write_indexes,
 )
+from registry.fetch import fetch
+from registry.files import dumps, load_model
+from registry.github import GitHub, post_issue
+from registry.index import render_indexes, stale_index_files
+from registry.models import AdmissionReport, FetchReport, Issue, ProviderStatus, ReservedDomains
+from registry.pipeline import (
+    ADMISSION_REPORT,
+    FETCH_REPORT,
+    ISSUES_FOLDER,
+    apply_results,
+    read_results,
+)
+from registry.registry import RESERVED_DOMAINS_FILE, InvalidRegistryError, load_registry
+from registry.report import build_issues
 from registry.reserved import add_server_domains
 
-
-class CommandError(Exception):
-    """A command cannot be carried out; the message says why."""
+# the token the commands that talk to GitHub read from the environment
+TOKEN_VARIABLE = "GITHUB_TOKEN"  # noqa: S105 - the name, not a token
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -34,23 +46,25 @@ def main(argv: list[str] | None = None) -> int:
     :param argv: The arguments, those of the process when omitted.
     """
     args = _parser().parse_args(argv)
+    if "work" in args and args.work is None:
+        args.work = args.root / "work"
     try:
-        args.run(args)
+        return args.run(args) or 0
     except InvalidRegistryError as err:
         for problem in err.problems:
             print(problem, file=sys.stderr)
         print(f"{len(err.problems)} problem(s) found", file=sys.stderr)
-        return 1
     except CommandError as err:
         print(f"error: {err}", file=sys.stderr)
-        return 1
-    return 0
+    except OSError as err:
+        print(f"error: {err}", file=sys.stderr)
+    return 1
 
 
 def _validate(args: argparse.Namespace) -> None:
     """Check every file of the registry, and that the index files are up to date."""
     registry = load_registry(args.root)
-    if problems := stale_index_files(registry, render_indexes(registry, _now())):
+    if problems := stale_index_files(registry, render_indexes(registry, now())):
         problems.append("run `python -m registry build` to update the index files")
         raise InvalidRegistryError(problems)
     print(f"{len(registry.providers)} provider(s) valid, index files up to date")
@@ -58,69 +72,34 @@ def _validate(args: argparse.Namespace) -> None:
 
 def _build(args: argparse.Namespace) -> None:
     """Write the index file of every server line."""
-    registry = load_registry(args.root)
-    for path, content in render_indexes(registry, _now()).items():
-        if path.is_file() and path.read_bytes() == content:
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-        print(f"wrote {path.relative_to(registry.root).as_posix()}")
+    write_indexes(args.root)
 
 
 def _add_version(args: argparse.Namespace) -> None:
     """Write the version file of a release, from its provider folder or its GitHub archive."""
-    registry = load_registry(args.root)
-    if (provider := registry.providers.get(args.domain)) is None:
-        msg = f"there is no provider {args.domain}"
-        raise CommandError(msg)
-    path = registry.version_path(args.domain, args.version)
-    if path.exists():
-        msg = f"{args.domain} {args.version} exists already"
-        raise CommandError(msg)
-    content = _read_source(args.source, provider.file.folder)
-    icon_svg = content.icon_svg
-    if icon_svg is not None:
-        try:
-            check_icon(icon_svg)
-        except ValueError as err:
-            print(f"warning: the icon is left out: {err}", file=sys.stderr)
-            icon_svg = None
-    requirements = content.manifest.get("requirements", [])
-    version = VersionFile(
-        version=args.version,
+    file = add_version(
+        load_registry(args.root),
+        args.domain,
+        args.version,
+        args.source,
         tag=args.tag,
         commit=args.commit,
-        folder=provider.file.folder,
-        content_hash=content.content_hash,
-        manifest=content.manifest,
-        requirements=requirements if isinstance(requirements, list) else [],
-        released=args.released or format_date(_now()),
-        icon_svg=icon_svg,
+        released=args.released,
     )
-    _write_version(registry, args.domain, version)
-    print(f"content hash {content.content_hash}")
+    print(f"content hash {file.content_hash}")
 
 
 def _record_check(args: argparse.Namespace) -> None:
     """Record the result of the checks of a version on a server line."""
     registry = load_registry(args.root)
-    if (provider := registry.providers.get(args.domain)) is None:
-        msg = f"there is no provider {args.domain}"
-        raise CommandError(msg)
-    if (version := provider.versions.get(args.version)) is None:
-        msg = f"{args.domain} has no version {args.version}"
-        raise CommandError(msg)
-    version.checks[args.line] = CheckResult(
-        passed=args.failed is None,
-        checked=args.checked or format_date(_now()),
-        reason=args.failed,
+    record_check(
+        registry, args.domain, args.version, args.line, reason=args.failed, checked=args.checked
     )
-    _write_version(registry, args.domain, version)
 
 
 def _content_hash(args: argparse.Namespace) -> None:
     """Print the content hash of a provider folder or of a folder in a GitHub archive."""
-    print(_read_source(args.source, args.folder).content_hash)
+    print(read_source(args.source, args.folder).content_hash)
 
 
 def _refresh_reserved(args: argparse.Namespace) -> None:
@@ -140,63 +119,153 @@ def _refresh_reserved(args: argparse.Namespace) -> None:
     print(f"wrote {RESERVED_DOMAINS_FILE}")
 
 
-def _read_source(source: Path, folder: str | None) -> ProviderContent:
-    """
-    Return the content of a provider folder, or of a folder in a GitHub archive.
-
-    :param source: A provider folder, or a downloaded archive of a commit.
-    :param folder: The folder of the provider in the repository, needed for an archive.
-    :raises CommandError: The source cannot be read or holds what a server would not install.
-    """
-    if source.is_file() and folder is None:
-        raise CommandError("--folder is needed to read an archive")
-    try:
-        if source.is_dir():
-            return read_folder(source)
-        if source.is_file() and folder is not None:
-            return read_archive(source, folder)
-    except (ValueError, OSError) as err:
-        msg = f"{source}: {err}"
-        raise CommandError(msg) from err
-    msg = f"{source} is no folder or archive"
-    raise CommandError(msg)
+def _fetch(args: argparse.Namespace) -> None:
+    """Write a version file for the newest release of every provider, and download the archives."""
+    fetch(load_registry(args.root), GitHub(_token()), args.work)
 
 
-def _write_version(registry: Registry, domain: str, version: VersionFile) -> None:
-    """
-    Write a version file after checking it.
+def _check(args: argparse.Namespace) -> None:
+    """Run the checks of a server line, inside its server image; writes only the results file."""
+    # the server is installed in its image only
+    from registry.check import check_line  # noqa: PLC0415
 
-    :param registry: The registry.
-    :param domain: The domain of the provider.
-    :param version: The version.
-    :raises InvalidRegistryError: The version is not valid.
-    """
-    path = registry.version_path(domain, version.version)
-    where = path.relative_to(registry.root).as_posix()
-    problems = check_version(version, registry.providers[domain].file, registry.server_lines)
-    if problems:
-        raise InvalidRegistryError([f"{where}: {problem}" for problem in problems])
-    try:
-        content = dumps(version.to_dict())
-    except ValueError as err:
-        raise InvalidRegistryError([f"{where}: {err}"]) from err
+    registry = load_registry(args.root)
+    if (line := registry.server_lines.get(args.line)) is None:
+        msg = f"{args.line!r} is not a line in server_lines.json"
+        raise CommandError(msg)
+    if line.frozen:
+        print(f"{args.line} is frozen: nothing is checked")
+    results = asyncio.run(check_line(registry, args.line, args.work, now()))
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    args.output.write_bytes(dumps(results.to_dict()))
+    print(f"wrote {args.output}")
+
+
+def _check_folder(args: argparse.Namespace) -> int:
+    """Run the checks on a provider folder, inside a server image, as a provider's own CI does."""
+    from registry.check import check_folder  # noqa: PLC0415
+
+    reserved = load_registry(args.root).reserved
+    outcome = asyncio.run(check_folder(args.folder.resolve(), reserved))
+    if outcome.passed:
+        print(f"{args.folder.resolve().name}: passed")
+        return 0
+    print(outcome.output, file=sys.stderr)
+    print(f"{args.folder.resolve().name}: {outcome.reason}", file=sys.stderr)
+    return 1
+
+
+def _apply_results(args: argparse.Namespace) -> None:
+    """Record the results files of the check step and write the index files."""
+    apply_results(load_registry(args.root), read_results(args.results))
+
+
+def _report(args: argparse.Namespace) -> None:
+    """Write an issue for every release that failed a check or was refused."""
+    fetched = _load(args.work / FETCH_REPORT, FetchReport)
+    issues = build_issues(load_registry(args.root), fetched, read_results(args.results))
+    folder = args.work / ISSUES_FOLDER
+    folder.mkdir(parents=True, exist_ok=True)
+    for issue in issues:
+        (folder / f"{issue.key}.json").write_bytes(dumps(issue.to_dict()))
+        print(f"{issue.repository}: {issue.title}")
+    print(f"{len(issues)} issue(s) written to {folder}")
+
+
+def _post_issues(args: argparse.Namespace) -> None:
+    """Open the issues the report step wrote, each one unless it was reported before."""
+    token = _token()
+    for path in sorted((args.work / ISSUES_FOLDER).glob("*.json")):
+        issue = _load(path, Issue)
+        url = post_issue(issue, token)
+        print(f"{issue.repository}: {url or 'reported before'}: {issue.title}")
+
+
+def _prepare_admission(args: argparse.Namespace) -> None:
+    """Run the admission checks that need GitHub and add the latest release of the provider."""
+    report = prepare_admission(
+        args.root,
+        args.pull_request,
+        args.domain,
+        author=args.author,
+        github=GitHub(_token()),
+        work=args.work,
+    )
+    path = args.work / ADMISSION_REPORT
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(content)
-    print(f"wrote {where}")
+    path.write_bytes(dumps(report.to_dict()))
+    for finding in report.findings:
+        print(f"{'passed' if finding.passed else 'failed'}: {finding.text}")
 
 
-def _now() -> datetime:
-    """Return the current moment."""
-    return datetime.now(UTC)
+def _check_admission(args: argparse.Namespace) -> int:
+    """Print the result of the admission checks of a provider, with the checks of its release."""
+    report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
+    if report.domain != args.domain:
+        msg = f"{ADMISSION_REPORT} is about {report.domain}, not {args.domain}"
+        raise CommandError(msg)
+    passed, text = check_admission(load_registry(args.root), report, read_results(args.results))
+    print(text)
+    return 0 if passed else 1
 
 
-def _parser() -> argparse.ArgumentParser:
+def _set_status(args: argparse.Namespace) -> None:
+    """Change whether the catalog offers a provider, and write the index files."""
+    registry = load_registry(args.root)
+    set_status(registry, args.domain, ProviderStatus(args.status), args.reason, args.reason_url)
+    write_indexes(args.root)
+
+
+def _block_version(args: argparse.Namespace) -> None:
+    """Block a version of a provider, so no server loads it, and write the index files."""
+    block_version(load_registry(args.root), args.domain, args.version, args.reason)
+    write_indexes(args.root)
+
+
+def _unblock_version(args: argparse.Namespace) -> None:
+    """Lift the block of a version of a provider, and write the index files."""
+    block_version(load_registry(args.root), args.domain, args.version, None)
+    write_indexes(args.root)
+
+
+def _token() -> str:
+    """
+    Return the GitHub token of the environment.
+
+    :raises CommandError: There is none.
+    """
+    if not (token := os.environ.get(TOKEN_VARIABLE)):
+        msg = f"set {TOKEN_VARIABLE} to a GitHub token"
+        raise CommandError(msg)
+    return token
+
+
+def _load[T: (FetchReport, Issue, AdmissionReport)](path: Path, model: type[T]) -> T:
+    """
+    Return a file of the work folder.
+
+    :param path: The file.
+    :param model: The model it holds.
+    :raises CommandError: The file is missing or not exactly this model.
+    """
+    try:
+        return load_model(path, model)
+    except (ValueError, OSError) as err:
+        msg = f"{path}: {err}"
+        raise CommandError(msg) from err
+
+
+def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per argument
     """Return the parser of the command line."""
     parser = argparse.ArgumentParser(prog="python -m registry", description=__doc__)
     parser.add_argument(
         "--root", type=Path, default=Path(), help="root folder of the registry (default: .)"
     )
     commands = parser.add_subparsers(required=True, metavar="command")
+    work = argparse.ArgumentParser(add_help=False)
+    work.add_argument(
+        "--work", type=Path, help="the work folder the steps share (default: work in the root)"
+    )
 
     command = commands.add_parser("validate", help=_validate.__doc__)
     command.set_defaults(run=_validate)
@@ -231,4 +300,60 @@ def _parser() -> argparse.ArgumentParser:
     command = commands.add_parser("refresh-reserved", help=_refresh_reserved.__doc__)
     command.add_argument("servers", nargs="+", type=Path, help="checkouts of the server")
     command.set_defaults(run=_refresh_reserved)
+
+    command = commands.add_parser("fetch", help=_fetch.__doc__, parents=[work])
+    command.set_defaults(run=_fetch)
+
+    command = commands.add_parser("check", help=_check.__doc__, parents=[work])
+    command.add_argument("--line", required=True, help="the server line of this server image")
+    command.add_argument("--output", type=Path, required=True, help="the results file to write")
+    command.set_defaults(run=_check)
+
+    command = commands.add_parser("check-folder", help=_check_folder.__doc__)
+    command.add_argument("folder", type=Path, help="the provider folder, named after its domain")
+    command.set_defaults(run=_check_folder)
+
+    command = commands.add_parser("apply-results", help=_apply_results.__doc__)
+    command.add_argument("results", type=Path, help="the folder with the results files")
+    command.set_defaults(run=_apply_results)
+
+    command = commands.add_parser("report", help=_report.__doc__, parents=[work])
+    command.add_argument("results", type=Path, help="the folder with the results files")
+    command.set_defaults(run=_report)
+
+    command = commands.add_parser("post-issues", help=_post_issues.__doc__, parents=[work])
+    command.set_defaults(run=_post_issues)
+
+    command = commands.add_parser(
+        "prepare-admission", help=_prepare_admission.__doc__, parents=[work]
+    )
+    command.add_argument("domain")
+    command.add_argument(
+        "--pull-request", type=Path, required=True, help="a checkout of the pull request"
+    )
+    command.add_argument("--author", required=True, help="the author of the pull request")
+    command.set_defaults(run=_prepare_admission)
+
+    command = commands.add_parser("check-admission", help=_check_admission.__doc__, parents=[work])
+    command.add_argument("domain")
+    command.add_argument("results", type=Path, help="the folder with the results files")
+    command.set_defaults(run=_check_admission)
+
+    command = commands.add_parser("set-status", help=_set_status.__doc__)
+    command.add_argument("domain")
+    command.add_argument("status", choices=[status.value for status in ProviderStatus])
+    command.add_argument("--reason", help="why; required for withdrawn and blocked")
+    command.add_argument("--reason-url", help="an https link with more about the reason")
+    command.set_defaults(run=_set_status)
+
+    command = commands.add_parser("block-version", help=_block_version.__doc__)
+    command.add_argument("domain")
+    command.add_argument("version")
+    command.add_argument("--reason", required=True, help="why the version is blocked")
+    command.set_defaults(run=_block_version)
+
+    command = commands.add_parser("unblock-version", help=_unblock_version.__doc__)
+    command.add_argument("domain")
+    command.add_argument("version")
+    command.set_defaults(run=_unblock_version)
     return parser

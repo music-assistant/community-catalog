@@ -1,10 +1,12 @@
 {
   "lines": {
     "beta": {
-      "frozen": false
+      "frozen": false,
+      "image": "ghcr.io/music-assistant/server:beta"
     },
     "nightly": {
-      "frozen": false
+      "frozen": false,
+      "image": "ghcr.io/music-assistant/server:nightly"
     }
   }
 }

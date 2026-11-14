@@ -13,6 +13,7 @@ if TYPE_CHECKING:
 
     from registry.models import (
         ProviderFile,
+        RefusedRelease,
         ReservedDomains,
         ServerLine,
         ServerLines,
@@ -33,6 +34,11 @@ def check_server_lines(lines: ServerLines) -> list[str]:
         f"lines: {line!r} is not a server line: nightly, beta or MAJOR.MINOR"
         for line in lines.lines
         if not formats.is_server_line(line)
+    ]
+    problems += [
+        f"lines.{line}.image: {config.image!r} is not a container image with a tag"
+        for line, config in lines.lines.items()
+        if not formats.is_image(config.image)
     ]
     if not lines.lines:
         problems.append("lines: there is no server line")
@@ -138,6 +144,25 @@ def check_version(
         if not result.passed and not (result.reason or "").strip():
             problems.append(f"checks.{line}: a version that did not pass needs a reason")
         problems += _date_problems(f"checks.{line}.checked", result.checked)
+    return problems
+
+
+def check_refused(release: RefusedRelease, provider: ProviderFile) -> list[str]:
+    """
+    Return what is wrong in the file of a refused release.
+
+    :param release: The content of the file.
+    :param provider: The provider the release belongs to.
+    """
+    problems: list[str] = []
+    if formats.release_version(release.tag, provider.tag_prefix) != release.version:
+        problems.append(f"tag: {release.tag!r} does not name the version {release.version}")
+    if not formats.is_commit(release.commit):
+        problems.append(f"commit: {release.commit!r} is not a full commit SHA in lower case")
+    problems += _date_problems("released", release.released)
+    problems += _date_problems("refused", release.refused)
+    if not release.reason.strip():
+        problems.append("reason: a refused release needs a reason")
     return problems
 
 

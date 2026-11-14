@@ -5,9 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from registry.checks import check_provider, check_server_lines, check_version
+from registry.checks import check_provider, check_refused, check_server_lines, check_version
 from registry.files import load_model
-from registry.models import ProviderFile, ReservedDomains, ServerLines, VersionFile
+from registry.models import (
+    ProviderFile,
+    RefusedRelease,
+    ReservedDomains,
+    ServerLines,
+    VersionFile,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -17,6 +23,7 @@ if TYPE_CHECKING:
 PROVIDERS_FOLDER = "providers"
 PROVIDER_FILE = "provider.json"
 VERSIONS_FOLDER = "versions"
+REFUSED_FOLDER = "refused"
 SERVER_LINES_FILE = "server_lines.json"
 RESERVED_DOMAINS_FILE = "reserved_domains.json"
 # the folder that is published; a server reads <published address>/v1/<line>.json
@@ -44,6 +51,8 @@ class Provider:
     file: ProviderFile
     # by version
     versions: dict[str, VersionFile]
+    # the releases that did not become a version, by version
+    refused: dict[str, RefusedRelease]
 
 
 @dataclass
@@ -64,6 +73,15 @@ class Registry:
         :param version: The version.
         """
         return self.root / PROVIDERS_FOLDER / domain / VERSIONS_FOLDER / f"{version}.json"
+
+    def refused_path(self, domain: str, version: str) -> Path:
+        """
+        Return the file of a refused release of a provider.
+
+        :param domain: The domain of the provider.
+        :param version: The version the release names.
+        """
+        return self.root / PROVIDERS_FOLDER / domain / REFUSED_FOLDER / f"{version}.json"
 
 
 def load_registry(root: Path) -> Registry:
@@ -117,7 +135,7 @@ def _load_provider(
     problems += [
         f"{where}/{path.name}: is not a file of the registry"
         for path in _entries(folder)
-        if path.name not in {PROVIDER_FILE, VERSIONS_FOLDER}
+        if path.name not in {PROVIDER_FILE, VERSIONS_FOLDER, REFUSED_FOLDER}
     ]
     provider = _load(root, folder / PROVIDER_FILE, ProviderFile, problems)
     if provider is None:
@@ -126,26 +144,55 @@ def _load_provider(
         problems.append(f"{where}/{PROVIDER_FILE}: domain: {provider.domain} is not {folder.name}")
     problems += [f"{where}/{PROVIDER_FILE}: {p}" for p in check_provider(provider, reserved)]
     versions: dict[str, VersionFile] = {}
-    versions_folder = folder / VERSIONS_FOLDER
-    if versions_folder.is_symlink():
-        problems.append(f"{where}/{VERSIONS_FOLDER}: is a symbolic link")
-    for path in _entries(versions_folder):
+    for path, version in _load_folder(
+        root, folder / VERSIONS_FOLDER, VersionFile, "version file", problems
+    ):
         file = path.relative_to(root).as_posix()
-        if path.suffix != ".json" or path.is_symlink() or not path.is_file():
-            problems.append(f"{file}: is not a version file")
-            continue
-        if (version := _load(root, path, VersionFile, problems)) is None:
-            continue
         if version.version != path.stem:
             problems.append(f"{file}: version: {version.version} is not {path.stem}")
         problems += [f"{file}: {p}" for p in check_version(version, provider, lines)]
         versions[path.stem] = version
+    refused: dict[str, RefusedRelease] = {}
+    for path, release in _load_folder(
+        root, folder / REFUSED_FOLDER, RefusedRelease, "refused release", problems
+    ):
+        file = path.relative_to(root).as_posix()
+        if release.version != path.stem:
+            problems.append(f"{file}: version: {release.version} is not {path.stem}")
+        if path.stem in versions:
+            problems.append(f"{file}: version: {path.stem} has a version file as well")
+        problems += [f"{file}: {p}" for p in check_refused(release, provider)]
+        refused[path.stem] = release
     problems += [
         f"{where}/{PROVIDER_FILE}: blocked_versions: {version} has no version file"
         for version in provider.blocked_versions
         if version not in versions
     ]
-    return Provider(provider, versions)
+    return Provider(provider, versions, refused)
+
+
+def _load_folder[T: StrictModel](
+    root: Path, folder: Path, model: type[T], kind: str, problems: list[str]
+) -> list[tuple[Path, T]]:
+    """
+    Return the files of a versions or refused folder, adding what is wrong to the problems.
+
+    :param root: The root folder of the registry.
+    :param folder: The folder.
+    :param model: The model each file holds.
+    :param kind: What each file holds, for the problems.
+    :param problems: The list to add problems to.
+    """
+    if folder.is_symlink():
+        problems.append(f"{folder.relative_to(root).as_posix()}: is a symbolic link")
+    result: list[tuple[Path, T]] = []
+    for path in _entries(folder):
+        if path.suffix != ".json" or path.is_symlink() or not path.is_file():
+            problems.append(f"{path.relative_to(root).as_posix()}: is not a {kind}")
+            continue
+        if (content := _load(root, path, model, problems)) is not None:
+            result.append((path, content))
+    return result
 
 
 def _entries(folder: Path) -> list[Path]:

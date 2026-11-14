@@ -249,3 +249,84 @@ def _tree(path: Path) -> dict[str, bytes]:
         for item in path.rglob("*")
         if item.is_file()
     }
+
+
+def test_set_status(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
+    """A provider is withdrawn, blocked and listed again in one command, with its index."""
+    files.provider()
+    files.version()
+    url = "https://github.com/music-assistant/community-catalog/issues/2"
+
+    assert _run(files, "set-status", DOMAIN, "blocked", "--reason", "Sends data elsewhere",
+                "--reason-url", url) == 0  # fmt: skip
+    provider = json.loads((files.root / "site/v1/nightly.json").read_text())["providers"][DOMAIN]
+    assert (provider["status"], provider["reason"], provider["reason_url"]) == (
+        "blocked",
+        "Sends data elsewhere",
+        url,
+    )
+    assert _run(files, "set-status", DOMAIN, "withdrawn") == 1
+    assert "reason: a withdrawn provider needs a reason" in capsys.readouterr().err
+    assert _run(files, "set-status", DOMAIN, "listed") == 0
+    assert _run(files, "validate") == 0
+    file = load_registry(files.root).providers[DOMAIN].file
+    assert (file.status, file.reason, file.reason_url) == ("listed", None, None)
+    assert _run(files, "set-status", "other_music", "listed") == 1
+    assert "there is no provider other_music" in capsys.readouterr().err
+
+
+def test_block_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
+    """A version is blocked and unblocked in one command, with its index."""
+    files.provider()
+    files.version("1.0.0")
+    files.version("1.1.0")
+
+    assert _run(files, "block-version", DOMAIN, "1.1.0", "--reason", "Sends data elsewhere") == 0
+    provider = json.loads((files.root / "site/v1/nightly.json").read_text())["providers"][DOMAIN]
+    assert (provider["latest"], provider["blocked_versions"]) == (
+        "1.0.0",
+        {"1.1.0": "Sends data elsewhere"},
+    )
+    assert _run(files, "block-version", DOMAIN, "2.0.0", "--reason", "x") == 1
+    assert "blocked_versions: 2.0.0 has no version file" in capsys.readouterr().err
+    assert _run(files, "unblock-version", DOMAIN, "1.0.0") == 1
+    assert f"{DOMAIN} 1.0.0 is not blocked" in capsys.readouterr().err
+    assert _run(files, "unblock-version", DOMAIN, "1.1.0") == 0
+    assert _run(files, "validate") == 0
+    assert load_registry(files.root).providers[DOMAIN].file.blocked_versions == {}
+
+
+def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
+    """The result of the admission is printed, and the exit code says whether it passed."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    report = {
+        "domain": DOMAIN,
+        "version": "1.0.0",
+        "needed": True,
+        "findings": [{"passed": True, "text": "The domain sample_music is free"}],
+    }
+    files.write("work/admission.json", report)
+    failed = {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": "load: x"}
+    files.write(
+        "results/nightly.json",
+        {"line": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [failed]},
+    )
+    results = str(files.root / "results")
+
+    assert _run(files, "check-admission", DOMAIN, results) == 1
+    out = capsys.readouterr().out
+    assert "- ❌ nightly: load: x" in out
+    assert "- ❌ beta: the checks did not run" in out
+    files.write(
+        "results/beta.json",
+        {
+            "line": "beta",
+            "checked": "2026-11-15T03:00:00Z",
+            "results": [{"domain": DOMAIN, "version": "1.0.0", "passed": True}],
+        },
+    )
+    assert _run(files, "check-admission", DOMAIN, results) == 0
+    assert "Every check passed." in capsys.readouterr().out
+    assert _run(files, "check-admission", "other_music", results) == 1
+    assert "admission.json is about sample_music, not other_music" in capsys.readouterr().err

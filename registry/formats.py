@@ -22,6 +22,8 @@ _GITHUB_HANDLE_MAX = 39
 _REPOSITORY_NAME = re.compile(r"[A-Za-z0-9._-]+")
 _PATH_PART = re.compile(r"[A-Za-z0-9._-]+")
 _TAG_PREFIX = re.compile(r"[A-Za-z0-9._/-]*")
+# a container image with a tag, such as ghcr.io/music-assistant/server:nightly
+_IMAGE = re.compile(r"[a-z0-9]+(?:[._/-][a-z0-9]+)*:[A-Za-z0-9_][A-Za-z0-9._-]{0,127}")
 # the same expression as _PLAIN_REQUIREMENT in dependencies.py of the server, which refuses
 # anything else: a package name with optional extras and version specifiers, never a URL or an
 # option for the resolver
@@ -154,6 +156,29 @@ def is_tag_prefix(value: str) -> bool:
     :param value: The value to check.
     """
     return bool(_TAG_PREFIX.fullmatch(value))
+
+
+def release_version(tag: str, tag_prefix: str) -> str | None:
+    """
+    Return the version a release tag names, or None when it names none for this provider.
+
+    :param tag: The tag of the release: the tag prefix and the version, with or without v.
+    :param tag_prefix: What the release tags of the provider start with.
+    """
+    if not tag.startswith(tag_prefix):
+        return None
+    version = tag.removeprefix(tag_prefix)
+    version = version.removeprefix("v")
+    return version if is_version(version) else None
+
+
+def is_image(value: str) -> bool:
+    """
+    Return whether a value names a container image with a tag.
+
+    :param value: The value to check.
+    """
+    return bool(_IMAGE.fullmatch(value))
 
 
 def is_requirement(value: str) -> bool:

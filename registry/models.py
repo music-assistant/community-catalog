@@ -128,9 +128,23 @@ class VersionFile(StrictModel):
 
 
 @dataclass
+class RefusedRelease(StrictModel):
+    """`providers/<domain>/refused/<version>.json`: a release that did not become a version."""
+
+    version: str
+    tag: str
+    commit: str
+    released: str
+    refused: str
+    reason: str
+
+
+@dataclass
 class ServerLine(StrictModel):
     """A server line an index is built for."""
 
+    # the official server image of the line, which the checks of a version run in
+    image: str
     # a frozen line is no longer tested; blocks still reach its index
     frozen: bool = False
 
@@ -154,6 +168,95 @@ class ReservedDomains(StrictModel):
     reserved_names: list[str]
     # built-in providers that move to the community catalog under their own domain
     moving: list[str] = field(default_factory=list)
+
+
+# The files the steps of the release pipeline hand each other in the work folder.
+
+
+@dataclass
+class VersionResult(StrictModel):
+    """The result of the checks of one version."""
+
+    domain: str
+    version: str
+    passed: bool
+    # why the version did not pass, in one line
+    reason: str | None = None
+    # the full output of the check that failed, for the maintainer
+    output: str | None = None
+    # the version passed on this line before, so a failure means it stopped passing
+    passed_before: bool = False
+
+
+@dataclass
+class LineResults(StrictModel):
+    """The results file the check step writes for one server line."""
+
+    line: str
+    checked: str
+    results: list[VersionResult]
+
+
+@dataclass
+class RepositoryState(StrictModel):
+    """What the fetch step learned of a repository on GitHub."""
+
+    owner: str
+    private: bool
+    archived: bool
+    has_issues: bool
+    # the key of the licence GitHub recognises, "other" for one it does not
+    license: str | None
+
+
+@dataclass
+class ProviderVersion(StrictModel):
+    """A version of a provider."""
+
+    domain: str
+    version: str
+
+
+@dataclass
+class FetchReport(StrictModel):
+    """`fetch.json`: what the fetch step found, for the report."""
+
+    # by owner/name
+    repositories: dict[str, RepositoryState]
+    # the releases refused in this run
+    refused: list[ProviderVersion]
+
+
+@dataclass
+class Finding(StrictModel):
+    """The outcome of one admission check."""
+
+    passed: bool
+    text: str
+
+
+@dataclass
+class AdmissionReport(StrictModel):
+    """`admission.json`: the admission checks of a provider before its versions are checked."""
+
+    domain: str
+    findings: list[Finding]
+    # the version of the latest release, when it became a version file
+    version: str | None = None
+    # False when the pull request only changes the status or the blocked versions
+    needed: bool = True
+
+
+@dataclass
+class Issue(StrictModel):
+    """An issue for the maintainer of a provider."""
+
+    # the same failure always has the same key, so it is reported once
+    key: str
+    # owner/name of the repository the issue is opened on
+    repository: str
+    title: str
+    body: str
 
 
 # The index, in the shape the server reads it: CatalogIndex and the classes below it in

@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import tarfile
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -31,6 +34,8 @@ RESERVED = {
     "reserved_names": ["library"],
     "moving": ["moving_one"],
 }
+NIGHTLY_IMAGE = "ghcr.io/music-assistant/server:nightly"
+BETA_IMAGE = "ghcr.io/music-assistant/server:beta"
 # the top-level folder of an archive GitHub serves
 ARCHIVE_ROOT = "someone-sample-0123456"
 
@@ -158,7 +163,15 @@ class Files:
 def files(tmp_path: Path) -> Files:
     """Return a registry without providers, for the lines nightly and beta."""
     registry = Files(tmp_path)
-    registry.write("server_lines.json", {"lines": {"nightly": {}, "beta": {"frozen": False}}})
+    registry.write(
+        "server_lines.json",
+        {
+            "lines": {
+                "nightly": {"image": NIGHTLY_IMAGE},
+                "beta": {"image": BETA_IMAGE, "frozen": False},
+            }
+        },
+    )
     registry.write("reserved_domains.json", RESERVED)
     return registry
 
@@ -214,3 +227,132 @@ def write_tree(folder: Path, content: Mapping[str, bytes]) -> None:
         target = folder / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
+
+
+def provider_archive(domain: str = DOMAIN, code: bytes = b"VALUE = 1\n", **changes: Any) -> bytes:
+    """
+    Return a GitHub archive of a repository with one valid provider in providers/<domain>.
+
+    :param domain: The domain of the provider.
+    :param code: The content of its __init__.py.
+    :param changes: Keys to set in its manifest.
+    """
+    content = json.dumps({**manifest(domain), **changes}).encode()
+    return build_archive(
+        {f"providers/{domain}/manifest.json": content, f"providers/{domain}/__init__.py": code}
+    )
+
+
+class FakeGitHub:
+    """A transport that answers as GitHub does, for the repositories, archives and issues it has."""
+
+    def __init__(self) -> None:
+        """Initialize a GitHub without repositories."""
+        # the GraphQL node of each repository, by owner/name
+        self.repositories: dict[str, dict[str, Any]] = {}
+        # the archive of each commit, by (owner/name, commit)
+        self.archives: dict[tuple[str, str], bytes] = {}
+        # the keys of the issues that exist, by owner/name
+        self.issue_keys: dict[str, set[str]] = {}
+        self.created: list[tuple[str, dict[str, Any]]] = []
+        self.requests: list[urllib.request.Request] = []
+
+    def repository(
+        self,
+        name: str = "someone/ma-sample",
+        releases: Sequence[dict[str, Any]] = (),
+        **changes: Any,
+    ) -> None:
+        """
+        Add a repository.
+
+        :param name: The repository, as owner/name.
+        :param releases: Its releases, newest first, as made by release().
+        :param changes: Fields of the GraphQL node to set.
+        """
+        self.repositories[name] = {
+            "isPrivate": False,
+            "isArchived": False,
+            "hasIssuesEnabled": True,
+            "owner": {"login": name.split("/", maxsplit=1)[0]},
+            "licenseInfo": {"key": "mit"},
+            "releases": {"nodes": list(releases)},
+            **changes,
+        }
+
+    def __call__(self, request: urllib.request.Request) -> tuple[int, bytes]:
+        """Answer a request."""
+        self.requests.append(request)
+        url = request.full_url
+        if url == "https://api.github.com/graphql":
+            return 200, json.dumps(self._graphql(request)).encode()
+        if url.startswith("https://codeload.github.com/"):
+            owner, name, _, commit = url.removeprefix("https://codeload.github.com/").split("/")
+            archive = self.archives.get((f"{owner}/{name}", commit))
+            return (200, archive) if archive is not None else (404, b"Not Found")
+        if url.startswith("https://api.github.com/search/issues?"):
+            query = parse_qs(urlsplit(url).query)["q"][0]
+            key, repository = re.fullmatch(r'"(\w+)" repo:(\S+) is:issue in:body', query).groups()  # type: ignore[union-attr]
+            count = int(key in self.issue_keys.get(repository, set()))
+            return 200, json.dumps({"total_count": count}).encode()
+        if url.startswith("https://api.github.com/repos/") and url.endswith("/issues"):
+            repository = url.removeprefix("https://api.github.com/repos/").removesuffix("/issues")
+            self.created.append((repository, request_json(request)))
+            return 201, json.dumps(
+                {"html_url": f"https://github.com/{repository}/issues/1"}
+            ).encode()
+        return 404, b"{}"
+
+    def _graphql(self, request: urllib.request.Request) -> dict[str, Any]:
+        """Answer a GraphQL query for repositories, by the variables it passes."""
+        assert request.get_header("Authorization") == "Bearer a-token"
+        variables = request_json(request)["variables"]
+        data: dict[str, Any] = {}
+        errors = []
+        for key, owner in variables.items():
+            if not key.startswith("o"):
+                continue
+            number = key.removeprefix("o")
+            name = f"{owner}/{variables[f'n{number}']}"
+            data[f"r{number}"] = self.repositories.get(name)
+            if name not in self.repositories:
+                errors.append({"type": "NOT_FOUND", "path": [f"r{number}"]})
+        return {"data": data, "errors": errors} if errors else {"data": data}
+
+
+def release(
+    tag: str,
+    commit: str = COMMIT,
+    published: str = RELEASED,
+    *,
+    draft: bool = False,
+    prerelease: bool = False,
+) -> dict[str, Any]:
+    """
+    Return a release as the GraphQL API answers it.
+
+    :param tag: The tag of the release.
+    :param commit: The tagged commit.
+    :param published: When it was published.
+    :param draft: Whether it is a draft.
+    :param prerelease: Whether it is a pre-release.
+    """
+    return {
+        "tagName": tag,
+        "isDraft": draft,
+        "isPrerelease": prerelease,
+        "publishedAt": None if draft else published,
+        "tagCommit": {"oid": commit},
+    }
+
+
+def request_json(request: urllib.request.Request) -> dict[str, Any]:
+    """
+    Return the JSON object a request sends.
+
+    :param request: The request.
+    """
+    assert isinstance(request.data, bytes)
+    data = json.loads(request.data)
+    assert isinstance(data, dict)
+    return data
