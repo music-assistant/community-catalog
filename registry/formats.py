@@ -160,9 +160,12 @@ def is_requirement(value: str) -> bool:
     """
     Return whether a value is a requirement the server installs: a package name with specifiers.
 
+    A requirement is one line of printable characters.
+
     :param value: The value to check.
     """
-    return bool(_REQUIREMENT.fullmatch(value))
+    # \s in the expression of the server also matches line breaks and other control characters
+    return value.isprintable() and bool(_REQUIREMENT.fullmatch(value))
 
 
 def is_https_url(value: str) -> bool:

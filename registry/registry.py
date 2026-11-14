@@ -80,6 +80,10 @@ def load_registry(root: Path) -> Registry:
     reserved = _load(root, root / RESERVED_DOMAINS_FILE, ReservedDomains, problems)
     if lines is None or reserved is None:
         raise InvalidRegistryError(problems)
+    # the commands write below these paths, which a link would lead out of the registry
+    written = [PROVIDERS_FOLDER, SITE_FOLDER, INDEX_FOLDER]
+    written += [f"{INDEX_FOLDER}/{line}.json" for line in sorted(lines.lines)]
+    problems += [f"{path}: is a symbolic link" for path in written if (root / path).is_symlink()]
     providers: dict[str, Provider] = {}
     folder = root / PROVIDERS_FOLDER
     for path in _entries(folder):
@@ -123,6 +127,8 @@ def _load_provider(
     problems += [f"{where}/{PROVIDER_FILE}: {p}" for p in check_provider(provider, reserved)]
     versions: dict[str, VersionFile] = {}
     versions_folder = folder / VERSIONS_FOLDER
+    if versions_folder.is_symlink():
+        problems.append(f"{where}/{VERSIONS_FOLDER}: is a symbolic link")
     for path in _entries(versions_folder):
         file = path.relative_to(root).as_posix()
         if path.suffix != ".json" or path.is_symlink() or not path.is_file():
@@ -144,13 +150,13 @@ def _load_provider(
 
 def _entries(folder: Path) -> list[Path]:
     """
-    Return what a folder holds, sorted; nothing when it does not exist.
+    Return what a folder holds, sorted; nothing when it does not exist or is a symbolic link.
 
     Names starting with a dot, such as .DS_Store, are no part of the registry and are skipped.
 
     :param folder: The folder.
     """
-    if not folder.is_dir():
+    if folder.is_symlink() or not folder.is_dir():
         return []
     return sorted(path for path in folder.iterdir() if not path.name.startswith("."))
 
@@ -165,7 +171,10 @@ def _load[T: StrictModel](root: Path, path: Path, model: type[T], problems: list
     :param problems: The list to add a problem to.
     """
     where = path.relative_to(root).as_posix()
-    if path.is_symlink() or not path.is_file():
+    if path.is_symlink():
+        problems.append(f"{where}: is a symbolic link")
+        return None
+    if not path.is_file():
         problems.append(f"{where}: is missing")
         return None
     try:

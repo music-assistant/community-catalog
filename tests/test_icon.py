@@ -64,6 +64,20 @@ def test_icon_that_only_draws(icon: str) -> None:
         (f'<svg {SVG}><rect fill="url(#g"/></svg>', "not closed"),
         (f"<svg {SVG}><style>@import 'https://x/a.css';</style></svg>", "imports a style"),
         (f"<svg {SVG}><style>.a{{fill:url(https://x/g)}}</style></svg>", "refers to"),
+        (f"<svg {SVG}><style>.a{{fill:\\75 rl(https://x/g)}}</style></svg>", "backslash"),
+        (f'<svg {SVG}><rect style="fill:\\75rl(https://x/g)"/></svg>', "backslash"),
+        (f'<svg {SVG}><rect fill="\\75rl(https://x/g)"/></svg>', "backslash"),
+        (f"<svg {SVG}><style>@\\69mport 'https://x/a.css';</style></svg>", "backslash"),
+        (
+            f"<svg {SVG}><style>.a{{}}<desc/>@import 'https://x/a.css';</style></svg>",
+            "a style element holds an element",
+        ),
+        (
+            f"<svg {SVG}><style>.a{{fill:image-set('https://x/a.png' 1x)}}</style></svg>",
+            "image-set",
+        ),
+        (f"<svg {SVG}><style>@font-face{{src:src('https://x/f.woff')}}</style></svg>", "src"),
+        (f'<svg {SVG} xml:base="https://x/"><use href="#p"/></svg>', "XML/1998/namespace}base"),
         (
             f'<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "x.dtd"><svg {SVG}/>',
             "document type",

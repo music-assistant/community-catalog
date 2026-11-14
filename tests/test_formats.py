@@ -96,10 +96,13 @@ def test_date(value: str, valid: bool) -> None:
         ("-r more.txt", False),
         ("pkg; python_version < '3.15'", False),
         ("git+https://github.com/someone/pkg", False),
+        ("foo\n==1", False),
+        ("foo\x0b==1", False),
+        ("foo\t==1", False),
     ],
 )
 def test_requirement(value: str, valid: bool) -> None:
-    """A requirement is what the server installs: a package name with specifiers, nothing else."""
+    """A requirement is one line the server installs: a package name with specifiers only."""
     assert formats.is_requirement(value) is valid
 
 

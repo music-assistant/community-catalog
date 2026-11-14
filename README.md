@@ -27,8 +27,10 @@ catalog is used at the user's own risk.
 | `providers/<domain>/versions/<version>.json` | A released version: the pinned commit, its content hash, its manifest and the result of the checks per server line. Generated. |
 | `server_lines.json` | The server lines an index is built for. |
 | `reserved_domains.json` | The domains a community provider cannot take. |
-| `site/v1/<line>.json` | The index of each server line, generated from the files above. `site/` is what is published. |
+| `site/v1/<line>.json` | The index of each server line, generated from the files above. `site/` is what is published, so it holds nothing else. |
 | `registry/` | The code that checks the files and builds the index. |
+
+No file or folder the commands read or write may be a symbolic link.
 
 ### provider.json
 
@@ -89,13 +91,18 @@ catalog is used at the user's own risk.
 | `folder` | The provider folder in the repository at this commit. |
 | `content_hash` | The content hash of that folder in the GitHub archive of the commit (see below). |
 | `manifest` | The provider's `manifest.json` as it is in the release. Its `domain` is the provider's, its `type` is `music`, `player`, `metadata`, `plugin` or `audio_analysis`. |
-| `requirements` | The requirements of the manifest: package names with version specifiers only, no URLs, markers or options. |
+| `requirements` | The requirements of the manifest: package names with version specifiers only, no URLs, markers or options, each one line of printable characters. |
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
 | `checks` | The result per server line in `server_lines.json`: passed or not, when, and why not. |
 
 All dates are UTC, as `2026-11-14T12:00:00Z`. A file with an unknown key, a missing key or a
 value of another type is refused, as is a JSON object with a key that appears twice.
+
+Every file, and the manifest of a provider, is plain JSON that the server's parser (orjson)
+reads: `NaN`, `Infinity`, a number beyond the range of a double and a lone surrogate are
+refused. A server that cannot read its index keeps its old copy, and with it misses every new
+block.
 
 ### The index
 
@@ -107,8 +114,8 @@ Each `site/v1/<line>.json` holds, for every provider with at least one version f
   Versions are compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
 - `versions`: the five highest of those, each with its commit, folder, content hash,
   requirements and release date;
-- the manifest and icon of `latest`, or of the highest version at all when no version passed
-  for this line.
+- the manifest and icon of `latest`; when no version passed for this line, those of the highest
+  version that is not blocked, or of the highest version when all are blocked.
 
 Blocked and withdrawn providers stay in the index with their versions, so a server recognises
 what it has installed. The output is deterministic: an unchanged registry gives byte-identical
@@ -137,7 +144,9 @@ The `icon.svg` of a provider is handed to every server in the index, so it is at
 budget the server sets for its own provider icons) and only draws: no scripts, no event
 handlers, no elements that link, animate or embed other content, no reference to anything
 outside the file (an `image` may embed a PNG, JPEG, GIF or WebP as a data URI), no document type
-or entity declarations and no editor data such as Inkscape attributes. An icon that does not
+or entity declarations and no editor data such as Inkscape attributes. Rather than parse CSS,
+the check also refuses a backslash in a style sheet or an attribute value, an element inside a
+`style` element, `image-set()`, `src()` and `xml:base`. An icon that does not
 pass is left out of the version, with a warning; a tool such as `svgo` removes most of what is
 refused.
 
@@ -147,6 +156,7 @@ refused.
 - Release by publishing a GitHub release whose tag is the version, such as `v1.2.0`, or the tag
   prefix and the version when the repository holds several providers.
 - Write requirements as package names with version specifiers.
+- Keep `manifest.json` plain JSON: no `NaN` or `Infinity`, and no key twice.
 - A provider never writes into its own folder: that changes its content hash, and the server
   replaces a folder whose hash differs from the index.
 
@@ -193,7 +203,9 @@ reach its index.
 
 `reserved_domains.json` holds the domains a community provider cannot take:
 
-- `builtin_providers`: the providers the server ships;
+- `builtin_providers`: the providers the server ships, every package in its `providers` folder
+  with or without a manifest, as the server's own package wins over a community provider of
+  the same name;
 - `core_controllers`: the core controllers of the server, which share the namespace of provider
   domains;
 - `reserved_names`: names the server gives a meaning of its own, such as `library`;
@@ -209,4 +221,6 @@ Nothing here fetches releases or runs the checks: a version file is added with `
 and its results with `record-check`. The checks on every release (the manifest, the
 dependencies against each server line, the load test in the server images), the issue for a
 maintainer whose release fails, and the admission flow are not in this repository. A
-`provider.json` is added by a pull request that a maintainer of the project reviews.
+`provider.json` is added by a pull request that a maintainer of the project reviews. Nothing
+reads the `frozen` flag of a server line yet: the pipeline that runs the checks will skip a
+frozen line.

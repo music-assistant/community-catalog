@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 from registry.files import dumps, read_object
 from registry.formats import format_date, is_date, version_key
 from registry.models import INDEX_SCHEMA, CatalogIndex, IndexProvider, IndexVersion
-from registry.registry import INDEX_FOLDER
+from registry.registry import INDEX_FOLDER, SITE_FOLDER, InvalidRegistryError
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -52,6 +52,7 @@ def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
 
     :param registry: The registry.
     :param now: When a changed index is generated.
+    :raises InvalidRegistryError: An index is not plain JSON the server reads.
     """
     result: dict[Path, bytes] = {}
     for line in sorted(registry.server_lines):
@@ -60,13 +61,16 @@ def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
         current = _read_current(path)
         if current is not None and _without_generated(current) == _without_generated(index):
             index["generated"] = current["generated"]
-        result[path] = dumps(index)
+        try:
+            result[path] = dumps(index)
+        except ValueError as err:
+            raise InvalidRegistryError([f"{INDEX_FOLDER}/{line}.json: {err}"]) from err
     return result
 
 
 def stale_index_files(registry: Registry, rendered: dict[Path, bytes]) -> list[str]:
     """
-    Return what differs between the index files on disk and the rendered ones.
+    Return what differs between the published folder and the rendered index files.
 
     :param registry: The registry.
     :param rendered: The result of render_indexes.
@@ -78,12 +82,13 @@ def stale_index_files(registry: Registry, rendered: dict[Path, bytes]) -> list[s
             problems.append(f"{where}: is missing")
         elif path.read_bytes() != content:
             problems.append(f"{where}: differs from the registry")
-    folder = registry.root / INDEX_FOLDER
+    # everything in the site folder is published, so it holds the index files and nothing else
+    site = registry.root / SITE_FOLDER
+    index_folder = registry.root / INDEX_FOLDER
     problems += [
         f"{path.relative_to(registry.root).as_posix()}: is no index of a line in server_lines.json"
-        for path in sorted(folder.iterdir() if folder.is_dir() else [])
-        # a hidden file is not published
-        if path not in rendered and not path.name.startswith(".")
+        for path in sorted(site.rglob("*") if site.is_dir() else [])
+        if path != index_folder and not (path in rendered and path.is_file())
     ]
     return problems
 
@@ -96,20 +101,19 @@ def _index_provider(provider: Provider, line: str) -> IndexProvider:
     :param line: The server line.
     """
     file = provider.file
-    passed = sorted(
-        (
-            version
-            for version in provider.versions.values()
-            if (result := version.checks.get(line)) is not None
-            and result.passed
-            and version.version not in file.blocked_versions
-        ),
-        key=lambda version: version_key(version.version),
-        reverse=True,
+    newest_first = sorted(
+        provider.versions.values(), key=lambda version: version_key(version.version), reverse=True
     )
+    allowed = [version for version in newest_first if version.version not in file.blocked_versions]
+    passed = [
+        version
+        for version in allowed
+        if (result := version.checks.get(line)) is not None and result.passed
+    ]
     latest = passed[0] if passed else None
-    # without a version for this line the app still shows the provider by its newest version
-    shown = latest or max(provider.versions.values(), key=lambda v: version_key(v.version))
+    # without a version for this line the app still shows the provider, by its newest version
+    # that is not blocked; a provider with only blocked versions stays in the index all the same
+    shown = latest or (allowed or newest_first)[0]
     return IndexProvider(
         status=file.status,
         repository=file.repository,

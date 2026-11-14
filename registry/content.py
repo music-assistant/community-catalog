@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 import stat
@@ -12,6 +11,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
+
+from registry.files import loads
 
 ICON_FILE = "icon.svg"
 MANIFEST_FILE = "manifest.json"
@@ -145,15 +146,15 @@ def _read_manifest(folder: Path) -> dict[str, Any]:
     Return the manifest of a provider folder.
 
     :param folder: The provider folder.
-    :raises ValueError: The manifest is missing or is not a JSON object.
+    :raises ValueError: The manifest is missing, is not plain JSON or is not a JSON object.
     """
     try:
-        manifest = json.loads((folder / MANIFEST_FILE).read_text(encoding="utf-8"))
+        manifest = loads((folder / MANIFEST_FILE).read_bytes())
     except FileNotFoundError as err:
         msg = f"it has no {MANIFEST_FILE}"
         raise ValueError(msg) from err
     except ValueError as err:
-        msg = f"its {MANIFEST_FILE} is not valid JSON: {err}"
+        msg = f"its {MANIFEST_FILE}: {err}"
         raise ValueError(msg) from err
     if not isinstance(manifest, dict):
         msg = f"its {MANIFEST_FILE} is not a JSON object"

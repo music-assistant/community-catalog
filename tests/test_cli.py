@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import shutil
 from typing import TYPE_CHECKING
+
+import pytest
 
 from registry.cli import main
 from registry.registry import load_registry
@@ -11,8 +14,6 @@ from tests.conftest import COMMIT, DOMAIN, ICON, build_archive, manifest, write_
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    import pytest
 
     from tests.conftest import Files
 
@@ -93,6 +94,36 @@ def test_add_version_refuses_what_is_not_valid(
     assert set(load_registry(files.root).providers[DOMAIN].versions) == {"1.0.0"}
 
 
+@pytest.mark.parametrize("value", ["NaN", '"\\ud800"'])
+def test_add_version_refuses_a_manifest_the_server_cannot_read(
+    files: Files, tmp_path: Path, capsys: pytest.CaptureFixture[str], value: str
+) -> None:
+    """A manifest that is not plain JSON is refused with a message, and nothing is written."""
+    files.provider()
+    folder = tmp_path / DOMAIN
+    content = json.dumps({**manifest(), "extra": "X"}).replace('"X"', value)
+    write_tree(folder, {**PROVIDER, "manifest.json": content.encode()})
+
+    assert _add(files, folder) == 1
+
+    assert "its manifest.json: not valid JSON: " in capsys.readouterr().err
+    assert load_registry(files.root).providers[DOMAIN].versions == {}
+
+
+def test_record_check_refuses_what_is_no_plain_json(
+    files: Files, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reason that cannot be written as plain JSON, such as a lone surrogate, is refused."""
+    files.provider()
+    path = files.version(lines={})
+    before = path.read_bytes()
+
+    assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", "\udcff") == 1
+
+    assert "1.0.0.json: not plain JSON: " in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
 def test_add_version_leaves_out_an_icon_that_is_not_allowed(
     files: Files, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -141,13 +172,15 @@ def test_build_and_validate(files: Files, capsys: pytest.CaptureFixture[str]) ->
 
 
 def test_refresh_reserved(files: Files, tmp_path: Path) -> None:
-    """The built-in providers and core controllers of a server are added, nothing is removed."""
+    """Every provider package and core controller of a server is added, nothing is removed."""
     server = tmp_path / "server"
     write_tree(
         server / "music_assistant",
         {
             "providers/new_one/manifest.json": b'{"domain": "new_one"}',
+            "providers/no_manifest/__init__.py": b"",
             "providers/_demo_one/manifest.json": b'{"domain": "_demo_one"}',
+            "providers/__pycache__/x.pyc": b"",
             "providers/__init__.py": b"",
             "controllers/streams/__init__.py": b"",
             "controllers/__pycache__/x.pyc": b"",
@@ -158,7 +191,61 @@ def test_refresh_reserved(files: Files, tmp_path: Path) -> None:
     assert _run(files, "refresh-reserved", str(server)) == 0
 
     reserved = load_registry(files.root).reserved
-    assert reserved.builtin_providers == ["builtin_one", "moving_one", "new_one"]
+    assert reserved.builtin_providers == ["builtin_one", "moving_one", "new_one", "no_manifest"]
     assert reserved.core_controllers == ["players", "streams"]
     assert reserved.moving == ["moving_one"]
     assert _run(files, "refresh-reserved", str(tmp_path)) == 1
+
+
+@pytest.mark.parametrize(
+    ("link", "command"),
+    [
+        ("providers", ["record-check", DOMAIN, "1.0.0", "nightly", "--passed"]),
+        (f"providers/{DOMAIN}/versions", ["record-check", DOMAIN, "1.0.0", "nightly", "--passed"]),
+        ("site", ["build"]),
+        ("site/v1", ["build"]),
+        ("site/v1/nightly.json", ["build"]),
+        ("reserved_domains.json", ["refresh-reserved", "SERVER"]),
+    ],
+)
+def test_a_symbolic_link_in_the_registry_is_refused(
+    files: Files,
+    tmp_path_factory: pytest.TempPathFactory,
+    capsys: pytest.CaptureFixture[str],
+    link: str,
+    command: list[str],
+) -> None:
+    """Validate reports a link, and no command writes through one out of the registry."""
+    server = tmp_path_factory.mktemp("server")
+    write_tree(
+        server / "music_assistant",
+        {"providers/new_one/__init__.py": b"", "controllers/new_core/__init__.py": b""},
+    )
+    files.provider()
+    files.version("1.0.0", lines={})
+    assert _run(files, "build") == 0
+    # a change every command would write
+    files.version("1.1.0")
+    path = files.root / link
+    outside = tmp_path_factory.mktemp("outside") / path.name
+    shutil.move(path, outside)
+    path.symlink_to(outside, target_is_directory=outside.is_dir())
+    before = _tree(outside)
+    capsys.readouterr()
+
+    assert _run(files, "validate") == 1
+    assert f"{link}: is a symbolic link" in capsys.readouterr().err
+    assert _run(files, *[str(server) if arg == "SERVER" else arg for arg in command]) == 1
+    assert f"{link}: is a symbolic link" in capsys.readouterr().err
+    assert _tree(outside) == before
+
+
+def _tree(path: Path) -> dict[str, bytes]:
+    """Return the content of a file, or of every file below a folder, by relative path."""
+    if path.is_file():
+        return {"": path.read_bytes()}
+    return {
+        item.relative_to(path).as_posix(): item.read_bytes()
+        for item in path.rglob("*")
+        if item.is_file()
+    }

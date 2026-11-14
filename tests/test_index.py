@@ -6,8 +6,11 @@ import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+import orjson
+import pytest
+
 from registry.index import build_index, render_indexes, stale_index_files
-from registry.registry import load_registry
+from registry.registry import InvalidRegistryError, load_registry
 from tests.conftest import ADDED, COMMIT, CONTENT_HASH, DOMAIN, ICON, RELEASED, manifest
 
 if TYPE_CHECKING:
@@ -155,6 +158,22 @@ def test_a_provider_without_a_version_for_the_line(files: Files) -> None:
     assert provider["manifest"] == manifest()
 
 
+def test_a_provider_without_a_version_for_the_line_is_not_shown_by_a_blocked_one(
+    files: Files,
+) -> None:
+    """The newest version that is not blocked shows the provider; the newest when all are."""
+    files.provider(blocked_versions={"2.0.0": "Sends the library elsewhere"})
+    files.version("1.0.0", lines={"beta": True})
+    files.version("2.0.0", lines={"nightly": False}, manifest=manifest(), requirements=[])
+
+    provider = _index(files)["providers"][DOMAIN]
+
+    assert provider["latest"] is None
+    assert provider["manifest"] == manifest(DOMAIN, ["some-package==1.0"])
+    files.provider(blocked_versions={"1.0.0": "x", "2.0.0": "x"})
+    assert _index(files)["providers"][DOMAIN]["manifest"] == manifest()
+
+
 def test_a_provider_without_any_version_is_left_out(files: Files) -> None:
     """A provider that has no version file yet is not in the index."""
     files.provider()
@@ -202,12 +221,59 @@ def test_a_changed_index_gets_a_new_date(files: Files) -> None:
 
 
 def test_missing_and_unexpected_index_files(files: Files) -> None:
-    """Every line has its index file, and the published folder holds no other file."""
+    """Every line has its index file, and the published folder holds nothing else."""
     files.write("site/v1/2.10.json", "{}")
+    files.write("site/v1/.hidden", "x")
+    files.write("site/index.html", "x")
+    files.write("site/v2/nightly.json", "{}")
+    (files.root / "site/linked").symlink_to(files.root, target_is_directory=True)
     registry = load_registry(files.root)
 
     assert stale_index_files(registry, render_indexes(registry, NOW)) == [
         "site/v1/beta.json: is missing",
         "site/v1/nightly.json: is missing",
+        "site/index.html: is no index of a line in server_lines.json",
+        "site/linked: is no index of a line in server_lines.json",
+        "site/v1/.hidden: is no index of a line in server_lines.json",
         "site/v1/2.10.json: is no index of a line in server_lines.json",
+        "site/v2: is no index of a line in server_lines.json",
+        "site/v2/nightly.json: is no index of a line in server_lines.json",
     ]
+
+
+def test_every_index_is_read_by_the_server_parser(files: Files) -> None:
+    """Each index the registry can generate reads the same with orjson, the server's parser."""
+    text = 'Ünïcødé 🎵 \u2028 \x00 \\ " </script>'
+    files.provider(blocked_versions={"1.2.0": text})
+    for version, lines in {
+        "1.0.0": {"nightly": True, "beta": True},
+        "1.1.0": {"beta": False},
+        "1.2.0": {"nightly": True},
+        "1.3.0": {},
+    }.items():
+        data = {**manifest(), "name": text, "nested": [{"a": 1.5, "b": None, "c": 2**63}]}
+        files.version(version, lines=lines, manifest=data, requirements=[])
+    files.provider("withdrawn_one", status="withdrawn", reason=text)
+    files.version(domain="withdrawn_one", icon_svg=None)
+    files.provider(
+        "blocked_one",
+        status="blocked",
+        reason="x",
+        reason_url="https://x.org/1",
+        blocked_versions={"1.0.0": "x"},
+    )
+    files.version(domain="blocked_one", lines={"beta": False})
+
+    for path, content in render_indexes(load_registry(files.root), NOW).items():
+        assert orjson.loads(content) == json.loads(content), path.name
+
+
+def test_an_index_the_server_cannot_read_is_refused(files: Files) -> None:
+    """An index is only rendered when it is plain JSON the server's parser reads."""
+    files.provider()
+    files.version()
+    registry = load_registry(files.root)
+    registry.providers[DOMAIN].versions["1.0.0"].manifest["extra"] = float("nan")
+
+    with pytest.raises(InvalidRegistryError, match=r"site/v1/beta\.json: not plain JSON"):
+        render_indexes(registry, NOW)

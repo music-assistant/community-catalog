@@ -105,6 +105,9 @@ def check_icon(svg: str) -> None:
         for key, value in element.attrib.items():
             _check_attribute(name, key, value)
         if name == "style":
+            # only the text before a first child would be checked
+            if len(element):
+                raise ValueError("a style element holds an element")
             _check_style(element.text or "")
 
 
@@ -118,7 +121,8 @@ def _check_attribute(element: str, key: str, value: str) -> None:
     :raises ValueError: The attribute is not allowed.
     """
     namespace, name = _split(key)
-    if namespace not in {"", _XLINK, _XML}:
+    # xml:base would turn a reference within the icon into one outside it
+    if namespace not in {"", _XLINK, _XML} or (namespace, name) == (_XML, "base"):
         msg = f"the attribute {key} of {element} is not allowed"
         raise ValueError(msg)
     if name.lower().startswith("on"):
@@ -146,12 +150,20 @@ def _check_style(css: str) -> None:
 
 def _check_urls(where: str, value: str) -> None:
     """
-    Check that every url() in a value refers to an element within the icon.
+    Check that a value refers to nothing but elements within the icon.
 
     :param where: What holds the value, for the message.
     :param value: An attribute value or a style sheet.
-    :raises ValueError: A url() refers to something outside the icon.
+    :raises ValueError: The value can refer to something outside the icon.
     """
+    # refused rather than parsed: a CSS escape can spell url( or @import, and image-set() and
+    # src() take an address without url()
+    if "\\" in value:
+        msg = f"{where} holds a backslash"
+        raise ValueError(msg)
+    if "image-set" in value.lower() or "src(" in value.lower():
+        msg = f"{where} holds image-set() or src()"
+        raise ValueError(msg)
     targets = [match.group(2) for match in _URL.finditer(value)]
     if len(targets) != len(_URL_START.findall(value)):
         msg = f"{where} holds a url() that is not closed"

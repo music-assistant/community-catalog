@@ -126,13 +126,17 @@ def _content_hash(args: argparse.Namespace) -> None:
 def _refresh_reserved(args: argparse.Namespace) -> None:
     """Add the built-in providers and core controllers of server checkouts to the reserved list."""
     path = args.root / RESERVED_DOMAINS_FILE
+    if path.is_symlink():
+        msg = f"{RESERVED_DOMAINS_FILE}: is a symbolic link"
+        raise CommandError(msg)
     try:
         reserved = load_model(path, ReservedDomains)
         for server in args.servers:
             reserved = add_server_domains(reserved, server)
+        content = dumps(reserved.to_dict())
     except (ValueError, OSError) as err:
         raise CommandError(str(err)) from err
-    path.write_bytes(dumps(reserved.to_dict()))
+    path.write_bytes(content)
     print(f"wrote {RESERVED_DOMAINS_FILE}")
 
 
@@ -172,8 +176,12 @@ def _write_version(registry: Registry, domain: str, version: VersionFile) -> Non
     problems = check_version(version, registry.providers[domain].file, registry.server_lines)
     if problems:
         raise InvalidRegistryError([f"{where}: {problem}" for problem in problems])
+    try:
+        content = dumps(version.to_dict())
+    except ValueError as err:
+        raise InvalidRegistryError([f"{where}: {err}"]) from err
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(dumps(version.to_dict()))
+    path.write_bytes(content)
     print(f"wrote {where}")
 
 

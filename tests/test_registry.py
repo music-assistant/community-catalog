@@ -100,6 +100,17 @@ def test_unreadable_provider_file(files: Files, content: str | bytes, problem: s
     assert problem in found
 
 
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity", "1e400", '"\\ud800"'])
+def test_json_the_server_refuses(files: Files, value: str) -> None:
+    """A file holds plain JSON, which the server's parser reads: not what only json accepts."""
+    files.provider()
+    content = json.dumps(version_file(manifest={**manifest(), "extra": "X"}))
+    files.write(VERSION, content.replace('"X"', value))
+
+    [found] = _problems(files)
+    assert found.startswith(f"{VERSION}: not valid JSON: ")
+
+
 @pytest.mark.parametrize(
     ("changes", "problem"),
     [
