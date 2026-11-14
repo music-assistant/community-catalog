@@ -1,0 +1,322 @@
+"""Tests for reading and checking the files of the registry."""
+
+from __future__ import annotations
+
+import json
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from registry.registry import InvalidRegistryError, load_registry
+from tests.conftest import DOMAIN, ROOT, manifest, provider_file, version_file
+
+if TYPE_CHECKING:
+    from tests.conftest import Files
+
+PROVIDER = f"providers/{DOMAIN}/provider.json"
+VERSION = f"providers/{DOMAIN}/versions/1.0.0.json"
+
+
+def _problems(files: Files) -> list[str]:
+    """Return the problems the registry has, failing when it has none."""
+    with pytest.raises(InvalidRegistryError) as err:
+        load_registry(files.root)
+    return err.value.problems
+
+
+def test_repository_itself_is_valid() -> None:
+    """The files of this repository are valid."""
+    registry = load_registry(ROOT)
+
+    assert set(registry.server_lines) >= {"nightly", "beta"}
+
+
+def test_valid_registry(files: Files) -> None:
+    """A registry of valid files loads, with every provider and version."""
+    files.provider()
+    files.version("1.0.0")
+    files.version("1.1.0", tag="v1.1.0")
+    files.provider("moving_one", folder="moving_one")
+
+    registry = load_registry(files.root)
+
+    assert set(registry.providers) == {DOMAIN, "moving_one"}
+    assert set(registry.providers[DOMAIN].versions) == {"1.0.0", "1.1.0"}
+
+
+def test_registry_without_providers_folder(files: Files) -> None:
+    """A registry without the providers folder has no providers."""
+    assert load_registry(files.root).providers == {}
+
+
+@pytest.mark.parametrize(
+    ("file", "problem"),
+    [
+        ("server_lines.json", "server_lines.json: is missing"),
+        ("reserved_domains.json", "reserved_domains.json: is missing"),
+    ],
+)
+def test_missing_file(files: Files, file: str, problem: str) -> None:
+    """The server lines and the reserved domains are needed."""
+    (files.root / file).unlink()
+
+    assert _problems(files) == [problem]
+
+
+@pytest.mark.parametrize(
+    ("lines", "problem"),
+    [
+        ({"lines": {"stable": {}}}, "'stable' is not a server line"),
+        ({"lines": {}}, "there is no server line"),
+        ({"lines": {"nightly": {"frozen": "no"}}}, "lines.frozen: expected bool, got str"),
+    ],
+)
+def test_server_lines(files: Files, lines: dict[str, Any], problem: str) -> None:
+    """Every server line is nightly, beta or MAJOR.MINOR, and there is at least one."""
+    files.write("server_lines.json", lines)
+
+    [found] = _problems(files)
+    assert found.startswith("server_lines.json: ")
+    assert problem in found
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        ("{", "not valid JSON"),
+        ("[]", "not a JSON object"),
+        ('{"domain": "a", "domain": "b"}', "the key 'domain' appears twice"),
+        (b"\xff", "not UTF-8"),
+    ],
+)
+def test_unreadable_provider_file(files: Files, content: str | bytes, problem: str) -> None:
+    """A provider.json that is not one JSON object with unique keys is refused."""
+    path = files.root / PROVIDER
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content if isinstance(content, bytes) else content.encode())
+
+    [found] = _problems(files)
+    assert found.startswith(f"{PROVIDER}: ")
+    assert problem in found
+
+
+@pytest.mark.parametrize(
+    ("changes", "problem"),
+    [
+        ({"status": None}, "status: is missing"),
+        ({"homepage": "x"}, "unknown key homepage"),
+        ({"maintainers": "someone"}, "must be a list"),
+        ({"maintainers": [1]}, "maintainers: expected str, got int"),
+        ({"status": "hidden"}, "status: 'hidden' is not a valid ProviderStatus"),
+        ({"admission": {"decided_by": "x", "decided": "2026-10-01T12:00:00Z"}}, "pull_request"),
+        ({"admission": {"decided_by": "x", "decided": "x", "pull_request": "1"}}, "admission"),
+    ],
+)
+def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str) -> None:
+    """A provider.json has exactly the declared keys, each of its declared type."""
+    files.provider(**changes)
+
+    [found] = _problems(files)
+    assert found.startswith(f"{PROVIDER}: ")
+    assert problem in found
+
+
+@pytest.mark.parametrize(
+    ("domain", "changes", "problem"),
+    [
+        ("Sample", {}, "domain: 'Sample' is not a provider domain"),
+        ("builtin_one", {}, "domain: builtin_one is a provider the server ships"),
+        ("players", {}, "domain: players is a core controller of the server"),
+        ("library", {}, "domain: library is a name the server reserves"),
+        (DOMAIN, {"repository": "someone"}, "repository: 'someone' is not a GitHub owner/name"),
+        (DOMAIN, {"folder": "providers/other"}, "folder: 'providers/other' is not a relative"),
+        (DOMAIN, {"tag_prefix": "a b"}, "tag_prefix: 'a b' is not allowed in a tag"),
+        (DOMAIN, {"maintainers": []}, "maintainers: there is none"),
+        (DOMAIN, {"maintainers": ["@someone"]}, "maintainers: '@someone' is not a GitHub handle"),
+        (DOMAIN, {"maintainers": ["Someone", "someone"]}, "maintainers: a handle appears twice"),
+        (DOMAIN, {"reason": "x"}, "reason: a listed provider has no reason or reason_url"),
+        (DOMAIN, {"status": "blocked"}, "reason: a blocked provider needs a reason"),
+        (
+            DOMAIN,
+            {"status": "withdrawn", "reason": " "},
+            "reason: a withdrawn provider needs a reason",
+        ),
+        (
+            DOMAIN,
+            {"status": "blocked", "reason": "x", "reason_url": "http://x"},
+            "reason_url: 'http://x' is not an https address",
+        ),
+        (DOMAIN, {"added": "2026-10-01"}, "added: '2026-10-01' is not a date in UTC"),
+        (
+            DOMAIN,
+            {
+                "admission": {
+                    "decided_by": "x",
+                    "decided": "2026-10-01T12:00:00Z",
+                    "pull_request": 0,
+                }
+            },
+            "admission.pull_request: 0 is no pull request",
+        ),
+        (DOMAIN, {"blocked_versions": {"1.0": "x"}}, "blocked_versions: '1.0' is not a version"),
+    ],
+)
+def test_provider_file_rules(
+    files: Files, domain: str, changes: dict[str, Any], problem: str
+) -> None:
+    """Each value of a provider.json follows its rule."""
+    files.write(
+        f"providers/{domain}/provider.json", provider_file(domain, **{"folder": domain, **changes})
+    )
+
+    problems = _problems(files)
+
+    assert f"providers/{domain}/provider.json: {problem}" in "\n".join(problems)
+
+
+def test_domain_must_be_the_folder_name(files: Files) -> None:
+    """The domain in provider.json is the name of its folder."""
+    files.write(f"providers/{DOMAIN}/provider.json", provider_file("other_music"))
+
+    assert f"{PROVIDER}: domain: other_music is not {DOMAIN}" in _problems(files)
+
+
+def test_a_provider_that_moves_out_of_the_server_takes_its_domain(files: Files) -> None:
+    """A built-in domain listed as moving can be admitted; any other built-in domain cannot."""
+    files.provider("moving_one", folder="moving_one")
+
+    assert set(load_registry(files.root).providers) == {"moving_one"}
+
+
+def test_unexpected_files(files: Files) -> None:
+    """A provider folder holds only provider.json and versions, versions only version files."""
+    files.provider()
+    files.write(f"providers/{DOMAIN}/README.md", "x")
+    files.write(f"providers/{DOMAIN}/versions/notes.txt", "x")
+    files.write("providers/stray.json", "{}")
+
+    assert _problems(files) == [
+        f"providers/{DOMAIN}/README.md: is not a file of the registry",
+        f"providers/{DOMAIN}/versions/notes.txt: is not a version file",
+        "providers/stray.json: is not a provider folder",
+    ]
+
+
+def test_provider_folder_without_provider_file(files: Files) -> None:
+    """A provider folder needs a provider.json."""
+    files.version()
+
+    assert _problems(files) == [f"{PROVIDER}: is missing"]
+
+
+@pytest.mark.parametrize(
+    ("changes", "problem"),
+    [
+        ({"commit": None}, "commit: is missing"),
+        (
+            {"checks": {"nightly": {"passed": "yes", "checked": "x"}}},
+            "checks.passed: expected bool",
+        ),
+        ({"tag": "1.0"}, "tag: '1.0' is not one of 1.0.0, v1.0.0"),
+        ({"commit": "0123abcd"}, "commit: '0123abcd' is not a full commit SHA"),
+        ({"commit": "0123456789ABCDEF0123456789ABCDEF01234567"}, "commit: '0123456789ABCDEF"),
+        ({"content_hash": "e3b0c442"}, "content_hash: 'e3b0c442' is not a sha256 hex digest"),
+        ({"folder": "providers/other"}, "folder: 'providers/other' is not a relative path"),
+        ({"manifest": manifest("other_music")}, "manifest.domain: 'other_music' is not"),
+        ({"manifest": {**manifest(), "type": "core"}}, "manifest.type: 'core' is not one of"),
+        ({"manifest": {**manifest(), "name": ""}}, "manifest.name: is missing or empty"),
+        ({"manifest": {**manifest(), "codeowners": "@x"}}, "manifest.codeowners: is not a list"),
+        (
+            {
+                "manifest": manifest(requirements=["x @ https://x"]),
+                "requirements": ["x @ https://x"],
+            },
+            "requirements: 'x @ https://x' is not a package name with version specifiers",
+        ),
+        ({"requirements": []}, "requirements: differ from the requirements in the manifest"),
+        ({"released": "2026-11-01T12:00:00+01:00"}, "released: '2026-11-01T12:00:00+01:00'"),
+        ({"icon_svg": "<svg/>"}, "icon_svg: its root element is not an SVG element"),
+        (
+            {"checks": {"2.10": {"passed": True, "checked": "2026-11-02T03:00:00Z"}}},
+            "checks: '2.10' is not a line in server_lines.json",
+        ),
+        (
+            {"checks": {"nightly": {"passed": False, "checked": "2026-11-02T03:00:00Z"}}},
+            "checks.nightly: a version that did not pass needs a reason",
+        ),
+        (
+            {
+                "checks": {
+                    "nightly": {"passed": True, "checked": "2026-11-02T03:00:00Z", "reason": "x"}
+                }
+            },
+            "checks.nightly: a version that passed has no reason",
+        ),
+        (
+            {"checks": {"nightly": {"passed": True, "checked": "today"}}},
+            "checks.nightly.checked: 'today' is not a date",
+        ),
+    ],
+)
+def test_version_file_rules(files: Files, changes: dict[str, Any], problem: str) -> None:
+    """Each value of a version file follows its rule."""
+    files.provider()
+    files.version(**changes)
+
+    problems = _problems(files)
+
+    assert f"{VERSION}: {problem}" in "\n".join(problems)
+
+
+def test_version_must_be_the_file_name(files: Files) -> None:
+    """The version in a version file is the name of the file, so a version appears once."""
+    files.provider()
+    files.write(VERSION, version_file("1.0.1", tag="v1.0.1"))
+
+    assert _problems(files) == [f"{VERSION}: version: 1.0.1 is not 1.0.0"]
+
+
+def test_version_is_major_minor_patch(files: Files) -> None:
+    """A version with another spelling, which could name a version twice, is refused."""
+    files.provider()
+    files.write(f"providers/{DOMAIN}/versions/1.0.json", version_file("1.0", tag="v1.0"))
+
+    assert f"providers/{DOMAIN}/versions/1.0.json: version: '1.0' is not a version" in "\n".join(
+        _problems(files)
+    )
+
+
+def test_tag_with_prefix(files: Files) -> None:
+    """With a tag prefix, the tag is the prefix and the version, with or without v."""
+    files.provider(tag_prefix="sample-")
+    files.version("1.0.0", tag="sample-1.0.0")
+    files.version("1.1.0", tag="sample-v1.1.0")
+    files.version("1.2.0", tag="v1.2.0")
+
+    assert _problems(files) == [
+        (
+            f"providers/{DOMAIN}/versions/1.2.0.json: tag: 'v1.2.0' is not one of sample-1.2.0, "
+            "sample-v1.2.0"
+        )
+    ]
+
+
+def test_blocked_version_needs_a_version_file(files: Files) -> None:
+    """A blocked version is one of the versions of the provider."""
+    files.provider(blocked_versions={"1.0.0": "Sends data elsewhere", "2.0.0": "x"})
+    files.version("1.0.0")
+
+    assert _problems(files) == [f"{PROVIDER}: blocked_versions: 2.0.0 has no version file"]
+
+
+def test_every_problem_is_reported(files: Files) -> None:
+    """All problems of all files are reported at once, each with its file."""
+    files.provider(repository="x")
+    files.version(commit="x")
+    files.write("providers/other_music/provider.json", json.dumps({}))
+
+    problems = _problems(files)
+
+    assert any(p.startswith(f"{PROVIDER}: repository") for p in problems)
+    assert any(p.startswith(f"{VERSION}: commit") for p in problems)
+    assert any(p.startswith("providers/other_music/provider.json: ") for p in problems)

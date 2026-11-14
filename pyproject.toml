@@ -71,4 +71,7 @@ ignore = [
 convention = "pep257"
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["PLR2004"]
+"tests/**" = [
+  "FBT001", # parametrized expectations
+  "PLR2004", # magic values are the expectations
+]
