@@ -39,6 +39,8 @@ No file or folder the commands read or write may be a symbolic link.
 {
   "domain": "sample_music",
   "repository": "someone/ma-sample-music",
+  "repository_id": 123456789,
+  "owner_id": 987654,
   "folder": "sample_music",
   "tag_prefix": "",
   "maintainers": ["someone"],
@@ -55,9 +57,10 @@ No file or folder the commands read or write may be a symbolic link.
 |---|---|
 | `domain` | Lower case letters, digits and underscores, starting with a letter. Equals the name of the folder in `providers/`, and is not a domain the server ships or reserves. |
 | `repository` | The GitHub repository as `owner/name`. |
+| `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename or a transfer keeps them; another repository under the same name has others, and nothing of it is fetched until a registry maintainer updates them. The admission checks print the right ones. |
 | `folder` | The provider folder in that repository, such as `sample_music` or `providers/sample_music`. Its last part is the domain. |
 | `tag_prefix` | Optional. What the release tags of this provider start with, for a repository that holds several providers. |
-| `maintainers` | GitHub handles, without `@`. At least one. |
+| `maintainers` | GitHub handles, without `@`. At least one, at most 10, each the owner of the repository or a code owner in the manifest of the provider. Only they are mentioned in an issue on this repository. |
 | `status` | `listed`, `withdrawn` (offered no longer; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
 | `blocked_versions` | Version to reason. A blocked version is loaded by no server. |
@@ -91,11 +94,11 @@ No file or folder the commands read or write may be a symbolic link.
 | `commit` | The full SHA of the tagged commit, in lower case. |
 | `folder` | The provider folder in the repository at this commit. |
 | `content_hash` | The content hash of that folder in the GitHub archive of the commit (see below). |
-| `manifest` | The provider's `manifest.json` as it is in the release. Its `domain` is the provider's, its `type` is `music`, `player`, `metadata`, `plugin` or `audio_analysis`. |
-| `requirements` | The requirements of the manifest: package names with version specifiers only, no URLs, markers or options, each one line of printable characters. |
+| `manifest` | The provider's `manifest.json` as it is in the release. Its `domain` is the provider's, its `type` is `music`, `player`, `metadata`, `plugin` or `audio_analysis`. At most 16 KiB as compact JSON, with at most 10 `codeowners`. |
+| `requirements` | The requirements of the manifest: at most 50 package names with version specifiers only, no URLs, markers or options, each one line of at most 100 printable characters. |
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
-| `checks` | The result per server line in `server_lines.json`: passed or not, when, and why not. |
+| `checks` | The result per server line in `server_lines.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
 
 ### refused/\<version\>.json
 
@@ -110,8 +113,8 @@ No file or folder the commands read or write may be a symbolic link.
 }
 ```
 
-A version has a version file or a refused file, never both. Deleting a refused file makes the
-pipeline try the release again.
+The reason holds at most 2000 characters. A version has a version file or a refused file, never
+both. Deleting a refused file makes the pipeline try the release again.
 
 All dates are UTC, as `2026-11-14T12:00:00Z`. A file with an unknown key, a missing key or a
 value of another type is refused, as is a JSON object with a key that appears twice.
@@ -137,6 +140,10 @@ Each `site/v1/<line>.json` holds, for every provider with at least one version f
 Blocked and withdrawn providers stay in the index with their versions, so a server recognises
 what it has installed. The output is deterministic: an unchanged registry gives byte-identical
 files, and `generated` changes only when the content of that index changes.
+
+An index file holds at most 4 MiB: a server gives up on an index it cannot download within 10
+seconds and keeps its old copy, with which it misses every new block. `build` and `validate`
+refuse a larger one. The limits on a manifest and its requirements keep each provider small.
 
 ### The content hash
 
@@ -173,7 +180,8 @@ refused.
 - Release by publishing a GitHub release whose tag is the version, such as `v1.2.0`, or the tag
   prefix and the version when the repository holds several providers.
 - Write requirements as package names with version specifiers.
-- Keep `manifest.json` plain JSON: no `NaN` or `Infinity`, and no key twice.
+- Keep `manifest.json` plain JSON: no `NaN` or `Infinity`, and no key twice; at most 16 KiB,
+  50 requirements and 10 code owners.
 - A provider never writes into its own folder: that changes its content hash, and the server
   replaces a folder whose hash differs from the index.
 - Run the checks of the catalog on your own pull requests with the reusable workflow
@@ -210,14 +218,15 @@ The commands of the release pipeline, which the workflows run:
 
 | Command | What it does |
 |---|---|
-| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `fetch.json` there. Needs `GITHUB_TOKEN`. |
-| `check --line <line> --output <file>` | Runs inside the server image of the line. Checks every version that needs a result and writes the results file; it changes nothing else. |
+| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `plan.json` (what to check on each line) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
+| `check --line <line> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the line. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
-| `apply-results <folder>` | Records the results files in the version files and writes the index files. |
-| `report <folder>` | Writes an issue for every failed check and every refused release into the work folder. |
-| `post-issues` | Opens those issues, each one unless an issue with its key exists. Needs `GITHUB_TOKEN`. |
-| `prepare-admission <domain> --pull-request <checkout> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file. Needs `GITHUB_TOKEN`. |
-| `check-admission <domain> <folder>` | Prints the result of the admission checks with the check results of the latest release. |
+| `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. |
+| `report <folder>` | Writes an issue for every failed check, every refused release and every repository that is not the admitted one into the work folder. |
+| `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
+| `prepare-admission --pull-request <checkout> --changed <file> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file and the plan. `--changed` lists the files the pull request changes. Needs `GITHUB_TOKEN`. |
+| `check-admission <folder>` | Prints the result of the admission checks with the check results of the latest release. |
+| `check-changes <file>` | Fails when a pull request adds or changes a version file or a refusal; the file lists the changed paths, separated by NUL characters. |
 
 The work folder is `work/` in the root unless `--work` names another. It is never committed.
 
@@ -268,56 +277,77 @@ branch of the server; a domain leaves the list by hand, once no supported server
 
 ## The release pipeline
 
-The workflow `releases.yml` runs every night and on request. Its jobs share only files:
+The workflow `releases.yml` runs every night and on request; only a run on `main` records or
+reports anything. Its jobs share only files:
 
 1. **Fetch** reads the releases of every provider that is not blocked, many repositories per
-   GraphQL request. It takes the most recently published release whose tag names a version of
-   the provider (drafts and pre-releases are ignored), when that version has neither a version
-   file nor a refused file. So of several releases since the last night only the newest is taken.
-   It downloads the archive of the tagged commit and runs `add-version` on it: what that refuses
-   becomes a refused file with the reason, and the release is not tried again. An archive that
-   cannot be downloaded is tried again the next night. It then downloads the archives of every
-   version the check step needs.
+   GraphQL request, with the ids of each repository and its owner. A provider whose repository
+   has other ids than its `provider.json` is skipped and reported, and so is one whose
+   repository GitHub could not answer for; the others are fetched all the same. It takes the
+   most recently published release whose tag names a version of the provider (drafts and
+   pre-releases are ignored), when that version has neither a version file nor a refused file.
+   So of several releases since the last night only the newest is taken. It streams the archive
+   of the tagged commit to disk, at most 100 MiB, and runs `add-version` on it: what that refuses
+   (also a larger archive, or a provider folder of more than 100 MiB) becomes a refused file with
+   the reason, and the release is not tried again. An archive that cannot be downloaded is tried
+   again the next night. It then downloads the archives of every version the check step needs,
+   and writes the plan: per line that is tested, the versions to check whose archive it has.
+   Those are the versions without a result for the line, the current `latest` of each provider
+   on the line, and the three newest versions above it that are not blocked, so a version that
+   failed once (on a night the server image was broken, say) can pass again.
 2. **Check** runs once per line that is not frozen, inside the official server image of that
-   line. It checks every version without a result for the line, and the current `latest` of each
-   provider on the line again, which is how a provider that stops working on a line is found:
-   * the content: the provider folder is unpacked from the archive and its content hash compared
-     with the version file;
-   * the dependencies: the requirements are resolved against the packages of that server by the
-     server's own code (`CommunityDependencies` of the community catalog controller), so the
-     verdict is what a server of that line decides. A clash with the server, or a requirement
-     that cannot be installed, fails the version with the explanation of the resolver;
-   * the load: the requirements are installed into a scratch folder, and in a process of its
-     own the manifest is parsed and the module imported the way the server does for a community
-     provider. A manifest the server refuses or an import that fails fails the version.
+   line. For each version of the plan, `scripts/check-line.sh` runs two containers:
+   * **install**, with network, runs no provider code: the provider folder is unpacked from the
+     archive and its content hash compared with the version file, then the requirements are
+     resolved against the packages of that server by the server's own code
+     (`CommunityDependencies` of the community catalog controller, wheels only) and installed
+     into a scratch folder, so the verdict is what a server of that line decides. A clash with
+     the server, or a requirement that cannot be installed, fails the version with the
+     explanation of the resolver;
+   * **load**, without network and with the scratch folder read-only, unpacks the folder again
+     and, in a process of its own, parses the manifest and imports the module the way the server
+     does for a community provider. A manifest the server refuses, an import that fails or one
+     that takes more than 300 seconds fails the version; every process the import started is
+     ended with it, and the issue gets the last 50 kB of its output.
 
-   A check that cannot run (the package index cannot be reached) gives no result; the version is
-   checked again the next night. The provider's own tests are not run.
+   A check that cannot run (the package index cannot be reached, a container that runs out of
+   time) gives no result; the version is checked again the next night. The provider's own tests
+   are not run.
 3. **Apply** records the results with the rules of `record-check`, writes the index files,
    validates and pushes, as the Music Assistant Bot app. A version that stops passing on a line
    leaves that line's index: the newest version that still passes there becomes `latest`. The
    push starts the Publish workflow.
 4. **Report** writes an issue for every version that failed a check on a line (first checks and
-   versions that stopped passing) and every release refused in this run. The issue goes to the
-   provider's repository, or to this repository, mentioning the maintainers, when that repository
-   has issues switched off. Each issue has a key, written into its body, that is the same for the
-   same failure; an issue is not opened when one with its key exists. Opening them is switched on
-   with the repository variable `POST_ISSUES`; until then they are kept as an artifact of the run.
+   versions that stopped passing), every release refused in this run, and every repository that
+   is not the admitted one. The issue goes to the provider's repository, or to this repository,
+   mentioning the maintainers of its `provider.json`, when that repository has issues switched
+   off or is not the admitted one. Each issue has a key, written into its body, that is the same
+   for the same failure; an issue is not opened when the account that opens them opened one with
+   its key before. Everything a provider controls (reasons, output, manifest values) is shown as
+   code. Opening them is switched on with the repository variable `POST_ISSUES`; until then they
+   are kept as an artifact of the run.
 
 ### Provider code runs without secrets
 
 The check executes provider code, so it runs in a job of its own:
 
-- the job has no permissions, no checkout and no token: it gets the registry and the archives
-  from the artifact of the fetch job;
-- the provider code runs only inside `docker run` of the server image, which gets none of the
-  job's environment, the files of the registry read-only, and one empty folder for its results
-  file;
-- the job only uploads that results file. The apply job, which can push, reads it as data with
-  the same checks as any other change to a version file, runs only its own checked out code, and
-  takes nothing else from the check jobs.
+- the job has no permissions, no checkout and no token: it gets the registry, the archives and
+  the plan from the artifact of the fetch job, which ran no provider code;
+- the provider code runs only inside `docker run` of the server image: one container per version
+  and stage, which gets none of the job's environment, the files of the registry read-only, a
+  scratch folder of that version and one empty folder for its results file, and runs as a user
+  without privileges, with at most 512 processes, 4 GiB of memory and a time limit;
+- after each container has ended, the script copies only the results file the container was
+  asked for, when it is a regular file below 200 kB, to the name the plan gives that version
+  (`<line>/<domain>-<version>.json`); links, folders and anything else a container wrote are
+  left behind, and only those copies are uploaded;
+- the apply job, which can push, runs only its own checked out code and reads a result only at
+  the name the plan gives it, when it holds exactly one result of that line, provider and
+  version, with a reason of one line. Anything else is ignored with a warning, and a result that
+  cannot be recorded skips that version only.
 
-The admission and the provider's own CI run the same check in the same way.
+The admission runs the same check in the same way. The reusable workflow for a provider's own
+CI runs the same checks on the provider's checkout, in one container.
 
 ## Admission
 
@@ -325,15 +355,21 @@ A provider is admitted by a pull request that adds its `provider.json`. The work
 `admission.yml` runs the code of the base branch, takes only the `provider.json` of the pull
 request, and checks:
 
+- that the pull request changes nothing but that one `provider.json`;
 - that `provider.json` is valid and its domain is free: not reserved, and not taken (a pull
-  request that changes an existing provider says so and gets the same checks);
-- that the repository is public, not archived, and has an open source licence GitHub recognises;
-- that the author of the pull request owns the repository or is a code owner in the manifest of
-  its latest release;
+  request that changes the folder or tag prefix of an existing provider says so and gets the
+  same checks);
+- that the repository is public, not archived, has an open source licence GitHub recognises,
+  and has the ids `provider.json` names;
+- that the author of the pull request, and every maintainer in `provider.json`, owns the
+  repository or is a code owner in the manifest of its latest release;
 - that the latest release becomes a version and passes the checks on at least one line.
 
-It prints the result in the job summary, for the person who decides and for Bot-MArley. A pull
-request that only changes the status or the blocked versions needs no admission.
+It prints the result in the job summary, for the person who decides and for Bot-MArley, with
+everything the provider controls shown as code. A pull request that changes the status, reason,
+blocked versions, repository, ids or maintainers of an existing provider is never passed: a
+registry maintainer decides on it. CI refuses a pull request that adds or changes a version file
+or a refusal, which only the pipeline writes.
 
 ## Still open
 
