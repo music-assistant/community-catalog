@@ -1,0 +1,65 @@
+name: Check a provider
+
+# A reusable workflow for the repository of a community provider: it runs the manifest,
+# dependency and load checks of the community catalog on the provider folder, in the server
+# image of the line you choose. Call it from a workflow on your pull requests:
+#
+#   jobs:
+#     catalog:
+#       uses: music-assistant/community-catalog/.github/workflows/check-provider.yml@main
+#       with:
+#         folder: my_provider
+#         server-line: nightly
+
+on:
+  workflow_call:
+    inputs:
+      folder:
+        description: The provider folder in your repository, named after its domain
+        required: true
+        type: string
+      server-line:
+        description: The server line to check against, as in server_lines.json of the catalog
+        required: false
+        type: string
+        default: nightly
+
+permissions: {}
+
+jobs:
+  check:
+    name: Community catalog checks on ${{ inputs.server-line }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: provider
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: music-assistant/community-catalog
+          ref: main
+          path: catalog
+          persist-credentials: false
+      - name: Find the server image
+        id: image
+        env:
+          LINE: ${{ inputs.server-line }}
+        run: |
+          image=$(jq -r --arg line "$LINE" '.lines[$line].image // empty' catalog/server_lines.json)
+          if [ -z "$image" ]; then
+            echo "::error::$LINE is not a server line of the community catalog"
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run the checks in the server image
+        env:
+          FOLDER: ${{ inputs.folder }}
+          IMAGE: ${{ steps.image.outputs.image }}
+        run: |
+          docker run --rm --pull always --platform linux/amd64 --entrypoint python \
+            --volume "$PWD/catalog:/catalog:ro" --volume "$PWD/provider:/provider:ro" \
+            --workdir /catalog "$IMAGE" \
+            -m registry --root /catalog check-folder "/provider/$FOLDER"

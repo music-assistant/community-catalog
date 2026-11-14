@@ -25,7 +25,8 @@ catalog is used at the user's own risk.
 |---|---|
 | `providers/<domain>/provider.json` | A provider: where it lives, who maintains it, its status. Written once, at admission. |
 | `providers/<domain>/versions/<version>.json` | A released version: the pinned commit, its content hash, its manifest and the result of the checks per server line. Generated. |
-| `server_lines.json` | The server lines an index is built for. |
+| `providers/<domain>/refused/<version>.json` | A release that could not become a version, and why. Generated, so the release is not tried again. |
+| `server_lines.json` | The server lines an index is built for, each with its server image. |
 | `reserved_domains.json` | The domains a community provider cannot take. |
 | `site/v1/<line>.json` | The index of each server line, generated from the files above. `site/` is what is published, so it holds nothing else. |
 | `registry/` | The code that checks the files and builds the index. |
@@ -96,6 +97,22 @@ No file or folder the commands read or write may be a symbolic link.
 | `released` | When the version was released. |
 | `checks` | The result per server line in `server_lines.json`: passed or not, when, and why not. |
 
+### refused/\<version\>.json
+
+```json
+{
+  "version": "1.3.0",
+  "tag": "v1.3.0",
+  "commit": "0123456789abcdef0123456789abcdef01234567",
+  "released": "2026-11-20T12:00:00Z",
+  "refused": "2026-11-21T03:17:00Z",
+  "reason": "providers/sample_music/versions/1.3.0.json: manifest.domain: 'sample' is not sample_music"
+}
+```
+
+A version has a version file or a refused file, never both. Deleting a refused file makes the
+pipeline try the release again.
+
 All dates are UTC, as `2026-11-14T12:00:00Z`. A file with an unknown key, a missing key or a
 value of another type is refused, as is a JSON object with a key that appears twice.
 
@@ -159,6 +176,10 @@ refused.
 - Keep `manifest.json` plain JSON: no `NaN` or `Infinity`, and no key twice.
 - A provider never writes into its own folder: that changes its content hash, and the server
   replaces a folder whose hash differs from the index.
+- Run the checks of the catalog on your own pull requests with the reusable workflow
+  `.github/workflows/check-provider.yml` (its header shows how to call it).
+- A release that is refused or fails a check gets an issue on your repository, or on this
+  repository when yours has issues switched off.
 
 ## Commands
 
@@ -174,6 +195,31 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry record-check <domain> <version> <line> (--passed \| --failed <reason>) [--checked <date>]` | Records the result of the checks of a version on a server line. |
 | `uv run python -m registry content-hash <source> [--folder <folder>]` | Prints the content hash of a provider folder, or of a folder in an archive. |
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
+| `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
+| `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
+
+Blocking is one command and one commit:
+
+```sh
+uv run python -m registry set-status sample_music blocked --reason "Sends the library elsewhere" \
+  --reason-url https://github.com/music-assistant/community-catalog/issues/12
+git commit -am "Block sample_music"
+```
+
+The commands of the release pipeline, which the workflows run:
+
+| Command | What it does |
+|---|---|
+| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `fetch.json` there. Needs `GITHUB_TOKEN`. |
+| `check --line <line> --output <file>` | Runs inside the server image of the line. Checks every version that needs a result and writes the results file; it changes nothing else. |
+| `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
+| `apply-results <folder>` | Records the results files in the version files and writes the index files. |
+| `report <folder>` | Writes an issue for every failed check and every refused release into the work folder. |
+| `post-issues` | Opens those issues, each one unless an issue with its key exists. Needs `GITHUB_TOKEN`. |
+| `prepare-admission <domain> --pull-request <checkout> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file. Needs `GITHUB_TOKEN`. |
+| `check-admission <domain> <folder>` | Prints the result of the admission checks with the check results of the latest release. |
+
+The work folder is `work/` in the root unless `--work` names another. It is never committed.
 
 A version file starts without check results, so it is in no index until a line records a pass.
 The whole flow for one release:
@@ -191,10 +237,15 @@ uv run python -m registry validate
 `server_lines.json` lists the lines an index is built for:
 
 ```json
-{"lines": {"beta": {"frozen": false}, "nightly": {"frozen": false}}}
+{"lines": {"beta": {"frozen": false, "image": "ghcr.io/music-assistant/server:beta"}, "nightly": {"frozen": false, "image": "ghcr.io/music-assistant/server:nightly"}}}
 ```
 
-A stable line is added as `"2.11": {"frozen": false}`, followed by `build`. A line stays in the
+`image` is the official server image the checks of the line run in. The server's release
+workflow tags every image with its channel (`nightly`, `beta`) and every stable release also with
+its minor line, so the image of a stable line is `ghcr.io/music-assistant/server:2.11`.
+
+A stable line is added as `"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:2.11"}`,
+followed by `build`. A line stays in the
 file for as long as servers of that line exist. When the next stable line appears, the previous
 one is marked `frozen`: its versions are no longer tested, while blocks and withdrawals still
 reach its index.
@@ -215,12 +266,79 @@ reach its index.
 `refresh-reserved` only adds domains. Run it against the `dev` branch and every supported stable
 branch of the server; a domain leaves the list by hand, once no supported server line ships it.
 
-## Not part of this repository today
+## The release pipeline
 
-Nothing here fetches releases or runs the checks: a version file is added with `add-version`
-and its results with `record-check`. The checks on every release (the manifest, the
-dependencies against each server line, the load test in the server images), the issue for a
-maintainer whose release fails, and the admission flow are not in this repository. A
-`provider.json` is added by a pull request that a maintainer of the project reviews. Nothing
-reads the `frozen` flag of a server line yet: the pipeline that runs the checks will skip a
-frozen line.
+The workflow `releases.yml` runs every night and on request. Its jobs share only files:
+
+1. **Fetch** reads the releases of every provider that is not blocked, many repositories per
+   GraphQL request. It takes the most recently published release whose tag names a version of
+   the provider (drafts and pre-releases are ignored), when that version has neither a version
+   file nor a refused file. So of several releases since the last night only the newest is taken.
+   It downloads the archive of the tagged commit and runs `add-version` on it: what that refuses
+   becomes a refused file with the reason, and the release is not tried again. An archive that
+   cannot be downloaded is tried again the next night. It then downloads the archives of every
+   version the check step needs.
+2. **Check** runs once per line that is not frozen, inside the official server image of that
+   line. It checks every version without a result for the line, and the current `latest` of each
+   provider on the line again, which is how a provider that stops working on a line is found:
+   * the content: the provider folder is unpacked from the archive and its content hash compared
+     with the version file;
+   * the dependencies: the requirements are resolved against the packages of that server by the
+     server's own code (`CommunityDependencies` of the community catalog controller), so the
+     verdict is what a server of that line decides. A clash with the server, or a requirement
+     that cannot be installed, fails the version with the explanation of the resolver;
+   * the load: the requirements are installed into a scratch folder, and in a process of its
+     own the manifest is parsed and the module imported the way the server does for a community
+     provider. A manifest the server refuses or an import that fails fails the version.
+
+   A check that cannot run (the package index cannot be reached) gives no result; the version is
+   checked again the next night. The provider's own tests are not run.
+3. **Apply** records the results with the rules of `record-check`, writes the index files,
+   validates and pushes, as the Music Assistant Bot app. A version that stops passing on a line
+   leaves that line's index: the newest version that still passes there becomes `latest`. The
+   push starts the Publish workflow.
+4. **Report** writes an issue for every version that failed a check on a line (first checks and
+   versions that stopped passing) and every release refused in this run. The issue goes to the
+   provider's repository, or to this repository, mentioning the maintainers, when that repository
+   has issues switched off. Each issue has a key, written into its body, that is the same for the
+   same failure; an issue is not opened when one with its key exists. Opening them is switched on
+   with the repository variable `POST_ISSUES`; until then they are kept as an artifact of the run.
+
+### Provider code runs without secrets
+
+The check executes provider code, so it runs in a job of its own:
+
+- the job has no permissions, no checkout and no token: it gets the registry and the archives
+  from the artifact of the fetch job;
+- the provider code runs only inside `docker run` of the server image, which gets none of the
+  job's environment, the files of the registry read-only, and one empty folder for its results
+  file;
+- the job only uploads that results file. The apply job, which can push, reads it as data with
+  the same checks as any other change to a version file, runs only its own checked out code, and
+  takes nothing else from the check jobs.
+
+The admission and the provider's own CI run the same check in the same way.
+
+## Admission
+
+A provider is admitted by a pull request that adds its `provider.json`. The workflow
+`admission.yml` runs the code of the base branch, takes only the `provider.json` of the pull
+request, and checks:
+
+- that `provider.json` is valid and its domain is free: not reserved, and not taken (a pull
+  request that changes an existing provider says so and gets the same checks);
+- that the repository is public, not archived, and has an open source licence GitHub recognises;
+- that the author of the pull request owns the repository or is a code owner in the manifest of
+  its latest release;
+- that the latest release becomes a version and passes the checks on at least one line.
+
+It prints the result in the job summary, for the person who decides and for Bot-MArley. A pull
+request that only changes the status or the blocked versions needs no admission.
+
+## Still open
+
+- Running the provider's own tests in the check step.
+- The reading of every release against the red lines by Bot-MArley, and its summary on an
+  admission pull request.
+- Merging an admitted pull request by the Music Assistant Bot app.
+- Checking that a requirement has a wheel for arm64 as well: the checks run on amd64.

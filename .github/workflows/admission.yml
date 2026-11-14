@@ -1,0 +1,145 @@
+name: Admission
+
+# The automated checks for a pull request that adds or changes a provider.json. The decision
+# stays with a person. The code that runs is the code of the base branch; the pull request only
+# provides its provider.json, and provider code runs in the server images without any token.
+
+on:
+  pull_request:
+    paths: ["providers/*/provider.json"]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    name: Check the repository and fetch its latest release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # to list the files the pull request changes
+      pull-requests: read
+    outputs:
+      domain: ${{ steps.provider.outputs.domain }}
+      lines: ${{ steps.lines.outputs.lines }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: pull-request
+          persist-credentials: false
+      # one provider per pull request; only a name that is a valid domain gets through
+      - name: Find the provider
+        id: provider
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          domains=$(gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" --jq '.[].filename' \
+            | sed -nE 's|^providers/([a-z][a-z0-9_]*)/provider\.json$|\1|p')
+          if [ "$(echo "$domains" | wc -w)" -ne 1 ]; then
+            echo "::error::A pull request adds or changes the provider.json of one provider"
+            exit 1
+          fi
+          echo "domain=$domains" >> "$GITHUB_OUTPUT"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked --no-dev
+      - name: Check the repository and fetch the latest release
+        env:
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          DOMAIN: ${{ steps.provider.outputs.domain }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --no-dev python -m registry prepare-admission "$DOMAIN"
+          --pull-request pull-request --author "$AUTHOR"
+      - name: List the server lines
+        id: lines
+        run: |
+          lines=$(jq -c '[.lines | to_entries[] | select(.value.frozen != true)
+            | {line: .key, image: .value.image}]' server_lines.json)
+          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: admission
+          path: |
+            registry/
+            providers/
+            server_lines.json
+            reserved_domains.json
+            work/
+          if-no-files-found: error
+          retention-days: 7
+
+  check:
+    name: Check on ${{ matrix.line }}
+    needs: prepare
+    if: needs.prepare.outputs.lines != '[]'
+    runs-on: ubuntu-latest
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.lines) }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: admission
+          path: catalog
+      # only the version with an archive in the work folder, the latest release, is checked
+      - name: Run the checks in the server image
+        env:
+          IMAGE: ${{ matrix.image }}
+          LINE: ${{ matrix.line }}
+        run: |
+          mkdir results
+          docker run --rm --pull always --platform linux/amd64 --entrypoint python \
+            --volume "$PWD/catalog:/catalog:ro" --volume "$PWD/results:/results" \
+            --workdir /catalog "$IMAGE" \
+            -m registry --root /catalog check --line "$LINE" --output "/results/$LINE.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: results-${{ matrix.line }}
+          path: results/
+          if-no-files-found: error
+          retention-days: 7
+
+  result:
+    name: Admission checks
+    needs: [prepare, check]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - run: uv sync --locked --no-dev
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: admission
+          path: ${{ runner.temp }}/admission
+      - run: cp -R "$RUNNER_TEMP/admission/work" work
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: results-*
+          merge-multiple: true
+          path: results
+      - name: Print the result
+        shell: bash
+        env:
+          DOMAIN: ${{ needs.prepare.outputs.domain }}
+        run: >-
+          uv run --no-dev python -m registry check-admission "$DOMAIN" results
+          | tee -a "$GITHUB_STEP_SUMMARY"
