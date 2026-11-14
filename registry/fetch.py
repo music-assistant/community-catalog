@@ -125,6 +125,8 @@ def take_release(
         )
     except (CommandError, InvalidRegistryError) as err:
         problems = err.problems if isinstance(err, InvalidRegistryError) else [str(err)]
+        # the path of the archive in the work folder means nothing to the maintainer
+        problems = [problem.removeprefix(f"{archive}: ") for problem in problems]
         refused = RefusedRelease(
             version=version,
             tag=release.tag,

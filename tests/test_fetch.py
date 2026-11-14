@@ -150,7 +150,7 @@ def test_a_refused_release_is_recorded_and_not_tried_again(
     assert provider.versions == {}
     refused = provider.refused["1.0.0"]
     assert (refused.tag, refused.commit) == ("v1.0.0", COMMIT_1)
-    assert "the repository has no folder providers/sample_music" in refused.reason
+    assert refused.reason == "the repository has no folder providers/sample_music"
     assert [(r.domain, r.version) for r in report.refused] == [(DOMAIN, "1.0.0")]
     assert again.refused == []
     assert len(_downloads(github)) == 1
