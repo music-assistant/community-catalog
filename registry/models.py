@@ -87,7 +87,7 @@ class ProviderFile(StrictModel):
     # new repository under the same name does not have
     repository_id: int
     owner_id: int
-    # the folder of the provider in the repository, named after the domain
+    # the folder of the provider in the repository; the server installs it under the domain
     folder: str
     maintainers: list[str]
     status: ProviderStatus

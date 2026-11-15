@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from registry.cli import main
+from registry.content import read_folder
 from registry.registry import load_registry
 from tests.conftest import COMMIT, DOMAIN, ICON, build_archive, manifest, write_tree
 
@@ -51,6 +52,28 @@ def test_add_version_from_an_archive(files: Files, tmp_path: Path) -> None:
     assert version.requirements == ["some-package==1.0"]
     assert version.icon_svg == ICON
     assert version.checks == {}
+
+
+def test_a_provider_folder_named_otherwise(files: Files, tmp_path: Path) -> None:
+    """A provider folder not named after the domain gives the same content and reaches the index."""
+    files.provider(folder="provider")
+    archive = tmp_path / "repo.tar.gz"
+    archive.write_bytes(
+        build_archive({f"provider/{path}": data for path, data in PROVIDER.items()})
+    )
+    named = tmp_path / DOMAIN
+    write_tree(named, PROVIDER)
+
+    assert _add(files, archive) == 0
+    assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--passed") == 0
+    assert _run(files, "build") == 0
+    assert _run(files, "validate") == 0
+
+    version = load_registry(files.root).providers[DOMAIN].versions["1.0.0"]
+    assert version.folder == "provider"
+    assert version.content_hash == read_folder(named).content_hash
+    index = json.loads(files.root.joinpath("site/v1/nightly.json").read_bytes())
+    assert index["providers"][DOMAIN]["versions"]["1.0.0"]["folder"] == "provider"
 
 
 def test_add_version_from_a_folder_gives_the_hash_of_the_archive(

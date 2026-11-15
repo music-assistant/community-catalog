@@ -97,8 +97,8 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
         )
         if value < 1
     ]
-    if not formats.is_provider_folder(provider.folder, domain):
-        problems.append(_folder_problem(provider.folder, domain))
+    if not formats.is_provider_folder(provider.folder):
+        problems.append(_folder_problem(provider.folder))
     if not formats.is_tag_prefix(provider.tag_prefix):
         problems.append(f"tag_prefix: {provider.tag_prefix!r} is not allowed in a tag")
     problems += _handle_problems("maintainers", provider.maintainers)
@@ -136,8 +136,8 @@ def check_version(
         problems.append(f"tag: {version.tag!r} is not one of {', '.join(sorted(tags))}")
     if not formats.is_commit(version.commit):
         problems.append(f"commit: {version.commit!r} is not a full commit SHA in lower case")
-    if not formats.is_provider_folder(version.folder, domain):
-        problems.append(_folder_problem(version.folder, domain))
+    if not formats.is_provider_folder(version.folder):
+        problems.append(_folder_problem(version.folder))
     if not formats.is_content_hash(version.content_hash):
         problems.append(f"content_hash: {version.content_hash!r} is not a sha256 hex digest")
     problems += check_manifest(version.manifest, domain)
@@ -279,9 +279,6 @@ def _date_problems(key: str, value: str) -> list[str]:
     return [f"{key}: {value!r} is not a date in UTC like 2026-11-14T08:00:00Z"]
 
 
-def _folder_problem(folder: str, domain: str) -> str:
+def _folder_problem(folder: str) -> str:
     """Return the problem of a provider folder that is not valid."""
-    return (
-        f"folder: {folder!r} is not a relative path in the repository whose last folder is "
-        f"named {domain}"
-    )
+    return f"folder: {folder!r} is not a relative path in the repository"

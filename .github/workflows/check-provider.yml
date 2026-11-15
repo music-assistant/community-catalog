@@ -15,7 +15,7 @@ on:
   workflow_call:
     inputs:
       folder:
-        description: The provider folder in your repository, named after its domain
+        description: The provider folder in your repository, such as my_provider or provider
         required: true
         type: string
       server-line:
