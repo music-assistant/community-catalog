@@ -13,7 +13,7 @@ import asyncio
 import sys
 import traceback
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import music_assistant.providers as providers_package
 from music_assistant.controllers.community_catalog.dependencies import CommunityDependencies
@@ -40,8 +40,10 @@ async def _load(location: str, domain: str, cache: str) -> int:
     :param domain: The domain of the provider, also the name of its folder.
     :param cache: The cache folder the requirements were installed in.
     """
-    # what MusicAssistant.add_provider_location and the start of the catalog do
-    providers_package.__path__.append(location)
+    # what MusicAssistant.add_provider_location and the start of the catalog do, but in front:
+    # the image of a line still ships a provider that moves out of the server, and the code
+    # checked is the release's
+    providers_package.__path__.insert(0, location)
     CommunityDependencies(SimpleNamespace(cache_path=cache)).activate()
     try:
         manifest = await ProviderManifest.parse(str(Path(location, domain, "manifest.json")))
@@ -53,12 +55,20 @@ async def _load(location: str, domain: str, cache: str) -> int:
         print(f"manifest: the domain {manifest.domain} is not {domain}")
         return 1
     try:
-        await load_provider_module(manifest)
+        module = await load_provider_module(manifest)
     except BaseException as err:  # noqa: BLE001 - also a module that exits the interpreter
         traceback.print_exc(file=sys.stdout)
         print(f"load: {type(err).__name__}: {err}")
         return 1
+    if not _imported_from(module, Path(location, domain)):
+        print(f"load: the server's own {domain} was imported, not the one of the release")
+        return 1
     return 0
+
+
+def _imported_from(module: ModuleType, folder: Path) -> bool:
+    """Return whether a provider package was imported from a folder."""
+    return any(Path(path).resolve() == folder.resolve() for path in getattr(module, "__path__", ()))
 
 
 if __name__ == "__main__":

@@ -181,7 +181,8 @@ refused.
   development mode, the test fixture and the Dev app import a folder by its name.
 - Release by publishing a GitHub release whose tag is the version, such as `v1.2.0`, or the tag
   prefix and the version when the repository holds several providers.
-- Write requirements as package names with version specifiers.
+- Write requirements as package names with version specifiers, available as wheels for linux
+  amd64 and arm64.
 - Keep `manifest.json` plain JSON: no `NaN` or `Infinity`, and no key twice; at most 16 KiB,
   50 requirements and 10 code owners.
 - A provider never writes into its own folder: that changes its content hash, and the server
@@ -256,7 +257,10 @@ workflow tags every image with its channel (`nightly`, `beta`) and every stable 
 its minor line, so the image of a stable line is `ghcr.io/music-assistant/server:2.11`.
 
 A stable line is added as `"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:2.11"}`,
-followed by `build`. A line stays in the
+followed by `build`. A line that needs its index before its first release, because a provider
+moves out of the server in it, is added during its beta with the beta image,
+`"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:beta"}`, and its image is
+set to `ghcr.io/music-assistant/server:2.11` once that release is out. A line stays in the
 file for as long as servers of that line exist. When the next stable line appears, the previous
 one is marked `frozen`: its versions are no longer tested, while blocks and withdrawals still
 reach its index.
@@ -272,7 +276,10 @@ reach its index.
   domains;
 - `reserved_names`: names the server gives a meaning of its own, such as `library`;
 - `moving`: built-in providers that move to the community catalog under their own domain, and
-  may be admitted while the server still ships them.
+  may be admitted while the server still ships them. Until it no longer does, the load check
+  imports the release's code instead of the server's own copy, but the requirements still
+  resolve against the server's packages, which include the pins of that copy: a release keeps
+  those pins until the server no longer ships the provider.
 
 `refresh-reserved` only adds domains. Run it against the `dev` branch and every supported stable
 branch of the server; a domain leaves the list by hand, once no supported server line ships it.
@@ -303,12 +310,16 @@ reports anything. Its jobs share only files:
      archive and its content hash compared with the version file, then the requirements are
      resolved against the packages of that server by the server's own code
      (`CommunityDependencies` of the community catalog controller, wheels only) and installed
-     into a scratch folder, so the verdict is what a server of that line decides. A clash with
-     the server, or a requirement that cannot be installed, fails the version with the
+     into a scratch folder, so the verdict is what a server of that line decides. The
+     requirements are also resolved, without installing, for linux arm64 with the C library of
+     the image: the arm64 image has the same packages, and a server installs wheels only, so
+     this tells whether an arm64 server can install them. A clash with the server, a requirement
+     that cannot be installed or one without wheels for arm64 fails the version with the
      explanation of the resolver;
    * **load**, without network and with the scratch folder read-only, unpacks the folder again
      and, in a process of its own, parses the manifest and imports the module the way the server
-     does for a community provider. A manifest the server refuses, an import that fails or one
+     does for a community provider, from the release's folder also where the image still ships a
+     provider of that domain. A manifest the server refuses, an import that fails or one
      that takes more than 300 seconds fails the version; every process the import started is
      ended with it, and the issue gets the last 50 kB of its output.
 
@@ -379,4 +390,3 @@ or a refusal, which only the pipeline writes.
 - The reading of every release against the red lines by Bot-MArley, and its summary on an
   admission pull request.
 - Merging an admitted pull request by the Music Assistant Bot app.
-- Checking that a requirement has a wheel for arm64 as well: the checks run on amd64.

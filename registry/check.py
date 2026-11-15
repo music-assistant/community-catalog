@@ -21,9 +21,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 from music_assistant.controllers.community_catalog.dependencies import (
+    _UV_INDEX_ARGS,
     CommunityDependencies,
     DependenciesUnavailable,
     DependencyConflict,
+    _server_constraints,
 )
 
 from registry import formats
@@ -44,6 +46,10 @@ _CODE_ROOT = Path(__file__).parent.parent
 _MAX_OUTPUT = 50_000
 # where the requirements are installed, in the scratch folder of a version
 _CACHE = "cache"
+# uv exits with 1 when the requirements cannot be resolved
+_UV_UNRESOLVABLE = 1
+# the newest manylinux target uv knows
+_MAX_MANYLINUX_MINOR = 40
 
 
 class CheckUnavailableError(Exception):
@@ -173,7 +179,62 @@ async def _install(domain: str, requirements: Sequence[str], cache: Path) -> Out
         return _failed("dependencies", str(err))
     except DependenciesUnavailable as err:
         raise CheckUnavailableError(str(err)) from err
+    if requirements and (cause := await _resolve_for_arm64(requirements)) is not None:
+        return _failed(
+            "dependencies", f"Requirements of {domain} have no wheels for linux arm64", cause
+        )
     return None
+
+
+async def _resolve_for_arm64(requirements: Sequence[str]) -> str | None:
+    """
+    Resolve requirements as a server on linux arm64 would, without installing anything.
+
+    The checks run on amd64. The arm64 image has the same packages and C library, and a server
+    installs wheels only, so a resolve for that platform tells whether it can install them.
+    Returns the explanation of uv when they cannot be resolved there, else None.
+
+    :param requirements: The requirements of the manifest.
+    :raises CheckUnavailableError: uv failed or the package index could not be reached.
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        wanted, server = await asyncio.to_thread(_write_resolve_inputs, Path(workdir), requirements)
+        # the same interpreter, indexes and pins the server resolves with
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "uv", "pip", "compile", str(wanted),
+            "--constraint", str(server), "--python", sys.executable,
+            "--python-platform", _arm64_platform(), "--only-binary", ":all:",
+            "--no-header", "--no-annotate", "--no-config", "--no-cache", *_UV_INDEX_ARGS,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )  # fmt: skip
+        output, _ = await process.communicate()
+    text = output.decode(errors="replace").strip()
+    if process.returncode == 0:
+        return None
+    if process.returncode == _UV_UNRESOLVABLE:
+        return text
+    msg = f"uv pip compile for linux arm64 failed with exit code {process.returncode}: {text}"
+    raise CheckUnavailableError(msg)
+
+
+def _write_resolve_inputs(workdir: Path, requirements: Sequence[str]) -> tuple[Path, Path]:
+    """Write the requirements and the server's pins for a resolve, and return both files."""
+    wanted = workdir / "requirements.txt"
+    wanted.write_text("\n".join(requirements) + "\n", encoding="utf-8")
+    server = workdir / "server.txt"
+    server.write_text("\n".join(_server_constraints()) + "\n", encoding="utf-8")
+    return wanted, server
+
+
+def _arm64_platform() -> str:
+    """Return the uv target of linux arm64 with the C library of this server image."""
+    try:
+        _, version = (os.confstr("CS_GNU_LIBC_VERSION") or "").split()
+        minor = int(version.split(".")[1])
+    except ValueError, IndexError:
+        # outside a server image, such as in the tests, the C library need not be glibc
+        minor = 28
+    return f"aarch64-manylinux_2_{min(minor, _MAX_MANYLINUX_MINOR)}"
 
 
 async def _load(location: Path, domain: str, cache: Path, scratch: Path) -> Outcome:
