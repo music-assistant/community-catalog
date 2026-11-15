@@ -12,7 +12,7 @@ import subprocess
 import tarfile
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -38,9 +38,10 @@ if TYPE_CHECKING:
     from tests.conftest import Files
 
 # a checkout of the server with the community catalog and its environment with uv; by default
-# the server next to the registry
+# the server next to the registry. SERVER_PYTHON names the interpreter of a server directly, such
+# as the one of a server image, and then these tests must run.
 SERVER = Path(os.environ.get("SERVER_CHECKOUT", ROOT.parent / "server"))
-SERVER_PYTHON = SERVER / ".venv" / "bin" / "python"
+SERVER_PYTHON = Path(os.environ.get("SERVER_PYTHON", SERVER / ".venv" / "bin" / "python"))
 # providers of the server checkout, taken as domains that move out of it
 SHIPPED = ("musicbrainz", "theaudiodb", "fanarttv")
 # runs a command of the registry with uv pointed at the wheels the test built, as the server's
@@ -52,6 +53,11 @@ dependencies._UV_INDEX_ARGS[:] = ["--no-index", "--find-links", sys.argv[1]]
 if "CHECK_LOAD_TIMEOUT" in os.environ:
     import registry.check
     registry.check.LOAD_TIMEOUT = int(os.environ["CHECK_LOAD_TIMEOUT"])
+if "DROP_SERVER_NAME" in os.environ:
+    # the registry sees a server without that name; the server's own code keeps it
+    import types, registry.check
+    kept = {k: v for k, v in vars(dependencies).items() if k != os.environ["DROP_SERVER_NAME"]}
+    registry.check.dependencies = types.SimpleNamespace(**kept)
 from registry.cli import main
 sys.exit(main(sys.argv[2:]))
 """
@@ -66,7 +72,8 @@ def _server_has_the_catalog() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _server_has_the_catalog(), reason="needs a server checkout with the community catalog"
+    "SERVER_PYTHON" not in os.environ and not _server_has_the_catalog(),
+    reason="needs a server checkout with the community catalog",
 )
 
 
@@ -97,12 +104,17 @@ def _server_platform() -> str:
     return str(platform).strip().replace("-", "_").replace(".", "_")
 
 
-def _run(wheels: Path, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    wheels: Path, *args: str, timeout: int | None = None, drop: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a command of the registry with the interpreter of the server checkout."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
     environment["UV_OFFLINE"] = "1"
     if timeout is not None:
         environment["CHECK_LOAD_TIMEOUT"] = str(timeout)
+    if drop is not None:
+        # a server without this name in its community catalog
+        environment["DROP_SERVER_NAME"] = drop
     return subprocess.run(
         [SERVER_PYTHON, "-c", RUN_OFFLINE, str(wheels), *args],
         cwd=ROOT,
@@ -138,7 +150,7 @@ def _release(
 
 
 def _check(
-    files: Files, wheels: Path, domain: str, stage: str, **run: int
+    files: Files, wheels: Path, domain: str, stage: str, **run: Any
 ) -> subprocess.CompletedProcess[str]:
     """Run a stage of the checks of version 1.0.0 of a provider on nightly, as a container does."""
     scratch = files.root / "scratch" / domain
@@ -232,7 +244,7 @@ def test_a_check_that_cannot_run_gives_no_result(files: Files, tmp_path: Path) -
     run = _check(files, tmp_path / "no-such-index", "good_music", "install")
 
     assert run.returncode == 1
-    assert "good_music 1.0.0: the check could not run: " in run.stderr
+    assert "good_music 1.0.0: the check could not run on nightly: " in run.stderr
     assert not (files.root / "scratch" / "good_music" / "install.json").exists()
 
 
@@ -321,6 +333,53 @@ def test_requirements_need_wheels_for_linux_arm64(files: Files, wheels: Path) ->
         "dependencies: Requirements of host_music have no wheels for linux arm64"
     )
     assert "host-only-lib" in (result.output or "")
+
+
+@pytest.mark.parametrize("name", ["_server_constraints", "_UV_INDEX_ARGS"])
+def test_a_server_without_the_names_of_the_resolve_gives_no_result(
+    files: Files, wheels: Path, name: str
+) -> None:
+    """A server image that lacks what the arm64 resolve uses names it and gives no result."""
+    _release(files, "good_music", "1.0.0", "import helper_lib\n", ["helper-lib==1.0"])
+
+    run = _check(files, wheels, "good_music", "install", drop=name)
+
+    assert run.returncode != 0
+    assert "good_music 1.0.0: the check could not run on nightly" in run.stderr
+    assert f"has no {name} in music_assistant.controllers.community_catalog.dependencies" in (
+        run.stderr
+    )
+    assert not (files.root / "scratch" / "good_music" / "install.json").exists()
+
+
+def test_the_arm64_target_is_one_uv_knows() -> None:
+    """The C library maps to the newest manylinux target uv knows that it can run."""
+    cases = {
+        "glibc 2.41": "40",
+        "glibc 2.40": "40",
+        "glibc 2.36": "36",
+        "glibc 2.31": "31",
+        "glibc 2.30": "28",
+        "glibc 2.29": "28",
+        "glibc 2.28": "28",
+        "glibc 2.27": "17",
+        "glibc 2.17": "17",
+        "glibc 2.5": "17",
+        "musl 1.2.5": "17",
+        "": "17",
+    }
+    code = (
+        "import sys; from registry.check import arm64_platform as p; print(*map(p, sys.argv[1:]))"
+    )
+    run = subprocess.run(
+        [str(SERVER_PYTHON), "-c", code, *cases],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert run.stdout.split() == [f"aarch64-manylinux_2_{minor}" for minor in cases.values()]
 
 
 def test_check_folder(files: Files, wheels: Path, tmp_path: Path) -> None:
