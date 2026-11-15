@@ -160,7 +160,9 @@
     "translations",
     "webserver"
   ],
-  "moving": [],
+  "moving": [
+    "fastmcp_server"
+  ],
   "reserved_names": [
     "database",
     "library"
