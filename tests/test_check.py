@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 import zipfile
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -22,6 +24,7 @@ from registry.pipeline import archive_path, make_plan, read_results, write_plan
 from registry.registry import load_registry
 from tests.conftest import (
     COMMIT,
+    RESERVED,
     ROOT,
     build_archive,
     can_run_check_line,
@@ -35,9 +38,12 @@ if TYPE_CHECKING:
     from tests.conftest import Files
 
 # a checkout of the server with the community catalog and its environment with uv; by default
-# the server next to the registry
+# the server next to the registry. SERVER_PYTHON names the interpreter of a server directly, such
+# as the one of a server image, and then these tests must run.
 SERVER = Path(os.environ.get("SERVER_CHECKOUT", ROOT.parent / "server"))
-SERVER_PYTHON = SERVER / ".venv" / "bin" / "python"
+SERVER_PYTHON = Path(os.environ.get("SERVER_PYTHON", SERVER / ".venv" / "bin" / "python"))
+# providers of the server checkout, taken as domains that move out of it
+SHIPPED = ("musicbrainz", "theaudiodb", "fanarttv")
 # runs a command of the registry with uv pointed at the wheels the test built, as the server's
 # own tests do; nothing reaches the network
 RUN_OFFLINE = """
@@ -47,6 +53,11 @@ dependencies._UV_INDEX_ARGS[:] = ["--no-index", "--find-links", sys.argv[1]]
 if "CHECK_LOAD_TIMEOUT" in os.environ:
     import registry.check
     registry.check.LOAD_TIMEOUT = int(os.environ["CHECK_LOAD_TIMEOUT"])
+if "DROP_SERVER_NAME" in os.environ:
+    # the registry sees a server without that name; the server's own code keeps it
+    import types, registry.check
+    kept = {k: v for k, v in vars(dependencies).items() if k != os.environ["DROP_SERVER_NAME"]}
+    registry.check.dependencies = types.SimpleNamespace(**kept)
 from registry.cli import main
 sys.exit(main(sys.argv[2:]))
 """
@@ -61,7 +72,8 @@ def _server_has_the_catalog() -> bool:
 
 
 pytestmark = pytest.mark.skipif(
-    not _server_has_the_catalog(), reason="needs a server checkout with the community catalog"
+    "SERVER_PYTHON" not in os.environ and not _server_has_the_catalog(),
+    reason="needs a server checkout with the community catalog",
 )
 
 
@@ -79,15 +91,30 @@ def wheels(tmp_path_factory: pytest.TempPathFactory) -> Path:
     _build_wheel(folder, "orjson", "1.0")
     _build_wheel(folder, "helper-lib", "1.0")
     _build_wheel(folder, "needs-old-orjson", "1.0", "orjson==1.0")
+    # a wheel only for the platform the tests run on, which is not linux arm64
+    _build_wheel(folder, "host-only-lib", "1.0", platform=_server_platform())
+    _build_sdist(folder, "host-only-lib", "1.0")
     return folder
 
 
-def _run(wheels: Path, *args: str, timeout: int | None = None) -> subprocess.CompletedProcess[str]:
+def _server_platform() -> str:
+    """Return the wheel platform tag of the interpreter of the server checkout."""
+    command = [str(SERVER_PYTHON), "-c", "import sysconfig; print(sysconfig.get_platform())"]
+    platform = subprocess.run(command, capture_output=True, text=True, check=True).stdout
+    return str(platform).strip().replace("-", "_").replace(".", "_")
+
+
+def _run(
+    wheels: Path, *args: str, timeout: int | None = None, drop: str | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run a command of the registry with the interpreter of the server checkout."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
     environment["UV_OFFLINE"] = "1"
     if timeout is not None:
         environment["CHECK_LOAD_TIMEOUT"] = str(timeout)
+    if drop is not None:
+        # a server without this name in its community catalog
+        environment["DROP_SERVER_NAME"] = drop
     return subprocess.run(
         [SERVER_PYTHON, "-c", RUN_OFFLINE, str(wheels), *args],
         cwd=ROOT,
@@ -100,7 +127,11 @@ def _run(wheels: Path, *args: str, timeout: int | None = None) -> subprocess.Com
 
 
 def _release(
-    files: Files, domain: str, version: str, code: str, requirements: list[str] | None = None
+    files: Files,
+    domain: str,
+    version: str,
+    code: str | None,
+    requirements: list[str] | None = None,
 ) -> None:
     """Write the archive of a release into the work folder and add its version file."""
     files.provider(domain)
@@ -110,15 +141,16 @@ def _release(
         f"providers/{domain}/manifest.json": json.dumps(
             manifest(domain, requirements or [])
         ).encode(),
-        f"providers/{domain}/__init__.py": code.encode(),
     }
+    if code is not None:
+        content[f"providers/{domain}/__init__.py"] = code.encode()
     archive.write_bytes(build_archive(content))
     registry = load_registry(files.root)
     add_version(registry, domain, version, archive, tag=f"v{version}", commit=COMMIT)
 
 
 def _check(
-    files: Files, wheels: Path, domain: str, stage: str, **run: int
+    files: Files, wheels: Path, domain: str, stage: str, **run: Any
 ) -> subprocess.CompletedProcess[str]:
     """Run a stage of the checks of version 1.0.0 of a provider on nightly, as a container does."""
     scratch = files.root / "scratch" / domain
@@ -212,7 +244,7 @@ def test_a_check_that_cannot_run_gives_no_result(files: Files, tmp_path: Path) -
     run = _check(files, tmp_path / "no-such-index", "good_music", "install")
 
     assert run.returncode == 1
-    assert "good_music 1.0.0: the check could not run: " in run.stderr
+    assert "good_music 1.0.0: the check could not run on nightly: " in run.stderr
     assert not (files.root / "scratch" / "good_music" / "install.json").exists()
 
 
@@ -253,6 +285,101 @@ def test_the_output_of_a_load_keeps_its_end(files: Files, wheels: Path) -> None:
     assert result.output is not None
     assert len(result.output) <= 50_000
     assert result.output.rstrip().endswith("load: RuntimeError: boom")
+
+
+def test_a_moving_domain_is_checked_with_the_code_of_its_release(
+    files: Files, wheels: Path
+) -> None:
+    """A domain the server still ships is imported from the release, not from the server."""
+    files.write(
+        "reserved_domains.json",
+        {
+            **RESERVED,
+            "builtin_providers": [*RESERVED["builtin_providers"], *SHIPPED],
+            "moving": [*RESERVED["moving"], *SHIPPED],
+        },
+    )
+    _release(files, "musicbrainz", "1.0.0", "raise RuntimeError('the release ran')\n")
+    _release(files, "theaudiodb", "1.0.0", "VALUE = 1\n")
+    # without an __init__.py the folder is no package, and the server's own package wins
+    _release(files, "fanarttv", "1.0.0", None)
+
+    for domain in SHIPPED:
+        assert _check(files, wheels, domain, "install").returncode == 0
+        assert _check(files, wheels, domain, "load").returncode == 0
+
+    results = {
+        domain: load_model(files.root / "scratch" / domain / "load.json", LineResults).results[0]
+        for domain in SHIPPED
+    }
+    assert results["musicbrainz"].reason == "load: RuntimeError: the release ran"
+    assert (results["theaudiodb"].passed, results["theaudiodb"].reason) == (True, None)
+    assert results["fanarttv"].reason == (
+        "load: the server's own fanarttv was imported, not the one of the release"
+    )
+
+
+def test_requirements_need_wheels_for_linux_arm64(files: Files, wheels: Path) -> None:
+    """A requirement that installs here but has no wheel for linux arm64 fails the version."""
+    if _server_platform() in {"linux_aarch64", "linux_arm64"}:
+        pytest.skip("the wheel of the test is one for linux arm64 here")
+    _release(files, "host_music", "1.0.0", "import host_only_lib\n", ["host-only-lib==1.0"])
+
+    assert _check(files, wheels, "host_music", "install").returncode == 0
+
+    install = files.root / "scratch" / "host_music" / "install.json"
+    [result] = load_model(install, LineResults).results
+    assert result.reason == (
+        "dependencies: Requirements of host_music have no wheels for linux arm64"
+    )
+    assert "host-only-lib" in (result.output or "")
+
+
+@pytest.mark.parametrize("name", ["_server_constraints", "_UV_INDEX_ARGS"])
+def test_a_server_without_the_names_of_the_resolve_gives_no_result(
+    files: Files, wheels: Path, name: str
+) -> None:
+    """A server image that lacks what the arm64 resolve uses names it and gives no result."""
+    _release(files, "good_music", "1.0.0", "import helper_lib\n", ["helper-lib==1.0"])
+
+    run = _check(files, wheels, "good_music", "install", drop=name)
+
+    assert run.returncode != 0
+    assert "good_music 1.0.0: the check could not run on nightly" in run.stderr
+    assert f"has no {name} in music_assistant.controllers.community_catalog.dependencies" in (
+        run.stderr
+    )
+    assert not (files.root / "scratch" / "good_music" / "install.json").exists()
+
+
+def test_the_arm64_target_is_one_uv_knows() -> None:
+    """The C library maps to the newest manylinux target uv knows that it can run."""
+    cases = {
+        "glibc 2.41": "40",
+        "glibc 2.40": "40",
+        "glibc 2.36": "36",
+        "glibc 2.31": "31",
+        "glibc 2.30": "28",
+        "glibc 2.29": "28",
+        "glibc 2.28": "28",
+        "glibc 2.27": "17",
+        "glibc 2.17": "17",
+        "glibc 2.5": "17",
+        "musl 1.2.5": "17",
+        "": "17",
+    }
+    code = (
+        "import sys; from registry.check import arm64_platform as p; print(*map(p, sys.argv[1:]))"
+    )
+    run = subprocess.run(
+        [str(SERVER_PYTHON), "-c", code, *cases],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert run.stdout.split() == [f"aarch64-manylinux_2_{minor}" for minor in cases.values()]
 
 
 def test_check_folder(files: Files, wheels: Path, tmp_path: Path) -> None:
@@ -311,8 +438,10 @@ def test_check_folder(files: Files, wheels: Path, tmp_path: Path) -> None:
     )
 
 
-def _build_wheel(folder: Path, name: str, version: str, *requires: str) -> None:
-    """Write a pure-Python wheel with one module named after the distribution."""
+def _build_wheel(
+    folder: Path, name: str, version: str, *requires: str, platform: str = "any"
+) -> None:
+    """Write a wheel of Python code for a platform, with one module named after the distribution."""
     module = name.replace("-", "_")
     dist_info = f"{module}-{version}.dist-info"
     metadata = f"Metadata-Version: 2.1\nName: {name}\nVersion: {version}\n"
@@ -320,15 +449,27 @@ def _build_wheel(folder: Path, name: str, version: str, *requires: str) -> None:
     content = {
         f"{module}/__init__.py": f"VERSION = {version!r}\n",
         f"{dist_info}/METADATA": metadata,
-        f"{dist_info}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+        f"{dist_info}/WHEEL": (
+            f"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-{platform}\n"
+        ),
     }
     record = "".join(
         f"{path},sha256={_record_hash(text)},{len(text)}\n" for path, text in content.items()
     )
     content[f"{dist_info}/RECORD"] = f"{record}{dist_info}/RECORD,,\n"
-    with zipfile.ZipFile(folder / f"{module}-{version}-py3-none-any.whl", "w") as wheel:
+    with zipfile.ZipFile(folder / f"{module}-{version}-py3-none-{platform}.whl", "w") as wheel:
         for path, text in content.items():
             wheel.writestr(path, text)
+
+
+def _build_sdist(folder: Path, name: str, version: str) -> None:
+    """Write a source distribution with static metadata, which a server never installs."""
+    base = f"{name.replace('-', '_')}-{version}"
+    metadata = f"Metadata-Version: 2.2\nName: {name}\nVersion: {version}\n".encode()
+    with tarfile.open(folder / f"{base}.tar.gz", "w:gz") as sdist:
+        info = tarfile.TarInfo(f"{base}/PKG-INFO")
+        info.size = len(metadata)
+        sdist.addfile(info, io.BytesIO(metadata))
 
 
 def _record_hash(content: str) -> str:

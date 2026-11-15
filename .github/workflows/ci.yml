@@ -38,4 +38,20 @@ jobs:
       - run: uv run mypy
       - run: uv run codespell
       - run: uv run pytest
+      # the tests of the check step import the server, so they run inside the nightly server image
+      # as the release pipeline does; there they must run, not skip
+      - name: Tests of the check step, in the nightly server image
+        run: |
+          pytest_pin=$(uv export --frozen --only-group dev --no-hashes --no-header --no-annotate \
+            | grep -E '^pytest==')
+          docker run --rm --pull always --platform linux/amd64 --entrypoint /bin/sh \
+            --user "$(id -u):$(id -g)" --env HOME=/tmp --env PYTHONDONTWRITEBYTECODE=1 \
+            --env SERVER_PYTHON=/app/venv/bin/python --env PYTEST_PIN="$pytest_pin" \
+            --volume "$PWD:/catalog:ro" --workdir /catalog \
+            ghcr.io/music-assistant/server:nightly -c '
+              set -e
+              /app/venv/bin/python -m uv pip install --quiet --python /app/venv/bin/python \
+                --target /tmp/test-deps "$PYTEST_PIN"
+              PYTHONPATH=/tmp/test-deps /app/venv/bin/python -m pytest -p no:cacheprovider \
+                -rs tests/test_check.py'
       - run: uv run python -m registry validate

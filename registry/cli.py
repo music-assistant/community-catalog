@@ -162,7 +162,7 @@ def _check(args: argparse.Namespace) -> None:
         try:
             outcome = asyncio.run(install_version(archive, file, args.domain, args.scratch))
         except CheckUnavailableError as err:
-            msg = f"{name}: the check could not run: {err}"
+            msg = f"{name}: the check could not run on {args.line}: {err}"
             raise CommandError(msg) from err
         if outcome is None:
             print(f"{name}: ready to load")
