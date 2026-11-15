@@ -76,6 +76,20 @@ def test_a_provider_folder_named_otherwise(files: Files, tmp_path: Path) -> None
     assert index["providers"][DOMAIN]["versions"]["1.0.0"]["folder"] == "provider"
 
 
+def test_a_provider_folder_named_otherwise_must_hold_the_domain(
+    files: Files, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A folder that is not named after the domain is refused when its manifest names another."""
+    files.provider(folder="provider")
+    other = {**PROVIDER, "manifest.json": json.dumps(manifest("other_music")).encode()}
+    archive = tmp_path / "repo.tar.gz"
+    archive.write_bytes(build_archive({f"provider/{path}": data for path, data in other.items()}))
+
+    assert _add(files, archive) == 1
+    assert f"manifest.domain: 'other_music' is not {DOMAIN}" in capsys.readouterr().err
+    assert "1.0.0" not in load_registry(files.root).providers[DOMAIN].versions
+
+
 def test_add_version_from_a_folder_gives_the_hash_of_the_archive(
     files: Files, tmp_path: Path
 ) -> None:
