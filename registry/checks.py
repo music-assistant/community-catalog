@@ -283,5 +283,5 @@ def _folder_problem(folder: str, domain: str) -> str:
     """Return the problem of a provider folder that is not valid."""
     return (
         f"folder: {folder!r} is not a relative path in the repository whose last folder is "
-        f"named {domain}"
+        f"named {domain} or {formats.PROVIDER_FOLDER_NAME}"
     )

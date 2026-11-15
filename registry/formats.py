@@ -5,12 +5,13 @@ from __future__ import annotations
 import keyword
 import re
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 # the longest reason of a failed check a version file keeps
 MAX_REASON = 300
+# the name a provider folder may have besides its domain
+PROVIDER_FOLDER_NAME = "provider"
 
 _DOMAIN = re.compile(r"[a-z][a-z0-9_]*")
 _VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
@@ -139,16 +140,14 @@ def is_repository(value: str) -> bool:
 
 def is_provider_folder(value: str, domain: str) -> bool:
     """
-    Return whether a value is a folder in a repository that is named after the domain.
+    Return whether a value is a folder in a repository named after the domain or provider.
 
     :param value: A relative path with forward slashes, such as providers/foo.
     :param domain: The domain of the provider.
     """
     parts = value.split("/")
-    return (
-        all(_PATH_PART.fullmatch(part) and part not in {".", ".."} for part in parts)
-        and PurePosixPath(value).name == domain
-    )
+    valid = all(_PATH_PART.fullmatch(part) and part not in {".", ".."} for part in parts)
+    return valid and parts[-1] in {domain, PROVIDER_FOLDER_NAME}
 
 
 def is_tag_prefix(value: str) -> bool:

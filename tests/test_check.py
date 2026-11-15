@@ -272,12 +272,35 @@ def test_check_folder(files: Files, wheels: Path, tmp_path: Path) -> None:
         clash,
         {"manifest.json": json.dumps(manifest("clash_music", ["needs-old-orjson==1.0"])).encode()},
     )
+    # a folder that is not named after the domain is imported under the domain of its manifest
+    renamed = tmp_path / "other" / "provider"
+    write_tree(
+        renamed,
+        {
+            "manifest.json": json.dumps(manifest("good_music")).encode(),
+            "__init__.py": b"from .helper import VALUE\n",
+            "helper.py": b"VALUE = 1\n",
+        },
+    )
+    nameless = tmp_path / "other" / "nameless"
+    write_tree(nameless, {"manifest.json": json.dumps(manifest("Not A Domain")).encode()})
+    # any other name is refused
+    source = tmp_path / "other" / "src"
+    write_tree(source, {"manifest.json": json.dumps(manifest("good_music")).encode()})
 
     passed = _run(wheels, "--root", str(files.root), "check-folder", str(good))
     reserved = _run(wheels, "--root", str(files.root), "check-folder", str(taken))
     clashing = _run(wheels, "--root", str(files.root), "check-folder", str(clash))
+    renamed_passed = _run(wheels, "--root", str(files.root), "check-folder", str(renamed))
+    no_domain = _run(wheels, "--root", str(files.root), "check-folder", str(nameless))
+    other_name = _run(wheels, "--root", str(files.root), "check-folder", str(source))
 
     assert (passed.returncode, passed.stdout.strip()) == (0, "good_music: passed")
+    assert (renamed_passed.returncode, renamed_passed.stdout.strip()) == (0, "provider: passed")
+    assert no_domain.returncode == 1
+    assert "manifest.domain: 'Not A Domain' is not a provider domain" in no_domain.stderr
+    assert other_name.returncode == 1
+    assert "folder: 'src' is named neither good_music nor provider" in other_name.stderr
     assert reserved.returncode == 1
     assert "builtin_one: manifest: the domain builtin_one is a provider the server ships" in (
         reserved.stderr

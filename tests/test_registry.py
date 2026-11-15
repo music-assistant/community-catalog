@@ -154,7 +154,14 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
         ("players", {}, "domain: players is a core controller of the server"),
         ("library", {}, "domain: library is a name the server reserves"),
         (DOMAIN, {"repository": "someone"}, "repository: 'someone' is not a GitHub owner/name"),
-        (DOMAIN, {"folder": "providers/other"}, "folder: 'providers/other' is not a relative"),
+        (
+            DOMAIN,
+            {"folder": "src"},
+            (
+                "folder: 'src' is not a relative path in the repository whose last folder is named "
+                "sample_music or provider"
+            ),
+        ),
         (DOMAIN, {"tag_prefix": "a b"}, "tag_prefix: 'a b' is not allowed in a tag"),
         (DOMAIN, {"maintainers": []}, "maintainers: there is none"),
         (DOMAIN, {"maintainers": ["@someone"]}, "maintainers: '@someone' is not a GitHub handle"),
