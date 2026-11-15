@@ -101,7 +101,7 @@ async def check_folder(folder: Path, reserved: ReservedDomains) -> Outcome:
     """
     Run the checks on a provider folder of a checkout, as a provider's own CI does.
 
-    :param folder: The provider folder; its manifest names the domain.
+    :param folder: The provider folder, named after the domain its manifest names or provider.
     :param reserved: The domains a community provider cannot take.
     :raises CheckUnavailableError: A check could not run, for a reason that is not the provider's.
     """
@@ -113,6 +113,10 @@ async def check_folder(folder: Path, reserved: ReservedDomains) -> Outcome:
     if not (isinstance(domain, str) and formats.is_domain(domain)):
         return _failed("manifest", f"manifest.domain: {domain!r} is not a provider domain")
     problems = check_manifest(content.manifest, domain)
+    if folder.name not in {domain, formats.PROVIDER_FOLDER_NAME}:
+        problems.append(
+            f"folder: {folder.name!r} is named neither {domain} nor {formats.PROVIDER_FOLDER_NAME}"
+        )
     if reason := reserved_reason(domain, reserved):
         problems.append(f"the domain {domain} is {reason}")
     requirements = content.manifest.get("requirements", [])

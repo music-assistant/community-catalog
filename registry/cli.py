@@ -388,7 +388,9 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.set_defaults(run=_check)
 
     command = commands.add_parser("check-folder", help=_check_folder.__doc__)
-    command.add_argument("folder", type=Path, help="the provider folder")
+    command.add_argument(
+        "folder", type=Path, help="the provider folder, named after its domain or provider"
+    )
     command.set_defaults(run=_check_folder)
 
     command = commands.add_parser("apply-results", help=_apply_results.__doc__, parents=[work])

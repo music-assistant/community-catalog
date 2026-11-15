@@ -146,7 +146,12 @@ def test_repository(value: str, valid: bool) -> None:
         ("sample_music", True),
         ("providers/sample_music", True),
         ("provider", True),
-        ("providers/other", True),
+        ("some/path/provider", True),
+        ("providers/other", False),
+        ("src", False),
+        ("plugin", False),
+        ("foo/bar", False),
+        ("provider/sample", False),
         (".", False),
         ("/providers/sample_music", False),
         ("providers/../sample_music", False),
@@ -156,8 +161,8 @@ def test_repository(value: str, valid: bool) -> None:
     ],
 )
 def test_provider_folder(value: str, valid: bool) -> None:
-    """The provider folder is a relative path in the repository, whatever its name."""
-    assert formats.is_provider_folder(value) is valid
+    """The provider folder is a relative path named after the domain or provider."""
+    assert formats.is_provider_folder(value, "sample_music") is valid
 
 
 @pytest.mark.parametrize(

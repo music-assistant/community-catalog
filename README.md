@@ -58,7 +58,7 @@ No file or folder the commands read or write may be a symbolic link.
 | `domain` | Lower case letters, digits and underscores, starting with a letter. Equals the name of the folder in `providers/`, and is not a domain the server ships or reserves. |
 | `repository` | The GitHub repository as `owner/name`. |
 | `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename or a transfer keeps them; another repository under the same name has others, and nothing of it is fetched until a registry maintainer updates them. The admission checks print the right ones. |
-| `folder` | The provider folder in that repository, such as `sample_music`, `providers/sample_music` or `provider`. A server installs it as a folder named after the domain, whatever its name in the repository. |
+| `folder` | The provider folder in that repository, such as `sample_music`, `providers/sample_music` or `provider`. Its last part is the domain or `provider`: one predictable layout for a repository with a single provider (`provider`), and one for a repository with several (each in a folder named after its domain). A server installs it as a folder named after the domain. |
 | `tag_prefix` | Optional. What the release tags of this provider start with, for a repository that holds several providers. |
 | `maintainers` | GitHub handles, without `@`. At least one, at most 10, each the owner of the repository or a code owner in the manifest of the provider. Only they are mentioned in an issue on this repository. |
 | `status` | `listed`, `withdrawn` (offered no longer; what is installed keeps loading) or `blocked` (loaded by no server). |
@@ -176,9 +176,9 @@ refused.
 
 ## For provider maintainers
 
-- Keep the provider in one folder of your repository. Name it after its domain to run it from a
-  local folder: a server in development mode, the test fixture and the Dev app import a folder by
-  its name.
+- Keep the provider in a folder named `provider`, or named after its domain when the repository
+  holds several providers. Name it after its domain to run it from a local folder: a server in
+  development mode, the test fixture and the Dev app import a folder by its name.
 - Release by publishing a GitHub release whose tag is the version, such as `v1.2.0`, or the tag
   prefix and the version when the repository holds several providers.
 - Write requirements as package names with version specifiers.

@@ -154,7 +154,14 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
         ("players", {}, "domain: players is a core controller of the server"),
         ("library", {}, "domain: library is a name the server reserves"),
         (DOMAIN, {"repository": "someone"}, "repository: 'someone' is not a GitHub owner/name"),
-        (DOMAIN, {"folder": "providers/../x"}, "folder: 'providers/../x' is not a relative"),
+        (
+            DOMAIN,
+            {"folder": "src"},
+            (
+                "folder: 'src' is not a relative path in the repository whose last folder is named "
+                "sample_music or provider"
+            ),
+        ),
         (DOMAIN, {"tag_prefix": "a b"}, "tag_prefix: 'a b' is not allowed in a tag"),
         (DOMAIN, {"maintainers": []}, "maintainers: there is none"),
         (DOMAIN, {"maintainers": ["@someone"]}, "maintainers: '@someone' is not a GitHub handle"),
@@ -250,7 +257,7 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
         ({"commit": "0123abcd"}, "commit: '0123abcd' is not a full commit SHA"),
         ({"commit": "0123456789ABCDEF0123456789ABCDEF01234567"}, "commit: '0123456789ABCDEF"),
         ({"content_hash": "e3b0c442"}, "content_hash: 'e3b0c442' is not a sha256 hex digest"),
-        ({"folder": "/providers/x"}, "folder: '/providers/x' is not a relative path"),
+        ({"folder": "providers/other"}, "folder: 'providers/other' is not a relative path"),
         ({"manifest": manifest("other_music")}, "manifest.domain: 'other_music' is not"),
         ({"manifest": {**manifest(), "type": "core"}}, "manifest.type: 'core' is not one of"),
         ({"manifest": {**manifest(), "name": ""}}, "manifest.name: is missing or empty"),
