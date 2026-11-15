@@ -8,9 +8,8 @@ by an owner of the `music-assistant` organisation.
 - [ ] Create the public repository `music-assistant/community-catalog`, without a README or
       licence (both are here), and push `main`.
 - [ ] Settings → General: enable Issues; disable Wiki and Projects.
-- [ ] Create the team of registry maintainers and put its name in `.github/CODEOWNERS`, which
-      holds the placeholder `@music-assistant/community-catalog-maintainers`. Give the team
-      write access to this repository.
+- [ ] Give the team of registry maintainers named in `.github/CODEOWNERS`
+      (`@music-assistant/core`) write access to this repository.
 - [ ] Settings → Rules: a ruleset for `main` that requires a pull request with the review of a
       code owner, requires the status check "Lint, types, tests and validation", and blocks
       force pushes and deletion. Add the Music Assistant Bot app to its bypass list: the Releases
@@ -51,9 +50,9 @@ the ruleset, so nothing is merged without a registry maintainer, who sees a chan
 - [ ] Settings → Environments: create the environment `releases`, with deployment branches
       limited to `main`. The jobs of the Releases workflow that push or open issues run in it,
       and only on `main`.
-- [ ] Store the app's private key as the secret `MUSIC_ASSISTANT_BOT_PRIVATE_KEY` of the
-      environment `releases`, so a run on any other branch cannot read it, and do not make the
-      organisation secret of that name available to this repository.
+- [ ] Make the organisation secret `MUSIC_ASSISTANT_BOT_PRIVATE_KEY` (the app's private key)
+      available to this repository. Any workflow run of a branch in this repository can read
+      it, as in the server repository, so only registry maintainers get write access here.
 - [ ] Create the repository variable `MUSIC_ASSISTANT_BOT_CLIENT_ID` with the client id of the
       app (Settings → Secrets and variables → Actions → Variables). The Releases workflow reads
       it as a variable, as the workflows of the server repository do.
