@@ -145,7 +145,12 @@ jobs:
           GH_TOKEN: ${{ steps.token.outputs.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          git add providers site
+          # a folder that does not exist yet (no provider admitted) is not a pathspec git accepts
+          for path in providers site; do
+            if [ -e "$path" ] || [ -n "$(git ls-files -- "$path")" ]; then
+              git add "$path"
+            fi
+          done
           if git diff --cached --quiet; then
             echo "Nothing changed"
             exit 0
