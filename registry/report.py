@@ -1,148 +1,320 @@
-"""The report step: an issue for the maintainer of every release that failed or was refused."""
+"""The report step: one issue on the registry for each provider whose releases need attention."""
 
 from __future__ import annotations
 
-import hashlib
+import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from registry.formats import version_key
+from registry.github import ACTIONS_LOGIN
 from registry.markdown import code_block, code_span
-from registry.models import Issue
+from registry.models import Failure, ProviderReport
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from registry.github import GitHub
     from registry.models import FetchReport, LineResults, VersionResult
     from registry.registry import Provider, Registry
 
-# where an issue goes when the repository of a provider has issues switched off
-REGISTRY_REPOSITORY = "music-assistant/community-catalog"
-README_URL = f"https://github.com/{REGISTRY_REPOSITORY}#readme"
-# GitHub takes 65536 characters in the body of an issue; the end of the output is kept
+# the label of the issues of the release pipeline
+LABEL = "release-check"
+README_URL = "https://github.com/music-assistant/community-catalog#releasing-updates"
+CHANGE_FORM_URL = (
+    "https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml"
+)
+# the most maintainers a new issue mentions
+MAX_MENTIONS = 10
+# GitHub takes 65536 characters in an issue or a comment, counted as UTF-16
+_MAX_TEXT = 65_536
+# the failures of one post share at most this much of the end of their output
 _MAX_OUTPUT = 40_000
+# the first line of an issue or comment of the pipeline: the domain and the keys of its failures
+_MARKER = re.compile(r"<!-- release-check: ([a-z][a-z0-9_]*)((?:; [a-z0-9. ]+)*) -->")
+# a manifest name a title shows; any other name is left out of the title
+_TITLE_NAME = re.compile(r"[\w .,()&'+-]{1,60}")
 
 
-def build_issues(
+@dataclass(frozen=True, slots=True)
+class OpenIssue:
+    """The open issue of the pipeline for a provider."""
+
+    number: int
+    # the keys of the failures it tells, in its text and in the comments of the pipeline
+    keys: frozenset[str]
+
+
+def build_reports(
     registry: Registry, fetched: FetchReport, results: list[LineResults]
-) -> list[Issue]:
+) -> list[ProviderReport]:
     """
-    Return an issue for every release refused or version failed, and every repository moved.
+    Return the report of every provider: its failures in this run not settled, and its state.
 
-    A repository moved when it is not the one that was admitted: its ids differ.
+    The failures are the releases refused in this run, the versions that failed a check and a
+    repository that is not the admitted one. A failure is settled when is_settled says so.
 
     :param registry: The registry, with the refused releases of the fetch step.
     :param fetched: What the fetch step found.
     :param results: The results of the check step, as read_results returns them.
     """
-    issues: list[Issue] = []
-    for _, provider in sorted(registry.providers.items()):
-        if (issue := _repository_issue(fetched, provider)) is not None:
-            issues.append(issue)
+    tested = sorted(line for line, config in registry.server_lines.items() if not config.frozen)
+    passed: dict[tuple[str, str, str], bool] = {
+        (domain, version, line): check.passed
+        for domain, provider in registry.providers.items()
+        for version, file in provider.versions.items()
+        for line, check in file.checks.items()
+    }
+    failures: dict[str, list[Failure]] = {}
     for refused in fetched.refused:
-        provider = registry.providers[refused.domain]
-        release = provider.refused[refused.version]
-        text = (
-            f"The Music Assistant community catalog could not take release "
-            f"{code_span(release.tag)} (commit `{release.commit}`) of `{refused.domain}`:\n\n"
-            f"{code_block(release.reason)}\n"
-            "This release is not offered to any server and is not tried again. Publish a new "
-            "release once it is fixed."
+        if refused.domain in registry.providers:
+            provider = registry.providers[refused.domain]
+            failures.setdefault(refused.domain, []).append(_refusal(provider, refused.version))
+    for file in results:
+        if file.line not in tested:
+            continue
+        for result in file.results:
+            passed[result.domain, result.version, file.line] = result.passed
+            if not result.passed and result.domain in registry.providers:
+                provider = registry.providers[result.domain]
+                failure = _check_failure(provider, file.line, result)
+                failures.setdefault(result.domain, []).append(failure)
+    reports: list[ProviderReport] = []
+    for domain, provider in sorted(registry.providers.items()):
+        newest = max([*provider.versions, *provider.refused], key=version_key, default=None)
+        state = fetched.repositories.get(provider.file.repository)
+        ids = (provider.file.repository_id, provider.file.owner_id)
+        report = ProviderReport(
+            domain=domain,
+            title=_title(provider),
+            maintainers=provider.maintainers()[:MAX_MENTIONS],
+            failures=[],
+            newest=newest,
+            tested=tested,
+            passed=[line for line in tested if passed.get((domain, newest or "", line))],
+            admitted=state is not None and (state.repository_id, state.owner_id) == ids,
         )
-        issues.append(
-            _issue(
-                fetched,
-                provider,
-                f"release {refused.version}",
-                f"Release {release.tag} of {refused.domain} was refused by the community catalog",
-                text,
+        found = failures.get(domain, [])
+        if state is not None and not report.admitted:
+            found.insert(0, _repository_failure(provider, state.repository_id, state.owner_id))
+        report.failures = [failure for failure in found if not is_settled(report, failure.key)]
+        reports.append(report)
+    return reports
+
+
+def is_settled(report: ProviderReport, key: str) -> bool:
+    """
+    Return whether a failure of a provider no longer needs its maintainers.
+
+    That is when the newest version passed on a tested line, and also on the line of a failed
+    check, unless that line is no longer tested; for a repository that was not the admitted one,
+    GitHub must give the admitted one again.
+
+    :param report: The report of the provider.
+    :param key: The key of the failure.
+    """
+    kind, *rest = key.split(" ")
+    if not report.passed:
+        return False
+    match kind, rest:
+        case "check", [_, line]:
+            return line in report.passed or line not in report.tested
+        case "refused", [_]:
+            return True
+        case "repository", [_, _]:
+            return report.admitted
+    return False
+
+
+def open_issues(github: GitHub, repository: str) -> dict[str, OpenIssue | OSError]:
+    """
+    Return the open issue of the pipeline of each provider, by domain.
+
+    Only what the pipeline's own account wrote counts, so nobody can settle or hide a failure by
+    writing its key. A provider whose issue could not be read this time gets the error instead.
+
+    :param github: A client.
+    :param repository: The repository of the registry, as owner/name.
+    :raises OSError: The issues could not be listed.
+    """
+    result: dict[str, OpenIssue | OSError] = {}
+    for issue in sorted(github.issues(repository, LABEL), key=lambda issue: issue.number):
+        if issue.author != ACTIONS_LOGIN or (told := _marker(issue.body)) is None:
+            continue
+        domain, keys = told
+        if domain in result:
+            continue
+        try:
+            comments = github.comments(repository, issue.number)
+        except OSError as err:
+            result[domain] = err
+            continue
+        for comment in comments:
+            if comment.author == ACTIONS_LOGIN and (more := _marker(comment.body)) is not None:
+                keys |= more[1]
+        result[domain] = OpenIssue(issue.number, keys)
+    return result
+
+
+def post_report(
+    report: ProviderReport, issue: OpenIssue | None, github: GitHub, repository: str
+) -> str | None:
+    """
+    Tell the maintainers of a provider about its new failures, or close its issue once settled.
+
+    Without an open issue, new failures open one that mentions the maintainers. With one, they
+    are added as a comment, and an issue whose failures are all settled is closed. Returns what
+    was done, or None when nothing was.
+
+    :param report: The report of the provider.
+    :param issue: The open issue of the pipeline for the provider.
+    :param github: A client whose token may write issues on the registry.
+    :param repository: The repository of the registry, as owner/name.
+    :raises GitHubError: GitHub refused a request.
+    """
+    told = issue.keys if issue is not None else frozenset()
+    new = [failure for failure in report.failures if failure.key not in told]
+    if issue is None:
+        if not new:
+            return None
+        mentions = " ".join(f"@{handle}" for handle in report.maintainers)
+        fix = (
+            "Publish a new release that fixes this. A refused release is not tried again. "
+            if any(not failure.key.startswith("repository ") for failure in new)
+            else ""
+        )
+        body = _fit(
+            lambda room: (
+                f"{_marker_line(report.domain, new)}\n"
+                f"The Music Assistant community catalog checks the releases of `{report.domain}`. "
+                f"This needs the attention of its maintainers:\n\n{_failures(new, room)}"
+                f"### What to do\n\n{fix}[Releasing updates]({README_URL}) tells how releases are "
+                "checked. This issue closes by itself once the newest release passes the checks."
+                f"\n\n{mentions}\n"
             )
         )
-    for file in results:
-        for result in file.results:
-            if not result.passed:
-                provider = registry.providers[result.domain]
-                issues.append(_check_issue(fetched, provider, file.line, result))
-    return issues
+        return github.create_issue(repository, report.title, body, [LABEL])
+    if new:
+        body = _fit(lambda room: f"{_marker_line(report.domain, new)}\n{_failures(new, room)}")
+        github.add_comment(repository, issue.number, body)
+        return f"#{issue.number}: {len(new)} new failure(s)"
+    if all(is_settled(report, key) for key in told):
+        line = f"Version {report.newest} passed the checks, so this issue is closed."
+        github.add_comment(repository, issue.number, line)
+        github.close_issue(repository, issue.number)
+        return f"#{issue.number}: closed"
+    return None
 
 
-def _check_issue(
-    fetched: FetchReport, provider: Provider, line: str, result: VersionResult
-) -> Issue:
-    """Return the issue for a version that failed the checks on a server line."""
-    domain, version = result.domain, result.version
+def _check_failure(provider: Provider, line: str, result: VersionResult) -> Failure:
+    """Return the failure of a version that failed the checks on a server line."""
+    version = result.version
     commit = provider.versions[version].commit
     if result.passed_before:
-        title = f"{domain} {version} no longer passes the community catalog checks on {line}"
+        heading = f"Version {version} no longer passes the checks on {line}"
         effect = (
-            f"It passed before. Servers of the `{line}` line now get the newest version that "
-            "still passes there, if there is one."
+            f"It passed before. Servers of the `{line}` line get the newest version that still "
+            "passes there, if there is one."
         )
     else:
-        title = f"{domain} {version} does not pass the community catalog checks on {line}"
+        heading = f"Version {version} does not pass the checks on {line}"
         effect = f"Servers of the `{line}` line are not offered this version."
     text = (
-        f"The Music Assistant community catalog checked version {version} (commit `{commit}`) "
-        f"of `{domain}` in the server image of the `{line}` line, and it did not pass:\n\n"
-        f"{code_block(result.reason or '')}\n{effect}"
+        f"Version {version} (commit `{commit}`) was checked in the server image of the `{line}` "
+        f"line, and did not pass:\n\n{code_block(result.reason or '')}\n{effect}"
     )
-    if result.output and result.output != (result.reason or ""):
-        output = result.output[-_MAX_OUTPUT:]
-        text += f"\n\n<details><summary>Output</summary>\n\n{code_block(output)}\n</details>"
-    return _issue(fetched, provider, f"check {version} {line}", title, text)
+    output = result.output if result.output and result.output != result.reason else None
+    return Failure(
+        key=f"check {version} {line}",
+        heading=heading,
+        text=text,
+        output=output,
+    )
 
 
-def _repository_issue(fetched: FetchReport, provider: Provider) -> Issue | None:
-    """Return the issue for a provider whose repository has other ids than when it was admitted."""
-    file = provider.file
-    state = fetched.repositories.get(file.repository)
-    if state is None or (state.repository_id, state.owner_id) == (
-        file.repository_id,
-        file.owner_id,
-    ):
-        return None
-    found = f"repository_id {state.repository_id}, owner_id {state.owner_id}"
+def _refusal(provider: Provider, version: str) -> Failure:
+    """Return the failure of a release that was refused in this run."""
+    release = provider.refused[version]
     text = (
-        f"The repository `{file.repository}` of `{file.domain}` is not the repository that was "
-        f"admitted: GitHub gives it {found}, while `provider.json` has repository_id "
-        f"{file.repository_id}, owner_id {file.owner_id}. It was renamed, transferred or "
-        "replaced by another one under the same name. Nothing of it is fetched until a "
-        "registry maintainer updates `provider.json`."
+        f"Release {code_span(release.tag)} (commit `{release.commit}`) could not become a "
+        f"version:\n\n{code_block(release.reason)}\n"
+        "This release is not offered to any server and is not tried again."
     )
-    title = f"The repository of {file.domain} is not the one that was admitted"
-    return _issue(fetched, provider, f"repository {found}", title, text, registry=True)
+    return Failure(key=f"refused {version}", heading=f"Release {version} was refused", text=text)
 
 
-def _issue(
-    fetched: FetchReport,
-    provider: Provider,
-    what: str,
-    title: str,
-    text: str,
-    *,
-    registry: bool = False,
-) -> Issue:
+def _repository_failure(provider: Provider, repository_id: int, owner_id: int) -> Failure:
+    """Return the failure of a repository that has other ids than when it was admitted."""
+    file = provider.file
+    text = (
+        f"GitHub gives the repository `{file.repository}` repository_id {repository_id}, "
+        f"owner_id {owner_id}, while the catalog admitted repository_id {file.repository_id}, "
+        f"owner_id {file.owner_id}: it was renamed, transferred or replaced by another one under "
+        "the same name. No release of it is checked until a registry maintainer updates the "
+        "catalog. If you moved the repository, ask for the change with the form "
+        f"[Report or change a provider]({CHANGE_FORM_URL})."
+    )
+    return Failure(
+        key=f"repository {repository_id} {owner_id}",
+        heading="The repository is not the one that was admitted",
+        text=text,
+    )
+
+
+def _title(provider: Provider) -> str:
+    """Return the title of an issue: the name of the newest manifest when plain, and the domain."""
+    domain = provider.file.domain
+    highest = max(provider.versions, key=version_key, default=None)
+    name = provider.versions[highest].manifest.get("name") if highest is not None else None
+    if isinstance(name, str) and name == name.strip() and _TITLE_NAME.fullmatch(name):
+        return f"{name} ({domain}): release checks failed"
+    return f"{domain}: release checks failed"
+
+
+def _fit(render: Callable[[int], str]) -> str:
     """
-    Return an issue, on the repository of the provider or on the registry when it has none.
+    Return the text of a post with as much output as GitHub takes in it.
 
-    The maintainers of the provider are mentioned only in an issue on the registry.
-
-    :param fetched: What the fetch step found of the repositories.
-    :param provider: The provider.
-    :param what: What failed, which with the domain makes the key of the issue.
-    :param title: The title of the issue.
-    :param text: What failed and what it means, in Markdown.
-    :param registry: Whether the issue is for the registry, whatever the repository has.
+    :param render: Returns the text with at most this many characters of output.
     """
-    domain, repository = provider.file.domain, provider.file.repository
-    key = hashlib.sha256(f"{domain} {what}".encode()).hexdigest()[:16]
-    body = f"{text}\n\nWhat the checks do: {README_URL}\n"
-    state = fetched.repositories.get(repository)
-    if registry or state is None or not state.has_issues:
-        mentions = " ".join(f"@{handle}" for handle in provider.maintainers())
-        if registry:
-            body += f"\n{mentions}\n"
-        else:
-            body += (
-                f"\nThis issue is opened here because `{repository}` has issues switched off. "
-                f"{mentions}\n"
+    room = _MAX_OUTPUT
+    # the fences grow with the output, so the whole text is measured
+    while len((text := render(room)).encode("utf-16-le")) // 2 > _MAX_TEXT and room:
+        room //= 2
+    return text
+
+
+def _failures(failures: list[Failure], room: int) -> str:
+    """Return failures in Markdown, each under its heading, sharing the room for output."""
+    share = room // len(failures)
+    text = ""
+    for failure in failures:
+        text += f"### {failure.heading}\n\n{failure.text}\n\n"
+        if failure.output:
+            shown = failure.output[-share:] if share else ""
+            summary = (
+                "Output"
+                if shown == failure.output
+                else f"Output, shortened to its last {len(shown)} characters"
             )
-        repository = REGISTRY_REPOSITORY
-    body += f"\n<!-- community-catalog: {key} -->\n"
-    return Issue(key=key, repository=repository, title=title, body=body)
+            output = code_block(shown)
+            text += f"<details><summary>{summary}</summary>\n\n{output}\n</details>\n\n"
+    return text
+
+
+def _marker_line(domain: str, failures: list[Failure]) -> str:
+    """Return the first line of a post of the pipeline, which names the failures it tells."""
+    return f"<!-- release-check: {'; '.join([domain, *(f.key for f in failures)])} -->"
+
+
+def _marker(body: str) -> tuple[str, frozenset[str]] | None:
+    """
+    Return the domain and the keys a post of the pipeline tells, or None for another text.
+
+    Only the first line counts: the rest shows text of the provider.
+
+    :param body: The text of the issue or comment.
+    """
+    if (found := _MARKER.fullmatch(body.split("\n", 1)[0])) is None:
+        return None
+    return found[1], frozenset(found[2].split("; ")[1:])

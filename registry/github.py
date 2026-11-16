@@ -15,23 +15,26 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
 from registry.formats import is_commit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from pathlib import Path
-
-    from registry.models import Issue
 
 API_URL = "https://api.github.com"
 GRAPHQL_URL = f"{API_URL}/graphql"
 ARCHIVE_URL = "https://codeload.github.com/{repository}/tar.gz/{commit}"
 USER_AGENT = "music-assistant-community-catalog"
+# the account of the token of a workflow
+ACTIONS_LOGIN = "github-actions[bot]"
 # repositories per GraphQL request; well below the limits GitHub sets for one query
 BATCH_SIZE = 50
 # the releases read per repository, newest first; also for a repository with several providers
 RELEASES_PER_REPOSITORY = 30
 # the largest archive of a commit that is downloaded; a larger one is refused
 MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
-# the comments and pull requests read per request, the most GitHub answers
-COMMENTS_PER_PAGE = 100
+# the issues and comments read per request: GitHub takes 65536 characters in each, at most 6
+# bytes apiece as JSON (\uXXXX), so a full page stays below the largest answer read
+ISSUES_PER_PAGE = 25
+COMMENTS_PER_PAGE = 25
+# the pull requests read per request, the most GitHub answers
 PULL_REQUESTS_PER_PAGE = 100
 # far more than any answer of the API the registry asks for
 _MAX_ANSWER_SIZE = 10 * 1024 * 1024
@@ -103,12 +106,22 @@ class RepositoryInfo:
 class IssueInfo:
     """What the registry reads of an issue."""
 
+    number: int
     author: str
     body: str
     labels: list[str]
     open: bool
     # the API answers a pull request as an issue as well
     pull_request: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Comment:
+    """A comment on an issue or a pull request."""
+
+    id: int
+    author: str
+    body: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +167,6 @@ class GitHub:
         """
         self._token = token
         self._transport = transport
-        self._login: str | None = None
 
     def repositories(self, names: Sequence[str]) -> dict[str, RepositoryInfo | GitHubError | None]:
         """
@@ -244,24 +256,27 @@ class GitHub:
         :raises GitHubError: GitHub refused a request.
         """
         content = json.dumps({"body": f"{marker}\n{body}"}).encode()
+        for comment in self.comments(repository, number):
+            if comment.author == author and comment.body.startswith(marker):
+                request = self._request(
+                    f"{API_URL}/repos/{repository}/issues/comments/{comment.id}",
+                    content,
+                    method="PATCH",
+                )
+                return str(self._json(request).get("html_url"))
         comments = f"{API_URL}/repos/{repository}/issues/{number}/comments"
-        for page in itertools.count(1):
-            url = f"{comments}?per_page={COMMENTS_PER_PAGE}&page={page}"
-            listed = self._answer(self._request(url))
-            if not isinstance(listed, list):
-                msg = f"{url} answered no list"
-                raise GitHubError(msg)
-            for comment in listed:
-                if _is_comment(comment, author, marker):
-                    request = self._request(
-                        f"{API_URL}/repos/{repository}/issues/comments/{comment['id']}",
-                        content,
-                        method="PATCH",
-                    )
-                    return str(self._json(request).get("html_url"))
-            if len(listed) < COMMENTS_PER_PAGE:
-                break
         return str(self._json(self._request(comments, content), expected=201).get("html_url"))
+
+    def comments(self, repository: str, number: int) -> list[Comment]:
+        """
+        Return the comments on an issue or a pull request, oldest first.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue or pull request.
+        :raises GitHubError: GitHub refused a request, or answered a comment that cannot be read.
+        """
+        url = f"{API_URL}/repos/{repository}/issues/{number}/comments"
+        return self._pages(url, COMMENTS_PER_PAGE, _comment)
 
     def add_comment(self, repository: str, number: int, body: str) -> None:
         """
@@ -286,16 +301,24 @@ class GitHub:
         """
         found = self._json(self._request(f"{API_URL}/repos/{repository}/issues/{number}"))
         try:
-            return IssueInfo(
-                author=_text(found["user"]["login"]),
-                body=_text(found["body"] or ""),
-                labels=[_text(label["name"]) for label in found["labels"]],
-                open=found["state"] == "open",
-                pull_request="pull_request" in found,
-            )
+            return _issue(found)
         except (KeyError, TypeError) as err:
             msg = f"GitHub answered an issue that cannot be read: {err!r}"
             raise GitHubError(msg) from err
+
+    def issues(self, repository: str, label: str) -> list[IssueInfo]:
+        """
+        Return the open issues of a repository that have a label, without pull requests.
+
+        :param repository: The repository, as owner/name.
+        :param label: The label.
+        :raises GitHubError: GitHub refused a request, or answered an issue that cannot be read.
+        """
+        query = urllib.parse.urlencode({"state": "open", "labels": label})
+        url = f"{API_URL}/repos/{repository}/issues?{query}"
+        return [
+            issue for issue in self._pages(url, ISSUES_PER_PAGE, _issue) if not issue.pull_request
+        ]
 
     def pull_requests(self, repository: str) -> list[PullRequest]:
         """
@@ -305,22 +328,8 @@ class GitHub:
         :raises GitHubError: GitHub refused a request, or answered a pull request that cannot be
             read.
         """
-        result: list[PullRequest] = []
-        pulls = f"{API_URL}/repos/{repository}/pulls?state=open&per_page={PULL_REQUESTS_PER_PAGE}"
-        for page in itertools.count(1):
-            url = f"{pulls}&page={page}"
-            listed = self._answer(self._request(url))
-            if not isinstance(listed, list):
-                msg = f"{url} answered no list"
-                raise GitHubError(msg)
-            try:
-                result += [_pull_request(pull) for pull in listed]
-            except (KeyError, TypeError) as err:
-                msg = f"GitHub answered a pull request that cannot be read: {err!r}"
-                raise GitHubError(msg) from err
-            if len(listed) < PULL_REQUESTS_PER_PAGE:
-                break
-        return result
+        url = f"{API_URL}/repos/{repository}/pulls?state=open"
+        return self._pages(url, PULL_REQUESTS_PER_PAGE, _pull_request)
 
     def create_pull_request(
         self, repository: str, *, title: str, branch: str, base: str, body: str
@@ -443,43 +452,31 @@ class GitHub:
         url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}"
         self._json(self._request(url, json.dumps(data).encode(), method="PUT"), expected=201)
 
-    def login(self) -> str:
-        """
-        Return the handle of the account the token belongs to.
-
-        :raises GitHubError: GitHub refused the request.
-        """
-        if self._login is None:
-            self._login = str(self._json(self._request(f"{API_URL}/user")).get("login"))
-        return self._login
-
-    def issue_exists(self, repository: str, key: str) -> bool:
-        """
-        Return whether the account of the token opened an issue with a key on a repository.
-
-        The issue may be open or closed; the key is in its body.
-
-        :param repository: The repository, as owner/name.
-        :param key: The key of the issue.
-        :raises GitHubError: GitHub refused the request.
-        """
-        search = f'"{key}" repo:{repository} is:issue in:body author:{self.login()}'
-        query = urllib.parse.urlencode({"q": search})
-        found = self._json(self._request(f"{API_URL}/search/issues?{query}"))
-        return bool(found.get("total_count"))
-
-    def create_issue(self, repository: str, title: str, body: str) -> str:
+    def create_issue(self, repository: str, title: str, body: str, labels: list[str]) -> str:
         """
         Open an issue and return its address.
 
         :param repository: The repository, as owner/name.
         :param title: The title of the issue.
         :param body: The text of the issue, in Markdown.
+        :param labels: The labels of the issue, which exist on the repository.
         :raises GitHubError: GitHub refused the request.
         """
-        content = json.dumps({"title": title, "body": body}).encode()
+        content = json.dumps({"title": title, "body": body, "labels": labels}).encode()
         request = self._request(f"{API_URL}/repos/{repository}/issues", content)
         return str(self._json(request, expected=201).get("html_url"))
+
+    def close_issue(self, repository: str, number: int) -> None:
+        """
+        Close an issue as completed.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue.
+        :raises GitHubError: GitHub refused the request.
+        """
+        content = json.dumps({"state": "closed", "state_reason": "completed"}).encode()
+        url = f"{API_URL}/repos/{repository}/issues/{number}"
+        self._json(self._request(url, content, method="PATCH"))
 
     def _graphql(
         self, query: str, variables: dict[str, str]
@@ -509,6 +506,32 @@ class GitHub:
             msg = f"GitHub refused the query: {str(answer)[:500]}"
             raise GitHubError(msg)
         return data, errors
+
+    def _pages[T](self, url: str, size: int, parse: Callable[[dict[str, Any]], T]) -> list[T]:
+        """
+        Return every item of a listing of the API, read page by page.
+
+        :param url: The address of the listing.
+        :param size: The items per page.
+        :param parse: Returns an item as the API answers it.
+        :raises GitHubError: GitHub refused a request, or answered an item that cannot be read.
+        """
+        result: list[T] = []
+        separator = "&" if "?" in url else "?"
+        for page in itertools.count(1):
+            address = f"{url}{separator}per_page={size}&page={page}"
+            listed = self._answer(self._request(address))
+            if not isinstance(listed, list):
+                msg = f"{address} answered no list"
+                raise GitHubError(msg)
+            try:
+                result += [parse(item) for item in listed]
+            except (KeyError, TypeError) as err:
+                msg = f"{address} answered an item that cannot be read: {err!r}"
+                raise GitHubError(msg) from err
+            if len(listed) < size:
+                break
+        return result
 
     def _json(self, request: urllib.request.Request, expected: int = 200) -> dict[str, Any]:
         """
@@ -574,22 +597,6 @@ class GitHub:
         return urllib.request.Request(url, content, headers, method=method)  # noqa: S310
 
 
-def post_issue(issue: Issue, github: GitHub) -> str | None:
-    """
-    Open an issue on GitHub, unless the same account opened an issue with its key before.
-
-    Returns the address of the new issue, or None when it was reported before.
-
-    :param issue: The issue.
-    :param github: A client whose token may open issues on the repository of the issue.
-    :raises GitHubError: GitHub refused a request.
-    :raises OSError: A request could not be sent.
-    """
-    if github.issue_exists(issue.repository, issue.key):
-        return None
-    return github.create_issue(issue.repository, issue.title, issue.body)
-
-
 def _repository(node: dict[str, Any]) -> RepositoryInfo:
     """
     Return a repository as the GraphQL API answers it.
@@ -625,17 +632,36 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
         raise GitHubError(msg) from err
 
 
-def _is_comment(comment: object, author: str, marker: str) -> bool:
-    """Return whether a comment as the API answers it is by an account and starts with a marker."""
-    if not isinstance(comment, dict):
-        return False
-    user, body = comment.get("user"), comment.get("body")
-    return (
-        isinstance(user, dict)
-        and type(comment.get("id")) is int
-        and user.get("login") == author
-        and isinstance(body, str)
-        and body.startswith(marker)
+def _issue(found: dict[str, Any]) -> IssueInfo:
+    """
+    Return an issue as the API answers it.
+
+    :param found: The issue in the answer.
+    :raises KeyError: A field is missing.
+    :raises TypeError: A field is of another type.
+    """
+    return IssueInfo(
+        number=_id(found["number"]),
+        author=_text(found["user"]["login"]),
+        body=_text(found["body"] or ""),
+        labels=[_text(label["name"]) for label in found["labels"]],
+        open=found["state"] == "open",
+        pull_request="pull_request" in found,
+    )
+
+
+def _comment(comment: dict[str, Any]) -> Comment:
+    """
+    Return a comment as the API answers it.
+
+    :param comment: The comment in the answer.
+    :raises KeyError: A field is missing.
+    :raises TypeError: A field is of another type.
+    """
+    return Comment(
+        id=_id(comment["id"]),
+        author=_text(comment["user"]["login"]),
+        body=_text(comment["body"] or ""),
     )
 
 

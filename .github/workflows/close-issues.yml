@@ -2,8 +2,8 @@ name: Close issues
 
 # This repository gives no support: an issue that is not one of its forms gets one fixed comment
 # that says where to go, and is closed as not planned. Exempt are people with write access, bots
-# and the account that opens the issues of the release pipeline. Nothing of the issue but its
-# number reaches the script or the comment.
+# and the issues of the release pipeline, also when someone else reopens one. Nothing of the issue
+# but its number reaches the script or the comment.
 
 on:
   issues:
@@ -18,15 +18,13 @@ concurrency:
 jobs:
   close:
     name: Close an issue that is not a form
-    # the variable REPORT_ACCOUNT is the handle of the account that opens the issues of the
-    # release pipeline
     if: >-
       ${{ !contains(github.event.issue.labels.*.name, 'submission')
       && !contains(github.event.issue.labels.*.name, 'report')
+      && !contains(github.event.issue.labels.*.name, 'release-check')
       && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
       github.event.issue.author_association)
-      && github.event.issue.user.type != 'Bot'
-      && github.event.issue.user.login != vars.REPORT_ACCOUNT }}
+      && github.event.issue.user.type != 'Bot' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

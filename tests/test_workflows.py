@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,7 @@ def _load(path: Path) -> dict[Any, Any]:
 
 CLOSE_ISSUES: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "close-issues.yml")
 ADMISSION: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "admission.yml")
+RELEASES: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "releases.yml")
 JOBS = [
     pytest.param(_load(path), job, id=f"{path.name}:{job}")
     for path in WORKFLOWS
@@ -174,21 +176,46 @@ def test_close_issues_can_only_write_issues() -> None:
 
 
 def test_close_issues_leaves_forms_and_trusted_authors_alone() -> None:
-    """The forms, people with write access, bots and the pipeline's own account are exempt."""
+    """The forms, people with write access, bots and the issues of the pipeline are exempt."""
     condition = CLOSE_ISSUES["jobs"]["close"]["if"]
 
     for exemption in (
         "!contains(github.event.issue.labels.*.name, 'submission')",
         "!contains(github.event.issue.labels.*.name, 'report')",
+        "!contains(github.event.issue.labels.*.name, 'release-check')",
         (
             '!contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'),'
             " github.event.issue.author_association)"
         ),
         "github.event.issue.user.type != 'Bot'",
-        "github.event.issue.user.login != vars.REPORT_ACCOUNT",
     ):
         assert exemption in condition, exemption
     assert "||" not in condition
+
+
+def test_the_report_job_writes_only_issues() -> None:
+    """The report job writes issues with the workflow's own token, only on main, nothing else."""
+    job = RELEASES["jobs"]["report"]
+
+    assert _effective(RELEASES, "report") == {"contents": "read", "issues": "write"}
+    assert "github.ref == 'refs/heads/main'" in job["if"]
+    assert "environment" not in job
+    assert "secrets." not in json.dumps(job)
+    assert not _app_tokens(job)
+    [post] = [step for step in _steps(job) if "post-issues" in step.get("run", "")]
+    assert post["env"]["GITHUB_TOKEN"] == "${{ github.token }}"  # noqa: S105 - an expression
+    assert "if" not in post
+
+
+def test_every_secret_and_variable_is_one_that_is_set() -> None:
+    """The workflows read only the key and the client id of the app, no other secret or variable."""
+    used = {
+        found
+        for path in WORKFLOWS
+        for found in re.findall(r"\b(?:secrets|vars)\.[A-Za-z_]+", path.read_text())
+    }
+
+    assert used == {"secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY", "vars.MUSIC_ASSISTANT_BOT_CLIENT_ID"}
 
 
 def test_admission_ignores_every_issue_but_a_submission() -> None:

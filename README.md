@@ -75,13 +75,13 @@ the issue withdraws the submission.
 After admission, you publish releases. Every night, the newest release that is new to the
 registry is checked on each server line (nightly, beta and the stable lines). A release that
 passes reaches the servers of that line without review. A release that is refused or fails gets
-an issue with the reason: on your repository, or on this one when yours has issues disabled. A
-refused release is not tried again; publish a new version.
+an issue on this repository that mentions you, with the reason; it closes by itself when a later
+release passes. A refused release is not tried again; publish a new version.
 
 ## Changing or leaving
 
-To move your provider to another repository, folder or tag prefix, or to withdraw it, use the
-form
+To move your provider to another repository, folder or tag prefix, to withdraw it, or to have it
+listed again, use the form
 [Report or change a provider](https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml).
 A registry maintainer makes the change.
 

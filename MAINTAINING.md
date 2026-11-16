@@ -221,8 +221,8 @@ The commands of the release pipeline, which the workflows run:
 | `check --line <line> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the line. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
 | `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. |
-| `report <folder>` | Writes an issue for every failed check, every refused release and every repository that is not the admitted one into the work folder. |
-| `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
+| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. |
+| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
 | `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | Opens the pull request of a submission whose checks passed, leaves standing the open one that holds the same, or closes it (see [Admission](#admission)). Adds its outcome (`opened`, `stands`, `not-passed`, `closed`, `changed` or `conflict`), the address of its pull request and those of other submissions of the domain to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
@@ -328,15 +328,11 @@ reports anything. Its jobs share only files:
    validates and pushes to `main` with the token of the Music Assistant Bot app. A version that
    stops passing on a line leaves that line's index: the newest version that still passes there
    becomes `latest`. The push starts the Publish workflow.
-4. **Report** writes an issue for every version that failed a check on a line (first checks and
-   versions that stopped passing), every release refused in this run, and every repository that
-   is not the admitted one. The issue goes to the provider's repository, or to this repository,
-   mentioning its maintainers, when that repository has issues switched off or is not the
-   admitted one. Each issue has a key, written into its body, that is the same
-   for the same failure; an issue is not opened when the account that opens them opened one with
-   its key before. Everything a provider controls (reasons, output, manifest values) is shown as
-   code. The issues are opened with the token of one account of their own, and only when the
-   variable `POST_ISSUES` is `true`; otherwise they are kept as an artifact of the run.
+4. **Report** tells the maintainers of a provider about every version that failed a check on a
+   line (first checks and versions that stopped passing), every release refused in this run and
+   a repository that is not the admitted one, in one issue per provider on this repository (see
+   [Release issues](#release-issues)). It writes the issues with the workflow's own token, which
+   may write issues and nothing else.
 
 ### Provider code runs without secrets
 
@@ -447,8 +443,8 @@ This repository gives no support, and takes issues only through its two forms. T
 `close-issues.yml` closes any other issue as not planned, with one fixed comment that says where
 to go (a reopened one is closed again without a second comment). Exempt are issues by people with
 write access (a registry maintainer may open a plain issue about the registry), bots, and the
-account that opens the issues of the release pipeline, whose handle is the variable
-`REPORT_ACCOUNT`. The workflow never reads the title or text of an issue.
+issues of the release pipeline (label `release-check`), also when a provider maintainer reopens
+one. The workflow never reads the title or text of an issue.
 
 An issue of the form "Report or change a provider" has the label `report`. No workflow acts on it;
 a registry maintainer reads it and makes the change in an ordinary pull request:
@@ -462,7 +458,35 @@ a registry maintainer reads it and makes the change in an ordinary pull request:
   '{repository_id: .id, owner_id: .owner.id}'`), `folder` or `tag_prefix` in its `provider.json`,
   and run `validate`;
 - **its maintainer wants it removed**: after the same check,
-  `set-status <domain> withdrawn --reason "Withdrawn by its maintainer" --reason-url <issue>`.
+  `set-status <domain> withdrawn --reason "Withdrawn by its maintainer" --reason-url <issue>`;
+- **its maintainer asks for it to be listed again**: after the same check, and once the reason of
+  the withdrawal is gone and its newest release passes the checks on a line,
+  `set-status <domain> listed`.
+
+### Release issues
+
+The release pipeline keeps one open issue per provider that needs its maintainers, with the label
+`release-check`, opened by `github-actions[bot]`; `is:issue is:open label:release-check` lists
+them. A new issue mentions the maintainers of the provider (at most 10): the owner of its
+repository and the code owners in its manifest. A provider that uses its manifest to notify others
+is blocked. A new failure while it is open becomes a comment without mentions, and a failure is never told twice: the first line of the
+issue and of each comment of the pipeline names the failures it tells, and only those lines of
+`github-actions[bot]` count. Everything a provider controls (reasons, output, manifest values) is
+shown as code; the title shows the name of the manifest only when it is plain text.
+
+A failure is settled when the newest version of the provider (the highest with a version file or
+a refusal) passed on a line that is tested, and:
+
+- for a failed check, also on the line of the check, unless that line is no longer tested;
+- for a repository that was not the admitted one, GitHub gives the admitted one again.
+
+A failure that is settled when it happens is not told. Once every failure an issue tells is
+settled, the pipeline comments that the newest version passed and closes the issue as completed;
+a failure after that opens a new issue.
+
+An issue that stays open without a reaction of the provider's maintainer is a reason to withdraw
+the provider: `set-status <domain> withdrawn --reason <text> --reason-url <issue>`. Nothing does
+this automatically.
 
 ## Still open
 

@@ -32,13 +32,13 @@ from registry.edit import (
 from registry.fetch import fetch
 from registry.files import dumps, load_model
 from registry.formats import format_date
-from registry.github import GitHub, post_issue
+from registry.github import ACTIONS_LOGIN, GitHub
 from registry.index import render_indexes, stale_index_files
 from registry.models import (
     AdmissionReport,
     FetchReport,
-    Issue,
     LineResults,
+    ProviderReport,
     ProviderStatus,
     ReservedDomains,
     VersionResult,
@@ -59,13 +59,11 @@ from registry.registry import (
     InvalidRegistryError,
     load_registry,
 )
-from registry.report import build_issues
+from registry.report import build_reports, open_issues, post_report
 from registry.reserved import add_server_domains
 
 # the token the commands that talk to GitHub read from the environment
 TOKEN_VARIABLE = "GITHUB_TOKEN"  # noqa: S105 - the name, not a token
-# the account of the token of a workflow, which writes the comment of the admission checks
-ACTIONS_LOGIN = "github-actions[bot]"
 _PULL_REQUEST_URL = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[0-9]+")
 
 
@@ -215,31 +213,43 @@ def _apply_results(args: argparse.Namespace) -> None:
 
 
 def _report(args: argparse.Namespace) -> None:
-    """Write an issue for every release that failed a check or was refused."""
+    """Write the report of every provider: its failures in this run and what settles them."""
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
     results = read_results(args.results, read_plan(args.work))
-    issues = build_issues(load_registry(args.root), fetched, results)
+    reports = build_reports(load_registry(args.root), fetched, results)
     folder = args.work / ISSUES_FOLDER
     folder.mkdir(parents=True, exist_ok=True)
-    for issue in issues:
-        (folder / f"{issue.key}.json").write_bytes(dumps(issue.to_dict()))
-        print(f"{issue.repository}: {issue.title}")
-    print(f"{len(issues)} issue(s) written to {folder}")
+    for report in reports:
+        (folder / f"{report.domain}.json").write_bytes(dumps(report.to_dict()))
+        for failure in report.failures:
+            print(f"{report.domain}: {failure.heading}")
+    print(f"{len(reports)} report(s) written to {folder}")
 
 
 def _post_issues(args: argparse.Namespace) -> int:
-    """Open the issues the report step wrote, each one unless it was reported before."""
+    """Open, add to or close the issue of each provider on the registry, after its report."""
     github = GitHub(_token())
+    issues = open_issues(github, args.repository)
     failed = 0
     for path in sorted((args.work / ISSUES_FOLDER).glob("*.json")):
-        issue = _load(path, Issue)
+        report = _load(path, ProviderReport)
+        issue = issues.get(report.domain)
+        # without its issue, a provider is skipped rather than given a second one
+        if isinstance(issue, OSError):
+            failed += 1
+            print(
+                f"warning: {report.domain}: skipped, its issue cannot be read: {issue}",
+                file=sys.stderr,
+            )
+            continue
         try:
-            url = post_issue(issue, github)
+            done = post_report(report, issue, github, args.repository)
         except OSError as err:
             failed += 1
-            print(f"warning: {issue.repository}: {err}: {issue.title}", file=sys.stderr)
+            print(f"warning: {report.domain}: {err}", file=sys.stderr)
             continue
-        print(f"{issue.repository}: {url or 'reported before'}: {issue.title}")
+        if done is not None:
+            print(f"{report.domain}: {done}")
     return 1 if failed else 0
 
 
@@ -382,7 +392,7 @@ def _token() -> str:
     return token
 
 
-def _load[T: (FetchReport, Issue, AdmissionReport)](path: Path, model: type[T]) -> T:
+def _load[T: (FetchReport, ProviderReport, AdmissionReport)](path: Path, model: type[T]) -> T:
     """
     Return a file of the work folder.
 
@@ -504,6 +514,9 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.set_defaults(run=_report)
 
     command = commands.add_parser("post-issues", help=_post_issues.__doc__, parents=[work])
+    command.add_argument(
+        "--repository", required=True, help="the repository of the registry, as owner/name"
+    )
     command.set_defaults(run=_post_issues)
 
     command = commands.add_parser("check-changes", help=_check_changes.__doc__)

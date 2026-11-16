@@ -257,9 +257,6 @@ def provider_archive(domain: str = DOMAIN, code: bytes = b"VALUE = 1\n", **chang
 class FakeGitHub:
     """A transport that answers as GitHub does, for the repositories, archives and issues it has."""
 
-    # the account of the token
-    LOGIN = "catalog-reporter"
-
     def __init__(self) -> None:
         """Initialize a GitHub without repositories."""
         # the GraphQL node of each repository, by owner/name
@@ -270,8 +267,6 @@ class FakeGitHub:
         self.archives: dict[tuple[str, str], bytes] = {}
         # what reading the answer to an address raises, by address
         self.broken: dict[str, Exception] = {}
-        # the issues that exist, as (owner/name, author, key)
-        self.issues: set[tuple[str, str, str]] = set()
         self.created: list[tuple[str, dict[str, Any]]] = []
         # each issue as the API answers it, by (owner/name, number)
         self.issue_answers: dict[tuple[str, int], dict[str, Any]] = {}
@@ -373,15 +368,6 @@ class FakeGitHub:
             return (200, archive) if archive is not None else (404, b"Not Found")
         if url.startswith("https://api.github.com/repos/"):
             return self._repository_api(request)
-        if url == "https://api.github.com/user":
-            return 200, json.dumps({"login": self.LOGIN}).encode()
-        if url.startswith("https://api.github.com/search/issues?"):
-            query = parse_qs(urlsplit(url).query)["q"][0]
-            found = re.fullmatch(r'"(\w+)" repo:(\S+) is:issue in:body author:(\S+)', query)
-            assert found is not None, query
-            key, repository, author = found.groups()
-            count = int((repository, author, key) in self.issues)
-            return 200, json.dumps({"total_count": count}).encode()
         return 404, b"{}"
 
     def _repository_api(self, request: urllib.request.Request) -> tuple[int, bytes]:
@@ -399,14 +385,25 @@ class FakeGitHub:
     def _issues(
         self, request: urllib.request.Request, repository: str, path: str
     ) -> tuple[int, bytes]:
-        """Open an issue, read one, or list, add or update a comment."""
+        """Open, list, read or change issues, or list, add or update a comment."""
         if path == "issues":
-            self.created.append((repository, request_json(request)))
-            return 201, json.dumps(
-                {"html_url": f"https://github.com/{repository}/issues/1"}
-            ).encode()
+            return self._create_issue(request, repository)
+        if path.startswith("issues?"):
+            query = parse_qs(urlsplit(request.full_url).query)
+            assert query["state"] == ["open"]
+            size, page = int(query["per_page"][0]), int(query["page"][0])
+            listed = [
+                issue
+                for (owner, _), issue in sorted(self.issue_answers.items())
+                if owner == repository
+                and issue["state"] == "open"
+                and query["labels"][0] in [label["name"] for label in issue["labels"]]
+            ]
+            return 200, json.dumps(listed[(page - 1) * size : page * size]).encode()
         if found := re.fullmatch(r"issues/(\d+)", path):
             issue = self.issue_answers.get((repository, int(found[1])))
+            if issue is not None and request.get_method() == "PATCH":
+                issue.update(request_json(request))
             return (404, b"{}") if issue is None else (200, json.dumps(issue).encode())
         if found := re.fullmatch(r"issues/comments/(\d+)", path):
             assert request.get_method() == "PATCH"
@@ -418,6 +415,22 @@ class FakeGitHub:
         if found := re.fullmatch(r"issues/(\d+)/comments\b.*", path):
             return self._comments(request, repository, int(found[1]))
         return 404, b"{}"
+
+    def _create_issue(self, request: urllib.request.Request, repository: str) -> tuple[int, bytes]:
+        """Open an issue as the account of a workflow."""
+        data = request_json(request)
+        self.created.append((repository, data))
+        number = 1 + max((n for owner, n in self.issue_answers if owner == repository), default=0)
+        self.issue(
+            repository,
+            number,
+            data["body"],
+            title=data["title"],
+            user={"login": "github-actions[bot]"},
+            labels=[{"name": label} for label in data.get("labels", [])],
+        )
+        url = f"https://github.com/{repository}/issues/{number}"
+        return 201, json.dumps({"html_url": url}).encode()
 
     def _git(
         self, request: urllib.request.Request, repository: str, path: str
