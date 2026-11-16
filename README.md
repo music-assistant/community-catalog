@@ -72,11 +72,12 @@ the issue withdraws the submission.
 
 ## Releasing updates
 
-After admission, you publish releases. Every night, the newest release that is new to the
-registry is checked on each server line (nightly, beta and the stable lines). A release that
-passes reaches the servers of that line without review. A release that is refused or fails gets
-an issue on this repository that mentions you, with the reason; it closes by itself when a later
-release passes. A refused release is not tried again; publish a new version.
+After admission, you release whenever you want: publish a GitHub release, and nothing else is
+needed. The registry looks for new releases once a night and checks the newest one on each
+server line (nightly, beta and the stable lines). A release that passes reaches the servers of
+that line without review. A release that is refused or fails gets an issue on this repository
+that mentions you, with the reason; it closes by itself when a later release passes. A refused
+release is not tried again; publish a new version.
 
 ## Changing or leaving
 
