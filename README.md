@@ -1,18 +1,23 @@
 # Music Assistant community catalog
 
 The community catalog holds music sources, players and plugins that people from the community
-build and maintain. An administrator enables the community catalog in the Marketplace of Music
-Assistant and installs from it. Each of them lives in its maintainer's own repository; this
-repository is the list of them and holds no code.
+build and maintain: the niche service, the unusual speaker, the experiment that is not part of
+Music Assistant itself, each with its own documentation, support and releases. An administrator
+enables the community catalog in the Marketplace of Music Assistant and installs from it. Every
+provider lives in its maintainer's own repository; this repository is the list of them and holds
+no code.
 
 ## For users
 
 Everything listed was accepted for what it does, and every release of it is checked
-automatically: that it installs and loads. The Music Assistant project does not review its code, does not test
-whether it works and does not support it. What you install from the community catalog runs inside
-your server, at your own risk, and its maintainer is the one to ask for help.
+automatically: that it installs and loads. The Music Assistant project does not review its
+code, does not test whether it works and does not support it. What you install from the
+community catalog runs inside your server, at your own risk, and its maintainer is the one to
+ask for help.
 
-- **Withdrawn**: no longer offered; where it is installed, it keeps working.
+A registry maintainer can withdraw or block a provider:
+
+- **Withdrawn**: the Marketplace does not offer it; where it is installed, it keeps working.
 - **Blocked**: servers stop loading it at their next daily check, and the administrator sees why.
   Its settings and library items are kept.
 
@@ -62,42 +67,19 @@ Where to report a problem:
          server-line: nightly
    ```
 
-5. **Open a pull request here that adds one file**, `providers/<domain>/provider.json`, and
-   nothing else:
+5. **[Submit your provider with the form](https://github.com/music-assistant/community-catalog/issues/new?template=submit-provider.yml)**:
+   your repository, and only when needed the provider folder (when it is not `provider` or the
+   one top-level folder with a `manifest.json`) and the tag prefix.
 
-   ```json
-   {
-     "domain": "sample_music",
-     "repository": "someone/ma-sample-music",
-     "repository_id": 123456789,
-     "owner_id": 987654,
-     "folder": "sample_music",
-     "maintainers": ["someone"],
-     "status": "listed",
-     "added": "2026-11-16T12:00:00Z",
-     "admission": {"decided_by": "someone", "decided": "2026-11-16T12:00:00Z", "pull_request": 1}
-   }
-   ```
-
-   - `domain`: the `domain` of your manifest, and the name of the folder in `providers/`.
-   - `repository`: your repository as `owner/name`.
-   - `repository_id`, `owner_id`: the ids GitHub gives your repository and its owner, which
-     `gh api repos/<owner>/<name> --jq '{repository_id: .id, owner_id: .owner.id}'` prints.
-   - `folder`: the path of the provider folder in your repository, such as `provider` or
-     `providers/sample_music`.
-   - `maintainers`: GitHub handles without `@`, at most 10, each the owner of the repository or
-     a code owner in the manifest of the latest release. The author of the pull request must be
-     one of those as well.
-   - `added`, `admission`: the current time in UTC in this format, your own handle, and
-     `pull_request` `1`. A registry maintainer fills in the decision when admitting.
-   - Add `"tag_prefix": "sample_music-"` only when the repository holds several providers.
-
-Then the admission checks run by themselves and report in a comment on the pull request: the
-repository, the ids, the licence, the domain, the maintainers, and whether your latest release
-installs and loads on at least one server line. When something fails, fix it and push; for a new
-release, close and reopen the pull request. A registry maintainer then decides once, against the
+The checks run as soon as you submit, and report in one comment on your issue: the repository,
+its licence, the domain, that you own the repository or are a code owner in its manifest, and
+whether your latest release installs and loads on at least one server line. When something
+fails, fix it and run the checks again: edit the issue, or close and reopen it (for example
+after a new release). When everything passes, the bot opens the pull request that adds your
+provider, and a registry maintainer decides once, against the
 [rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md), about
-what the provider does.
+what the provider does. Merging that pull request admits it; its first release reaches the
+servers after the next nightly check.
 
 ## Releasing updates
 
@@ -118,15 +100,10 @@ but a block still reaches it.
 
 ## Changing or leaving
 
-- **Renaming or transferring the repository** keeps its ids. Open a pull request that changes
-  `repository` in your `provider.json`; a registry maintainer decides on it. A different
-  repository under the old name is never taken for yours.
-- **Moving the provider folder or changing the tag prefix**: a pull request that changes `folder`
-  or `tag_prefix` gets the same admission checks.
-- **Changing maintainers or withdrawing**: open an issue or pull request here; a registry
-  maintainer decides on it. A withdrawn provider keeps working where it is installed.
-
-Every field of `provider.json` is described in [MAINTAINING.md](MAINTAINING.md#providerjson).
+A new repository name or owner, another provider folder or tag prefix, or withdrawing your
+provider: [open an issue](https://github.com/music-assistant/community-catalog/issues) that says
+what changes. A registry maintainer makes the change. A rename or transfer on GitHub keeps the ids
+of your repository; a different repository under the old name is never taken for yours.
 
 ## For registry maintainers
 

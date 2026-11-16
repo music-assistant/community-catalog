@@ -121,8 +121,7 @@ def _issue(
     """
     Return an issue, on the repository of the provider or on the registry when it has none.
 
-    Only the maintainers of the provider.json are mentioned, and only in an issue on the
-    registry.
+    The maintainers of the provider are mentioned only in an issue on the registry.
 
     :param fetched: What the fetch step found of the repositories.
     :param provider: The provider.
@@ -136,7 +135,7 @@ def _issue(
     body = f"{text}\n\nWhat the checks do: {README_URL}\n"
     state = fetched.repositories.get(repository)
     if registry or state is None or not state.has_issues:
-        mentions = " ".join(f"@{handle}" for handle in provider.file.maintainers)
+        mentions = " ".join(f"@{handle}" for handle in provider.maintainers())
         if registry:
             body += f"\n{mentions}\n"
         else:

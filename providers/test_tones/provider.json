@@ -1,15 +1,8 @@
 {
-  "domain": "test_tones",
-  "repository": "marcelveldt/ma-test-tones",
-  "repository_id": 1458318830,
-  "owner_id": 6389780,
-  "folder": "test_tones",
-  "tag_prefix": "",
-  "maintainers": ["marcelveldt"],
-  "status": "listed",
-  "reason": null,
-  "reason_url": null,
-  "blocked_versions": {},
   "added": "2026-11-15T11:21:01Z",
-  "admission": {"decided_by": "marcelveldt", "decided": "2026-11-15T11:21:01Z", "pull_request": 7}
+  "domain": "test_tones",
+  "folder": "test_tones",
+  "owner_id": 6389780,
+  "repository": "marcelveldt/ma-test-tones",
+  "repository_id": 1458318830
 }

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Rules of the community catalog
+    url: https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md
+    about: What a provider in the community catalog may not do. Report one that does in a blank issue.
+  - name: Report a risk to users
+    url: https://github.com/music-assistant/community-catalog/security
+    about: A provider that puts its users at risk is reported privately, on the Security tab.

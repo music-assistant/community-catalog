@@ -66,19 +66,13 @@ class ProviderStatus(StrEnum):
 
 
 @dataclass
-class Admission(StrictModel):
-    """The decision that admitted a provider to the catalog."""
-
-    # GitHub handle of the person who decided
-    decided_by: str
-    decided: str
-    # the pull request on the registry that added the provider
-    pull_request: int
-
-
-@dataclass
 class ProviderFile(StrictModel):
     """`providers/<domain>/provider.json`: a provider, written at admission."""
+
+    class Config(StrictModel.Config):
+        """Write only the keys that differ from their default."""
+
+        omit_default = True
 
     domain: str
     # owner/name of the repository on GitHub
@@ -90,11 +84,9 @@ class ProviderFile(StrictModel):
     # the folder of the provider in the repository, named after the domain or provider; the server
     # installs it under the domain
     folder: str
-    maintainers: list[str]
-    status: ProviderStatus
     # when the provider entered the catalog
     added: str
-    admission: Admission
+    status: ProviderStatus = ProviderStatus.LISTED
     # what the release tags of this provider start with, for a repository with several providers
     tag_prefix: str = ""
     reason: str | None = None
@@ -254,17 +246,23 @@ class Finding(StrictModel):
 
 @dataclass
 class AdmissionReport(StrictModel):
-    """`admission.json`: the admission checks of a provider before its versions are checked."""
+    """`admission.json`: the admission checks of a submission before its release is checked."""
 
-    # None for a pull request that is refused
-    domain: str | None
+    # when the checks ran
+    checked: str
     findings: list[Finding]
-    # the version of the latest release, when it became a version file
+    # what was checked, as far as the submission got: the repository as owner/name, the domain
+    # of its provider and the latest release
+    repository: str | None = None
+    domain: str | None = None
+    tag: str | None = None
+    commit: str | None = None
+    # the version of the latest release, when it became a version file, and its name
     version: str | None = None
-    # the keys of an existing provider the pull request changes that only a registry maintainer
-    # changes, such as its status or repository
-    maintainer_keys: list[str] = field(default_factory=list)
-    # why the pull request is no admission, so nothing was checked
+    name: str | None = None
+    # the provider.json to add when every check passes
+    provider: ProviderFile | None = None
+    # why the issue is no valid submission, so nothing was checked
     refusal: str | None = None
 
 

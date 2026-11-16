@@ -123,18 +123,30 @@ def test_json_the_server_refuses(files: Files, value: str) -> None:
     assert found.startswith(f"{VERSION}: not valid JSON: ")
 
 
+def test_a_provider_file_without_its_optional_keys(files: Files) -> None:
+    """A provider.json without a status is listed, without a tag prefix, reason or blocks."""
+    files.provider(status=None)
+
+    file = load_registry(files.root).providers[DOMAIN].file
+
+    assert (file.status, file.tag_prefix, file.reason, file.blocked_versions) == (
+        "listed",
+        "",
+        None,
+        {},
+    )
+
+
 @pytest.mark.parametrize(
     ("changes", "problem"),
     [
-        ({"status": None}, "status: is missing"),
+        ({"added": None}, "added: is missing"),
         ({"repository_id": None}, "repository_id: is missing"),
         ({"owner_id": "201"}, "owner_id: expected int, got str"),
         ({"homepage": "x"}, "unknown key homepage"),
-        ({"maintainers": "someone"}, "must be a list"),
-        ({"maintainers": [1]}, "maintainers: expected str, got int"),
+        ({"maintainers": ["someone"]}, "unknown key maintainers"),
+        ({"blocked_versions": ["1.0.0"]}, "blocked_versions"),
         ({"status": "hidden"}, "status: 'hidden' is not a valid ProviderStatus"),
-        ({"admission": {"decided_by": "x", "decided": "2026-10-01T12:00:00Z"}}, "pull_request"),
-        ({"admission": {"decided_by": "x", "decided": "x", "pull_request": "1"}}, "admission"),
     ],
 )
 def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str) -> None:
@@ -163,10 +175,6 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
             ),
         ),
         (DOMAIN, {"tag_prefix": "a b"}, "tag_prefix: 'a b' is not allowed in a tag"),
-        (DOMAIN, {"maintainers": []}, "maintainers: there is none"),
-        (DOMAIN, {"maintainers": ["@someone"]}, "maintainers: '@someone' is not a GitHub handle"),
-        (DOMAIN, {"maintainers": ["Someone", "someone"]}, "maintainers: a handle appears twice"),
-        (DOMAIN, {"maintainers": [f"m{n}" for n in range(11)]}, "maintainers: more than 10"),
         (DOMAIN, {"repository_id": 0}, "repository_id: 0 is not an id GitHub gives"),
         (DOMAIN, {"owner_id": -1}, "owner_id: -1 is not an id GitHub gives"),
         (DOMAIN, {"reason": "x"}, "reason: a listed provider has no reason or reason_url"),
@@ -182,17 +190,6 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
             "reason_url: 'http://x' is not an https address",
         ),
         (DOMAIN, {"added": "2026-10-01"}, "added: '2026-10-01' is not a date in UTC"),
-        (
-            DOMAIN,
-            {
-                "admission": {
-                    "decided_by": "x",
-                    "decided": "2026-10-01T12:00:00Z",
-                    "pull_request": 0,
-                }
-            },
-            "admission.pull_request: 0 is no pull request",
-        ),
         (DOMAIN, {"blocked_versions": {"1.0": "x"}}, "blocked_versions: '1.0' is not a version"),
     ],
 )

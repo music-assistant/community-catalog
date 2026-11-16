@@ -28,8 +28,7 @@ PROVIDER_TYPES = frozenset({"music", "player", "metadata", "plugin", "audio_anal
 MAX_MANIFEST_SIZE = 16 * 1024
 MAX_REQUIREMENTS = 50
 MAX_REQUIREMENT_LENGTH = 100
-# the maintainers of a provider.json and the code owners of a manifest
-MAX_MAINTAINERS = 10
+MAX_CODEOWNERS = 10
 # the reason of a refused release goes into an issue for the maintainer
 MAX_REFUSAL = 2000
 
@@ -101,7 +100,6 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
         problems.append(_folder_problem(provider.folder, domain))
     if not formats.is_tag_prefix(provider.tag_prefix):
         problems.append(f"tag_prefix: {provider.tag_prefix!r} is not allowed in a tag")
-    problems += _handle_problems("maintainers", provider.maintainers)
     problems += _status_problems(provider)
     for version, reason in provider.blocked_versions.items():
         if not formats.is_version(version):
@@ -109,11 +107,6 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
         if not reason.strip():
             problems.append(f"blocked_versions: {version} has no reason")
     problems += _date_problems("added", provider.added)
-    admission = provider.admission
-    problems += _handle_problems("admission.decided_by", [admission.decided_by])
-    problems += _date_problems("admission.decided", admission.decided)
-    if admission.pull_request < 1:
-        problems.append(f"admission.pull_request: {admission.pull_request} is no pull request")
     return problems
 
 
@@ -201,7 +194,7 @@ def check_manifest(manifest: Mapping[str, Any], domain: str) -> list[str]:
         if not isinstance(manifest.get(key), str) or not manifest[key].strip()
     ]
     for key, required, limit in (
-        ("codeowners", True, MAX_MAINTAINERS),
+        ("codeowners", True, MAX_CODEOWNERS),
         ("requirements", False, MAX_REQUIREMENTS),
     ):
         value = manifest.get(key, None if required else [])
@@ -253,22 +246,6 @@ def _status_problems(provider: ProviderFile) -> list[str]:
         problems.append(f"reason: a {provider.status} provider needs a reason")
     if provider.reason_url is not None and not formats.is_https_url(provider.reason_url):
         problems.append(f"reason_url: {provider.reason_url!r} is not an https address")
-    return problems
-
-
-def _handle_problems(key: str, handles: list[str]) -> list[str]:
-    """Return what is wrong in a list of GitHub handles."""
-    problems = [
-        f"{key}: {handle!r} is not a GitHub handle (without @)"
-        for handle in handles
-        if not formats.is_github_handle(handle)
-    ]
-    if not handles:
-        problems.append(f"{key}: there is none")
-    if len({handle.lower() for handle in handles}) != len(handles):
-        problems.append(f"{key}: a handle appears twice")
-    if len(handles) > MAX_MAINTAINERS:
-        problems.append(f"{key}: more than {MAX_MAINTAINERS}")
     return problems
 
 

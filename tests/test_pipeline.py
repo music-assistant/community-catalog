@@ -29,6 +29,7 @@ from tests.conftest import (
     RELEASED,
     REPOSITORY_ID,
     FakeGitHub,
+    manifest,
 )
 
 if TYPE_CHECKING:
@@ -402,8 +403,12 @@ def test_the_output_in_an_issue_fits_github(files: Files) -> None:
 
 def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
     """Another repository under the name of a provider gets an issue on the registry, once."""
-    files.provider(maintainers=["someone", "another"])
-    files.version("1.0.0", lines={})
+    files.provider()
+    files.version(
+        "1.0.0",
+        lines={},
+        manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
+    )
     fetched = _fetched()
     fetched.repositories[REPOSITORY].owner_id = 999
 
@@ -418,8 +423,12 @@ def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
 
 def test_issue_goes_to_the_registry_without_issues(files: Files) -> None:
     """When the provider's repository has issues switched off, the registry gets the issue."""
-    files.provider(maintainers=["someone", "another"])
-    files.version("1.0.0", lines={})
+    files.provider()
+    files.version(
+        "1.0.0",
+        lines={},
+        manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
+    )
     results = [
         load_model(
             files.write("results/nightly.json", _results("nightly", _result("1.0.0", "load: x"))),

@@ -8,11 +8,15 @@ by an owner of the `music-assistant` organisation.
 - [ ] Create the public repository `music-assistant/community-catalog`, without a README or
       licence (both are here), and push `main`.
 - [ ] Settings → General: enable Issues; disable Wiki and Projects.
+- [ ] Issues → Labels: create the label `submission`. The form "Submit a provider" gives it to
+      an issue, and only an issue with it starts the admission checks; GitHub leaves out a label
+      the repository does not have.
 - [ ] Give the team of registry maintainers named in `.github/CODEOWNERS`
       (`@music-assistant/core`) write access to this repository.
 - [ ] Settings → Rules: a ruleset for `main` that requires a pull request with the review of a
-      code owner, requires the status check "Lint, types, tests and validation", and blocks
-      force pushes and deletion. Add the Music Assistant Bot app to its bypass list: the Releases
+      code owner, dismisses an approval when new commits are pushed (the bot updates the pull
+      request of a submission on every run), requires the status check "Lint, types, tests and
+      validation", and blocks force pushes and deletion. Add the Music Assistant Bot app to its bypass list: the Releases
       workflow pushes the new version files and results to `main` as that app.
 
 ## GitHub Pages
@@ -30,26 +34,29 @@ by an owner of the `music-assistant` organisation.
       GitHub Actions to create and approve pull requests" off.
 - [ ] Settings → Actions → General: require actions to be pinned to a full-length commit SHA.
 - [ ] Settings → Actions → General → "Approval for running fork pull request workflows from
-      contributors": **Require approval for first-time contributors who are new to GitHub**
-      (`first_time_contributors_new_to_github` in the API).
+      contributors": **Require approval for all external contributors**
+      (`all_external_contributors` in the API). Nothing privileged runs on a pull request event,
+      and a provider is submitted with an issue, so a pull request from outside is only ever a
+      change to the registry itself.
 - [ ] Settings → Security: enable private vulnerability reporting, Dependabot alerts and
       Dependabot security updates.
 
-Admission always runs the workflow file and the code of `main` (`pull_request_target`), so a
-pull request cannot change what checks it and its verdict can be trusted. CI of a pull request
-from a fork still runs the workflow file of that pull request, with a read-only token and no
-secrets: it cannot write anything, but its author can change `ci.yml` in the same pull request
-and make it pass, so its green check proves nothing for a pull request that touches `.github/`
-or `registry/`. The code owner review of the ruleset covers that: nothing is merged without a
-registry maintainer, who sees such a change in the pull request. An admission pull request that
-changes anything besides its one `provider.json` is refused by Admission.
+No workflow runs with more than a read-only token on a pull request event. CI of a pull request
+from a fork runs the workflow file of that pull request, with a read-only token and no secrets:
+it cannot write anything, but its author can change `ci.yml` in the same pull request and make it
+pass, so its green check proves nothing for a pull request that touches `.github/` or
+`registry/`. The code owner review of the ruleset covers that: nothing is merged without a
+registry maintainer, who sees such a change in the pull request. The pull request of a
+submission comes from the bot, on a branch of this repository.
 
 ## Release pipeline
 
-- [ ] Install the Music Assistant Bot app on this repository with Contents read and write.
+- [ ] Install the Music Assistant Bot app on this repository with Contents read and write, and
+      Pull requests read and write (the Admission workflow opens the pull request of a
+      submission with it).
 - [ ] Settings → Environments: create the environment `releases`, with deployment branches
-      limited to `main`. The jobs of the Releases workflow that push or open issues run in it,
-      and only on `main`.
+      limited to `main`. The jobs of the Releases workflow that push or open issues, and the
+      job of the Admission workflow that opens pull requests, run in it, and only on `main`.
 - [ ] Make the organisation secret `MUSIC_ASSISTANT_BOT_PRIVATE_KEY` (the app's private key)
       available to this repository. Any workflow run of a branch in this repository can read
       it, as in the server repository, so only registry maintainers get write access here.
@@ -69,9 +76,9 @@ changes anything besides its one `provider.json` is refused by Admission.
 - [ ] Check that the server images of the lines in `server_lines.json` can be pulled without
       logging in (`docker pull ghcr.io/music-assistant/server:nightly`).
 
-The other workflows need nothing beyond their own `GITHUB_TOKEN`: Admission reads the
-`provider.json` of the pull request and the public data of the provider's repository, and writes
-its comment on the pull request with that token; the check jobs have no token at all.
+Besides the app token of its propose job, Admission needs nothing beyond its own
+`GITHUB_TOKEN`: it reads the issue and the public data of the provider's repository, and writes
+its comment on the issue with that token; the check jobs have no token at all.
 
 ## What only a run on GitHub can settle
 
@@ -90,6 +97,11 @@ in the first real runs:
 - [ ] That the server images can be pulled without logging in, and that the check runs in them
       as an unprivileged user (`--user` of the runner, `HOME=/tmp`) without needing to write
       anywhere else.
+- [ ] That an issue of the form holds exactly what the admission reads: a `### ` heading per
+      field, `_No response_` for an empty one and `- [X]` for a ticked box. Run the Admission
+      workflow by hand from a branch for a test issue before it is on `main`; the propose job
+      runs only on `main`.
+- [ ] That the pull request the app opens starts CI, and that the comment on the issue links it.
 
 ## Before the first provider is admitted
 

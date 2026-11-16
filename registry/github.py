@@ -1,9 +1,8 @@
-"""The requests the registry makes to GitHub: releases, archives, files, issues and comments."""
+"""The requests the registry makes to GitHub: releases, archives, issues and pull requests."""
 
 from __future__ import annotations
 
 import base64
-import hashlib
 import http.client
 import itertools
 import json
@@ -31,14 +30,15 @@ BATCH_SIZE = 50
 RELEASES_PER_REPOSITORY = 30
 # the largest archive of a commit that is downloaded; a larger one is refused
 MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
-# the comments read per request, the most GitHub answers
+# the comments and pull requests read per request, the most GitHub answers
 COMMENTS_PER_PAGE = 100
+PULL_REQUESTS_PER_PAGE = 100
 # far more than any answer of the API the registry asks for
 _MAX_ANSWER_SIZE = 10 * 1024 * 1024
 _CHUNK_SIZE = 64 * 1024
 _TIMEOUT = 60
 _REPOSITORY_FIELDS = f"""
-    databaseId isPrivate isArchived hasIssuesEnabled
+    nameWithOwner databaseId isPrivate isArchived hasIssuesEnabled
     owner {{ login ... on User {{ databaseId }} ... on Organization {{ databaseId }} }}
     licenseInfo {{ key }}
     releases(first: {RELEASES_PER_REPOSITORY}, orderBy: {{field: CREATED_AT, direction: DESC}}) {{
@@ -71,10 +71,6 @@ class NotFoundError(GitHubError):
     """GitHub answered that what was asked for does not exist."""
 
 
-class NotAFileError(GitHubError):
-    """A path of a repository is no regular file the registry reads; the message says why."""
-
-
 @dataclass(frozen=True, slots=True)
 class Release:
     """A published release of a repository."""
@@ -89,6 +85,8 @@ class Release:
 class RepositoryInfo:
     """What the registry reads of a repository."""
 
+    # owner/name as GitHub spells it
+    name: str
     owner: str
     repository_id: int
     owner_id: int
@@ -99,6 +97,31 @@ class RepositoryInfo:
     license: str | None
     # newest first
     releases: list[Release]
+
+
+@dataclass(frozen=True, slots=True)
+class IssueInfo:
+    """What the registry reads of an issue."""
+
+    author: str
+    body: str
+    labels: list[str]
+    open: bool
+    # the API answers a pull request as an issue as well
+    pull_request: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PullRequest:
+    """An open pull request."""
+
+    number: int
+    url: str
+    author: str
+    # owner/name of the repository its branch is in, None when that repository is deleted
+    head_repository: str | None
+    branch: str
+    body: str
 
 
 def urlopen(request: urllib.request.Request) -> tuple[int, BinaryIO]:
@@ -205,47 +228,6 @@ class GitHub:
         finally:
             partial.unlink(missing_ok=True)
 
-    def file(self, repository: str, path: str, commit: str, max_size: int) -> bytes:
-        """
-        Return the content of a regular file of a repository at a commit.
-
-        :param repository: The repository, as owner/name.
-        :param path: The path of the file in the repository.
-        :param commit: The full SHA of the commit.
-        :param max_size: The largest file that is read, in bytes.
-        :raises NotAFileError: The path is no regular file of at most max_size bytes at the
-            commit: it does not exist, or is a folder, a symbolic link or a larger file.
-        :raises GitHubError: GitHub could not answer.
-        """
-        if not is_commit(commit):
-            msg = f"{commit!r} is not a commit"
-            raise GitHubError(msg)
-        quoted = urllib.parse.quote(path)
-        url = f"{API_URL}/repos/{repository}/contents/{quoted}?ref={commit}"
-        try:
-            found = self._answer(self._request(url))
-        except NotFoundError as err:
-            msg = f"{path} does not exist at commit {commit}"
-            raise NotAFileError(msg) from err
-        # a folder is answered as a list of its entries
-        if not isinstance(found, dict) or found.get("type") != "file" or found.get("path") != path:
-            msg = f"{path} is no regular file at commit {commit}"
-            raise NotAFileError(msg)
-        if type(size := found.get("size")) is not int or size > max_size:
-            msg = f"{path} is larger than {max_size} bytes at commit {commit}"
-            raise NotAFileError(msg)
-        try:
-            content = base64.b64decode(found["content"])
-        except (KeyError, TypeError, ValueError) as err:
-            msg = f"{url} answered a file that cannot be read: {err!r}"
-            raise GitHubError(msg) from err
-        # for a symbolic link to a file the API answers the content of that file, with the
-        # object id of the link itself
-        if found.get("sha") != _blob_id(content):
-            msg = f"{path} is a symbolic link at commit {commit}"
-            raise NotAFileError(msg)
-        return content
-
     def set_comment(
         self, repository: str, number: int, body: str, *, marker: str, author: str
     ) -> str:
@@ -280,6 +262,152 @@ class GitHub:
             if len(listed) < COMMENTS_PER_PAGE:
                 break
         return str(self._json(self._request(comments, content), expected=201).get("html_url"))
+
+    def add_comment(self, repository: str, number: int, body: str) -> None:
+        """
+        Add a comment to an issue or a pull request.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue or pull request.
+        :param body: The text of the comment, in Markdown.
+        :raises GitHubError: GitHub refused the request.
+        """
+        content = json.dumps({"body": body}).encode()
+        url = f"{API_URL}/repos/{repository}/issues/{number}/comments"
+        self._json(self._request(url, content), expected=201)
+
+    def issue(self, repository: str, number: int) -> IssueInfo:
+        """
+        Return what the registry reads of an issue.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue.
+        :raises GitHubError: GitHub refused the request, or answered an issue that cannot be read.
+        """
+        found = self._json(self._request(f"{API_URL}/repos/{repository}/issues/{number}"))
+        try:
+            return IssueInfo(
+                author=_text(found["user"]["login"]),
+                body=_text(found["body"] or ""),
+                labels=[_text(label["name"]) for label in found["labels"]],
+                open=found["state"] == "open",
+                pull_request="pull_request" in found,
+            )
+        except (KeyError, TypeError) as err:
+            msg = f"GitHub answered an issue that cannot be read: {err!r}"
+            raise GitHubError(msg) from err
+
+    def pull_requests(self, repository: str) -> list[PullRequest]:
+        """
+        Return the open pull requests of a repository.
+
+        :param repository: The repository, as owner/name.
+        :raises GitHubError: GitHub refused a request, or answered a pull request that cannot be
+            read.
+        """
+        result: list[PullRequest] = []
+        pulls = f"{API_URL}/repos/{repository}/pulls?state=open&per_page={PULL_REQUESTS_PER_PAGE}"
+        for page in itertools.count(1):
+            url = f"{pulls}&page={page}"
+            listed = self._answer(self._request(url))
+            if not isinstance(listed, list):
+                msg = f"{url} answered no list"
+                raise GitHubError(msg)
+            try:
+                result += [_pull_request(pull) for pull in listed]
+            except (KeyError, TypeError) as err:
+                msg = f"GitHub answered a pull request that cannot be read: {err!r}"
+                raise GitHubError(msg) from err
+            if len(listed) < PULL_REQUESTS_PER_PAGE:
+                break
+        return result
+
+    def create_pull_request(
+        self, repository: str, *, title: str, branch: str, base: str, body: str
+    ) -> str:
+        """
+        Open a pull request from a branch of the repository itself and return its address.
+
+        :param repository: The repository, as owner/name.
+        :param title: The title.
+        :param branch: The branch with the changes.
+        :param base: The branch to merge into.
+        :param body: The text of the pull request, in Markdown.
+        :raises GitHubError: GitHub refused the request.
+        """
+        content = json.dumps({"title": title, "head": branch, "base": base, "body": body})
+        request = self._request(f"{API_URL}/repos/{repository}/pulls", content.encode())
+        return str(self._json(request, expected=201).get("html_url"))
+
+    def update_pull_request(self, repository: str, number: int, **fields: str) -> None:
+        """
+        Change a pull request.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the pull request.
+        :param fields: What to set, such as its title, body or state.
+        :raises GitHubError: GitHub refused the request.
+        """
+        url = f"{API_URL}/repos/{repository}/pulls/{number}"
+        self._json(self._request(url, json.dumps(fields).encode(), method="PATCH"))
+
+    def branch_commit(self, repository: str, branch: str) -> str | None:
+        """
+        Return the commit a branch points to, or None when there is no such branch.
+
+        :param repository: The repository, as owner/name.
+        :param branch: The name of the branch.
+        :raises GitHubError: GitHub refused the request, or answered no commit.
+        """
+        url = f"{API_URL}/repos/{repository}/git/ref/heads/{urllib.parse.quote(branch)}"
+        try:
+            found = self._json(self._request(url))
+        except NotFoundError:
+            return None
+        commit = (found.get("object") or {}).get("sha")
+        if not isinstance(commit, str) or not is_commit(commit):
+            msg = f"{url} answered no commit"
+            raise GitHubError(msg)
+        return commit
+
+    def set_branch(self, repository: str, branch: str, commit: str) -> None:
+        """
+        Point a branch at a commit, creating the branch or moving it there whatever it held.
+
+        :param repository: The repository, as owner/name.
+        :param branch: The name of the branch.
+        :param commit: The full SHA of the commit.
+        :raises GitHubError: GitHub refused a request.
+        """
+        refs = f"{API_URL}/repos/{repository}/git/refs"
+        if self.branch_commit(repository, branch) is None:
+            content = json.dumps({"ref": f"refs/heads/{branch}", "sha": commit}).encode()
+            self._json(self._request(refs, content), expected=201)
+            return
+        content = json.dumps({"sha": commit, "force": True}).encode()
+        url = f"{refs}/heads/{urllib.parse.quote(branch)}"
+        self._json(self._request(url, content, method="PATCH"))
+
+    def put_file(
+        self, repository: str, branch: str, path: str, content: bytes, message: str
+    ) -> None:
+        """
+        Commit a file that does not exist on a branch yet.
+
+        :param repository: The repository, as owner/name.
+        :param branch: The name of the branch.
+        :param path: The path of the file in the repository.
+        :param content: The content of the file.
+        :param message: The commit message.
+        :raises GitHubError: GitHub refused the request.
+        """
+        data = {
+            "message": message,
+            "content": base64.b64encode(content).decode(),
+            "branch": branch,
+        }
+        url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}"
+        self._json(self._request(url, json.dumps(data).encode(), method="PUT"), expected=201)
 
     def login(self) -> str:
         """
@@ -448,6 +576,7 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
             if not release["isDraft"] and release["publishedAt"]
         ]
         return RepositoryInfo(
+            name=node["nameWithOwner"],
             owner=node["owner"]["login"],
             repository_id=_id(node["databaseId"]),
             owner_id=_id(node["owner"]["databaseId"]),
@@ -460,12 +589,6 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
     except (KeyError, TypeError, AttributeError) as err:
         msg = f"GitHub answered a repository that cannot be read: {err!r}"
         raise GitHubError(msg) from err
-
-
-def _blob_id(content: bytes) -> str:
-    """Return the object id git gives a file with this content."""
-    header = f"blob {len(content)}\0".encode()
-    return hashlib.sha1(header + content, usedforsecurity=False).hexdigest()
 
 
 def _is_comment(comment: object, author: str, marker: str) -> bool:
@@ -482,6 +605,25 @@ def _is_comment(comment: object, author: str, marker: str) -> bool:
     )
 
 
+def _pull_request(pull: dict[str, Any]) -> PullRequest:
+    """
+    Return a pull request as the API answers it.
+
+    :param pull: The pull request in the answer.
+    :raises KeyError: A field is missing.
+    :raises TypeError: A field is of another type.
+    """
+    head_repository = pull["head"]["repo"]
+    return PullRequest(
+        number=_id(pull["number"]),
+        url=_text(pull["html_url"]),
+        author=_text(pull["user"]["login"]),
+        head_repository=None if head_repository is None else _text(head_repository["full_name"]),
+        branch=_text(pull["head"]["ref"]),
+        body=_text(pull["body"] or ""),
+    )
+
+
 def _id(value: object) -> int:
     """
     Return an id GitHub answered.
@@ -491,6 +633,19 @@ def _id(value: object) -> int:
     """
     if type(value) is not int:
         msg = f"{value!r} is no id"
+        raise TypeError(msg)
+    return value
+
+
+def _text(value: object) -> str:
+    """
+    Return a text GitHub answered.
+
+    :param value: The text in the answer.
+    :raises TypeError: It is no text.
+    """
+    if not isinstance(value, str):
+        msg = f"{value!r} is no text"
         raise TypeError(msg)
     return value
 

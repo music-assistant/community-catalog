@@ -20,6 +20,7 @@ from tests.conftest import (
     FakeGitHub,
     build_archive,
     manifest,
+    provider_file,
     write_tree,
 )
 
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 
     from tests.conftest import Files
 
+REGISTRY = "music-assistant/community-catalog"
 PROVIDER = {
     "manifest.json": json.dumps(manifest(requirements=["some-package==1.0"])).encode(),
     "__init__.py": b"VALUE = 1\n",
@@ -322,6 +324,10 @@ def test_set_status(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
     assert _run(files, "validate") == 0
     file = load_registry(files.root).providers[DOMAIN].file
     assert (file.status, file.reason, file.reason_url) == ("listed", None, None)
+    # a listed provider is written without the keys it does not need
+    assert json.loads((files.root / f"providers/{DOMAIN}/provider.json").read_text()) == {
+        key: value for key, value in provider_file().items() if key != "status"
+    }
     assert _run(files, "set-status", "other_music", "listed") == 1
     assert "there is no provider other_music" in capsys.readouterr().err
 
@@ -352,6 +358,7 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     files.provider()
     files.version("1.0.0", lines={})
     report = {
+        "checked": "2026-11-15T02:00:00Z",
         "domain": DOMAIN,
         "version": "1.0.0",
         "findings": [{"passed": True, "text": "The domain is free", "detail": DOMAIN}],
@@ -380,10 +387,18 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
         },
     )
     comment = files.root / "comment.md"
-    assert _run(files, "check-admission", results, "--comment", str(comment)) == 0
+    url = "https://github.com/music-assistant/community-catalog/pull/12"
+    assert _run(files, "check-admission", results, "--comment", str(comment),
+                "--pull-request", url, "--proposal", "success") == 0  # fmt: skip
     out = capsys.readouterr().out
-    assert "Every check passed." in out
+    assert "Every check passed. A registry maintainer reviews" in out
+    assert f"[the pull request that adds it]({url})" in out
     assert comment.read_text() == out.removesuffix("\n")
+    assert _run(files, "check-admission", results, "--pull-request", "",
+                "--proposal", "failure") == 0  # fmt: skip
+    assert "the pull request that adds the provider could not be opened" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        _run(files, "check-admission", results, "--pull-request", "https://example.com/pull/1")
 
 
 def test_check_admission_without_the_prepare_step(
@@ -404,36 +419,35 @@ def test_check_admission_without_the_prepare_step(
     assert f"[The run of these checks]({run_url})" in comment.read_text()
 
 
-def test_prepare_admission_of_a_pull_request_that_is_no_admission(
+def test_prepare_admission_of_an_issue_that_is_no_submission(
     files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A refused pull request ends the prepare step well, with the refusal in its report."""
+    """An issue that is no submission ends the prepare step well, with the refusal in its report."""
     github = FakeGitHub()
+    github.issue(REGISTRY, 7, "### Repository\n\nsomeone/ma-sample\n", labels=[])
     monkeypatch.setenv("GITHUB_TOKEN", "a-token")
     monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
-    changed = files.root / "changed.txt"
-    changed.write_text(f"providers/{DOMAIN}/provider.json\n.github/workflows/ci.yml\n")
 
-    code = _run(files, "prepare-admission", "--repository", "music-assistant/community-catalog",
-                "--commit", COMMIT, "--changed", str(changed), "--author", "someone")  # fmt: skip
+    code = _run(files, "prepare-admission", "--repository", REGISTRY, "--issue", "7")
 
     assert code == 0
-    assert 'refused: "a pull request for admission adds or changes' in capsys.readouterr().out
+    assert "refused: '#7 is no issue with the label submission'" in capsys.readouterr().out
     report = json.loads((files.root / "work" / "admission.json").read_text())
     assert report["domain"] is None
-    assert "this one changes 2 file(s)" in report["refusal"]
     assert json.loads((files.root / "work" / "plan.json").read_text()) == {"lines": {}}
-    assert github.requests == []
+    assert [request.full_url for request in github.requests] == [
+        f"https://api.github.com/repos/{REGISTRY}/issues/7"
+    ]
 
 
 def test_post_admission_comment(
     files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The result is one comment of the workflow on the pull request, updated on every run."""
+    """The result is one comment of the workflow on the issue, updated on every run."""
     github = FakeGitHub()
     monkeypatch.setenv("GITHUB_TOKEN", "a-token")
     monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
-    repository = "music-assistant/community-catalog"
+    repository = REGISTRY
     # the marker in a comment of someone else, and a full first page of other comments
     others = [
         {"id": 1000 + number, "user": {"login": "someone"}, "body": f"{COMMENT_MARKER} no"}
@@ -442,7 +456,7 @@ def test_post_admission_comment(
     github.comments[repository, 11] = list(others)
     comment = files.root / "comment.md"
     args = ("post-admission-comment", str(comment), "--repository", repository,
-            "--pull-request", "11")  # fmt: skip
+            "--issue", "11")  # fmt: skip
 
     comment.write_text("## Admission checks\n\nfirst\n")
     assert _run(files, *args) == 0

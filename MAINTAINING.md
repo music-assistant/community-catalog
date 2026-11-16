@@ -18,7 +18,7 @@ the repository on GitHub is in [SETUP.md](SETUP.md).
 
 | Path | What it is |
 |---|---|
-| `providers/<domain>/provider.json` | A provider: where it lives, who maintains it, its status. Written once, at admission. |
+| `providers/<domain>/provider.json` | A provider: where it lives and its status. Written by the bot at admission. |
 | `providers/<domain>/versions/<version>.json` | A released version: the pinned commit, its content hash, its manifest and the result of the checks per server line. Generated. |
 | `providers/<domain>/refused/<version>.json` | A release that could not become a version, and why. Generated, so the release is not tried again. |
 | `server_lines.json` | The server lines an index is built for, each with its server image. |
@@ -32,35 +32,32 @@ No file or folder the commands read or write may be a symbolic link.
 
 ```json
 {
-  "domain": "sample_music",
-  "repository": "someone/ma-sample-music",
-  "repository_id": 123456789,
-  "owner_id": 987654,
-  "folder": "sample_music",
-  "tag_prefix": "",
-  "maintainers": ["someone"],
-  "status": "listed",
-  "reason": null,
-  "reason_url": null,
-  "blocked_versions": {},
   "added": "2026-11-14T12:00:00Z",
-  "admission": {"decided_by": "a-maintainer", "decided": "2026-11-14T12:00:00Z", "pull_request": 12}
+  "domain": "sample_music",
+  "folder": "sample_music",
+  "owner_id": 987654,
+  "repository": "someone/ma-sample-music",
+  "repository_id": 123456789
 }
 ```
+
+The bot writes it from the submission (see [Admission](#admission)): the ids from GitHub, the
+domain from the manifest of the latest release. A key that has its default value is left out.
+Who decided on the admission, and when, is in the history of its pull request. The maintainers
+of a provider are the owner of its repository and the code owners in the manifest of its
+highest version.
 
 | Key | Rule |
 |---|---|
 | `domain` | Lower case letters, digits and underscores, starting with a letter. Equals the name of the folder in `providers/`, and is not a domain the server ships or reserves. |
 | `repository` | The GitHub repository as `owner/name`. |
-| `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename or a transfer keeps them; another repository under the same name has others, and nothing of it is fetched until a registry maintainer updates them. The admission checks print the right ones. |
+| `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename or a transfer keeps them; another repository under the same name has others, and nothing of it is fetched until a registry maintainer updates them. |
 | `folder` | The provider folder in that repository, such as `sample_music`, `providers/sample_music` or `provider`. Its last part is the domain or `provider`: one predictable layout for a repository with a single provider (`provider`), and one for a repository with several (each in a folder named after its domain). A server installs it as a folder named after the domain. |
-| `tag_prefix` | Optional. What the release tags of this provider start with, for a repository that holds several providers. |
-| `maintainers` | GitHub handles, without `@`. At least one, at most 10, each the owner of the repository or a code owner in the manifest of the provider. Only they are mentioned in an issue on this repository. |
-| `status` | `listed`, `withdrawn` (offered no longer; what is installed keeps loading) or `blocked` (loaded by no server). |
+| `added` | When the provider entered the catalog, which servers show as new in the community catalog. |
+| `tag_prefix` | Optional, default empty. What the release tags of this provider start with, for a repository that holds several providers. |
+| `status` | Optional, default `listed`. `listed`, `withdrawn` (not offered; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
-| `blocked_versions` | Version to reason. A blocked version is loaded by no server. |
-| `added` | When the provider entered the catalog. |
-| `admission` | Who admitted the provider, when, and the pull request on this repository that added it. |
+| `blocked_versions` | Optional. Version to reason. A blocked version is loaded by no server. |
 
 ### versions/\<version\>.json
 
@@ -123,8 +120,9 @@ block.
 
 Each `site/v1/<line>.json` holds, for every provider with at least one version file:
 
-- its status, reason and reason link, repository, maintainers, the date it entered the catalog,
-  and its blocked versions;
+- its status, reason and reason link, repository, maintainers (the owner of the repository and
+  the code owners in the manifest of its highest version, as handles without `@`), the date it
+  entered the catalog, and its blocked versions;
 - `latest`: the highest version that passed the checks for this line and is not blocked.
   Versions are compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
 - `versions`: the five highest of those, each with its commit, folder, content hash,
@@ -204,9 +202,10 @@ The commands of the release pipeline, which the workflows run:
 | `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. |
 | `report <folder>` | Writes an issue for every failed check, every refused release and every repository that is not the admitted one into the work folder. |
 | `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
-| `prepare-admission --repository <owner/name> --commit <sha> --changed <file> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file and the plan. `--changed` lists the files the pull request changes; the `provider.json` is read through the API at the head commit of the pull request. A pull request that is no admission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
-| `check-admission <folder> [--comment <file>] [--run-url <url>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the pull request. |
-| `post-admission-comment <file> --repository <owner/name> --pull-request <number>` | Writes that comment on the pull request, or updates the one an earlier run wrote. Needs `GITHUB_TOKEN`. |
+| `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
+| `check-admission <folder> [--comment <file>] [--run-url <url>] [--pull-request <url>] [--proposal <result>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. Exits with 1 when the checks did not pass. |
+| `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url>` | When the checks passed, makes the branch `admit/<domain>` afresh from `main` with only the `provider.json`, opens or updates its pull request and prints its address; otherwise closes the open pull request of the issue. Needs `GITHUB_TOKEN` of the app. |
+| `post-admission-comment <file> --repository <owner/name> --issue <number>` | Writes the comment on the issue, or updates the one an earlier run wrote. Needs `GITHUB_TOKEN`. |
 | `check-changes <file>` | Fails when a pull request adds or changes a version file or a refusal; the file lists the changed paths, separated by NUL characters. |
 
 The work folder is `work/` in the root unless `--work` names another. It is never committed.
@@ -311,8 +310,8 @@ reports anything. Its jobs share only files:
 4. **Report** writes an issue for every version that failed a check on a line (first checks and
    versions that stopped passing), every release refused in this run, and every repository that
    is not the admitted one. The issue goes to the provider's repository, or to this repository,
-   mentioning the maintainers of its `provider.json`, when that repository has issues switched
-   off or is not the admitted one. Each issue has a key, written into its body, that is the same
+   mentioning its maintainers, when that repository has issues switched off or is not the
+   admitted one. Each issue has a key, written into its body, that is the same
    for the same failure; an issue is not opened when the account that opens them opened one with
    its key before. Everything a provider controls (reasons, output, manifest values) is shown as
    code. Opening them is switched on with the repository variable `POST_ISSUES`; until then they
@@ -342,39 +341,60 @@ CI runs the same checks on the provider's checkout, in one container.
 
 ## Admission
 
-A provider is admitted by a pull request that adds its `provider.json`. The workflow
-`admission.yml` runs on `pull_request_target`: the workflow file and the code that run are
-those of `main`, also for a pull request from a fork, and they run without waiting for an
-approval. Nothing of the pull request is checked out or run; its `provider.json` is read
-through the API, at the head commit of the pull request, as data, and only when the pull
-request changes that one file and it is a regular file of at most 64 KiB. It checks:
+A provider is submitted with the issue form "Submit a provider"
+(`.github/ISSUE_TEMPLATE/submit-provider.yml`), which gives the issue the label `submission`. It
+holds the repository, and only when needed the provider folder and the tag prefix. Without a
+folder, the checks take `provider` when it holds a `manifest.json`, and otherwise the one
+top-level folder that holds one; several or none is a refusal that asks for the folder.
 
-- that the pull request changes nothing but that one `provider.json`;
-- that `provider.json` is valid and its domain is free: not reserved, and not taken (a pull
-  request that changes the folder or tag prefix of an existing provider says so and gets the
-  same checks);
-- that the repository is public, not archived, has an open source licence GitHub recognises,
-  and has the ids `provider.json` names;
-- that the author of the pull request, and every maintainer in `provider.json`, owns the
-  repository or is a code owner in the manifest of its latest release;
+The workflow `admission.yml` runs when such an issue is opened, edited or reopened, and by hand
+for an issue number (Actions → Admission → Run workflow), for example after a new release. It
+runs the workflow file and the code of the commit it runs at: `main` for an issue, the chosen
+branch by hand. Nothing of the event reaches a script but through its environment; the registry
+reads the issue (author, text) through the API, as data, and accepts only the fields of the form.
+It checks:
+
+- that the repository exists, is public, not archived, and has an open source licence GitHub
+  recognises;
+- that its latest release has a provider folder whose manifest names a domain that is free: not
+  reserved, and not a provider in the catalog;
+- that the `provider.json` it leads to is valid; its ids come from GitHub;
+- that the author of the issue owns the repository or is a code owner in the manifest of the
+  latest release;
 - that the latest release becomes a version and passes the checks on at least one line.
 
-It writes the result in the job summary, for the person who decides and for Bot-MArley, and as
-one comment on the pull request, which every run updates: what was checked and what happens
-next, also when the pull request is no admission or the checks could not run. Everything the
-provider or the pull request controls is shown as code. Only the last job can write, and only
-to pull requests, with the workflow's own token. A pull request that changes the status, reason,
-blocked versions, repository, ids or maintainers of an existing provider is never passed: a
-registry maintainer decides on it. CI refuses a pull request that adds or changes a version file
-or a refusal, which only the pipeline writes.
+Its jobs:
 
-The author of an admission pull request cannot know `added` and the `admission` block in advance,
-so the README has them fill in their own handle, the current time and pull request `1`, which the
-checks only validate. The registry maintainer who admits the provider sets them to the decision.
+1. **prepare** reads the issue and GitHub with a read-only token, and plans the check;
+2. **check** runs once per line, exactly as the check of the release pipeline: no token, provider
+   code only in the containers of `scripts/check-line.sh`;
+3. **propose** runs only on `main`, in the environment `releases`, with a token of the Music
+   Assistant Bot app limited to contents and pull requests of this repository. It runs only its
+   checked out code, and reads the report, the plan and the results as data. When the checks
+   passed, it makes the branch `admit/<domain>` afresh from `main` with only the `provider.json`,
+   and opens or updates the pull request "Admit <name>" that carries the result and closes the
+   issue when merged. It leaves a branch alone whose open pull request is not of this issue.
+   When they did not pass, or could not run, it closes the open pull request of the issue with a
+   line that says why;
+4. **result** writes the result in the job summary and as one comment on the issue, which every
+   run updates, with the workflow's own token: what was checked (repository, release, commit and
+   when), what passed and what happens next, also when the issue is no valid submission or the
+   checks could not run. It links the pull request, and fails when the checks did not pass.
+
+Everything the issue, the repository or the release holds is shown as code. A registry
+maintainer reviews the provider against the
+[rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md) and
+decides by approving and merging the pull request. The next night the release pipeline takes its
+latest release.
+
+A change to a listed provider (its repository, folder or tag prefix, withdrawing it) comes as an
+issue; a registry maintainer makes it with the commands above in an ordinary pull request. CI
+refuses a pull request that adds or changes a version file or a refusal, which only the pipeline
+writes.
 
 ## Still open
 
 - Running the provider's own tests in the check step.
-- The reading of every release against the red lines by Bot-MArley, and its summary on an
-  admission pull request.
-- Merging an admitted pull request by the Music Assistant Bot app.
+- The reading of every release against the red lines by Bot-MArley, and its summary on the pull
+  request of a submission.
+- A form for the changes to a listed provider.
