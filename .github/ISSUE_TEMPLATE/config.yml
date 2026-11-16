@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Help with a provider from the community catalog
+    url: https://github.com/music-assistant/community-catalog#for-users
+    about: Its own maintainer helps, through the Get help button in the app or the provider's repository.
+  - name: Help with Music Assistant
+    url: https://github.com/music-assistant/support/issues/new/choose
+    about: Questions and problems with Music Assistant itself.
+  - name: Rules of the community catalog
+    url: https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md
+    about: What a provider in the community catalog may not do.
+  - name: Report a risk to users
+    url: https://github.com/music-assistant/community-catalog/security
+    about: A provider that puts its users at risk is reported privately, on the Security tab.

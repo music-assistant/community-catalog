@@ -1,65 +1,66 @@
 name: Admission
 
-# The automated checks for a pull request that adds or changes a provider.json. The decision
-# stays with a person. The code that runs is the code of the base branch; the pull request only
-# provides its provider.json, and provider code runs in the server images without any token.
+# The admission checks of a provider submitted with the issue form "Submit a provider", reported
+# in one comment on the issue. When they pass, the bot opens the pull request that adds the
+# provider, and a registry maintainer decides by merging it; closing the issue closes that pull
+# request. The issue is read through the API as data, provider code runs in the server images
+# without any token, and only the job that opens or closes the pull request holds the key of the
+# app.
 
 on:
-  pull_request:
-    paths: ["providers/*/provider.json"]
+  issues:
+    types: [opened, edited, reopened, closed]
+  workflow_dispatch:
+    inputs:
+      issue:
+        description: The number of the issue of the submission
+        required: true
+        type: number
 
 permissions: {}
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.event.issue.number || inputs.issue }}
   cancel-in-progress: true
 
 jobs:
   prepare:
-    name: Check the repository and fetch its latest release
+    name: Check the submission and fetch its latest release
+    # every issue of the repository starts this workflow; only an open submission is checked
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event.issue.state == 'open'
+      && contains(github.event.issue.labels.*.name, 'submission'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
       contents: read
-      # to list the files the pull request changes
-      pull-requests: read
+      # to read the issue
+      issues: read
     outputs:
       lines: ${{ steps.lines.outputs.lines }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: pull-request
-          persist-credentials: false
-      # the files go to the command as data; it refuses anything but one provider.json
-      - name: List the files the pull request changes
-        env:
-          GH_TOKEN: ${{ github.token }}
-          NUMBER: ${{ github.event.pull_request.number }}
-          REPOSITORY: ${{ github.repository }}
-        run: >-
-          gh api --paginate "repos/$REPOSITORY/pulls/$NUMBER/files" --jq '.[].filename'
-          > "$RUNNER_TEMP/changed.txt"
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: false
       - run: uv sync --locked --no-dev
-      - name: Check the repository and fetch the latest release
+      - name: Check the submission and fetch its latest release
         env:
-          AUTHOR: ${{ github.event.pull_request.user.login }}
           GITHUB_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+          REPOSITORY: ${{ github.repository }}
         run: >-
-          uv run --no-dev python -m registry prepare-admission --pull-request pull-request
-          --changed "$RUNNER_TEMP/changed.txt" --author "$AUTHOR"
+          uv run --no-dev python -m registry prepare-admission --repository "$REPOSITORY"
+          --issue "$ISSUE"
+      # only the lines the plan checks a version on; a submission that failed has an empty plan
       - name: List the server lines
         id: lines
         run: |
-          lines=$(jq -c '[.lines | to_entries[] | select(.value.frozen != true)
+          lines=$(jq -c --slurpfile plan work/plan.json '[.lines | to_entries[]
+            | select(.value.frozen != true and (($plan[0].lines[.key] // []) | length) > 0)
             | {line: .key, image: .value.image}]' server_lines.json)
           echo "lines=$lines" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -104,35 +105,133 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-  result:
-    name: Admission checks
+  propose:
+    name: Open or close the pull request
     needs: [prepare, check]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    # also when the checks failed or could not run, and for every event of a closed submission
+    # (an edit of it cancels the run of its closing), to close the pull request of an earlier run
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' && (needs.prepare.result != 'skipped'
+      || (github.event.issue.state == 'closed'
+      && contains(github.event.issue.labels.*.name, 'submission'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # holds the key of the app, which only a run on main gets
+    environment: releases
+    # a cancelled job does not stop at once: the next one for the issue waits until it has ended
+    concurrency:
+      group: admission-propose-${{ github.event.issue.number || inputs.issue }}
+      cancel-in-progress: false
     permissions:
       contents: read
+    outputs:
+      outcome: ${{ steps.propose.outputs.outcome }}
+      url: ${{ steps.propose.outputs.url }}
+      others: ${{ steps.propose.outputs.others }}
     steps:
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
+          # to see that the issue is still open and holds what was checked
+          permission-issues: read
+          permission-pull-requests: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
           persist-credentials: false
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: false
       - run: uv sync --locked --no-dev
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.prepare.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: admission
           path: ${{ runner.temp }}/admission
-      - run: cp -R "$RUNNER_TEMP/admission/work" work
+      # only the report and the plan; the registry and the code that run here are checked out
+      - if: needs.prepare.result == 'success'
+        run: |
+          mkdir work
+          cp "$RUNNER_TEMP/admission/work/admission.json" "$RUNNER_TEMP/admission/work/plan.json" work/
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: results-*
           merge-multiple: true
           path: results
+      # the results files are data from containers that ran provider code, read only as data
+      - name: Open or close the pull request
+        id: propose
+        env:
+          APP_SLUG: ${{ steps.token.outputs.app-slug }}
+          GITHUB_TOKEN: ${{ steps.token.outputs.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          uv run --no-dev python -m registry propose-admission results
+          --repository "$REPOSITORY" --issue "$ISSUE" --author "${APP_SLUG}[bot]"
+          --run-url "$RUN_URL" --output "$GITHUB_OUTPUT"
+
+  result:
+    name: Admission checks
+    needs: [prepare, check, propose]
+    # also when an earlier job failed, to say so on the issue
+    if: ${{ !cancelled() && needs.prepare.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # to write the result as a comment on the issue
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          enable-cache: false
+      - run: uv sync --locked --no-dev
+      - if: needs.prepare.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: admission
+          path: ${{ runner.temp }}/admission
+      - if: needs.prepare.result == 'success'
+        run: |
+          mkdir work
+          cp "$RUNNER_TEMP/admission/work/admission.json" "$RUNNER_TEMP/admission/work/plan.json" work/
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: results-*
+          merge-multiple: true
+          path: results
+      # the results files are data from containers that ran provider code, read only as data;
+      # bash sets pipefail, so the step fails when the checks did not pass
       - name: Print the result
         shell: bash
+        env:
+          OTHERS: ${{ needs.propose.outputs.others }}
+          OUTCOME: ${{ needs.propose.outputs.outcome }}
+          PROPOSAL: ${{ needs.propose.result }}
+          PULL_REQUEST: ${{ needs.propose.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           uv run --no-dev python -m registry check-admission results
+          --comment "$RUNNER_TEMP/comment.md" --run-url "$RUN_URL"
+          --proposal "$PROPOSAL" --outcome "$OUTCOME" --pull-request "$PULL_REQUEST"
+          --others "$OTHERS"
           | tee -a "$GITHUB_STEP_SUMMARY"
+      # also when not every check passed
+      - name: Write the result as a comment on the issue
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          uv run --no-dev python -m registry post-admission-comment "$RUNNER_TEMP/comment.md"
+          --repository "$REPOSITORY" --issue "$ISSUE"

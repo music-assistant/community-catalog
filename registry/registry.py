@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from registry.checks import check_provider, check_refused, check_server_lines, check_version
 from registry.files import load_model
+from registry.formats import is_github_handle, version_key
 from registry.models import (
     ProviderFile,
     RefusedRelease,
@@ -53,6 +54,32 @@ class Provider:
     versions: dict[str, VersionFile]
     # the releases that did not become a version, by version
     refused: dict[str, RefusedRelease]
+
+    def maintainers(self) -> list[str]:
+        """
+        Return the GitHub handles of the maintainers, without @ and each once.
+
+        They are the owner of the repository and the code owners in the manifest of the highest
+        version that is offered: not blocked, and passed on a server line. Without such a version
+        the owner is the only one.
+        """
+        offered = [
+            file
+            for file in self.versions.values()
+            if file.version not in self.file.blocked_versions
+            and any(check.passed for check in file.checks.values())
+        ]
+        newest = max(offered, key=lambda file: version_key(file.version), default=None)
+        codeowners = newest.manifest.get("codeowners", []) if newest else []
+        handles = [self.file.repository.split("/", 1)[0]]
+        handles += [owner.removeprefix("@") for owner in codeowners]
+        result: list[str] = []
+        seen: set[str] = set()
+        for handle in handles:
+            if is_github_handle(handle) and handle.lower() not in seen:
+                seen.add(handle.lower())
+                result.append(handle)
+        return result
 
 
 @dataclass

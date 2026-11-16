@@ -77,6 +77,37 @@ def test_index_has_the_shape_the_server_reads(files: Files) -> None:
     }
 
 
+def test_maintainers_are_the_owner_and_the_code_owners(files: Files) -> None:
+    """The owner and the code owners of the highest version, each once, on every line."""
+    requirements = ["some-package==1.0"]
+    files.provider(repository="Someone/ma-sample")
+    files.version("1.0.0", manifest={**manifest(DOMAIN, requirements), "codeowners": ["@old"]})
+    codeowners = ["@someone", "@another", "@Another", "@music-assistant/core", "@third"]
+    newest = {**manifest(DOMAIN, requirements), "codeowners": codeowners}
+    files.version("1.10.0", lines={"beta": True}, manifest=newest)
+
+    expected = ["Someone", "another", "third"]
+    assert _index(files)["providers"][DOMAIN]["maintainers"] == expected
+    assert _index(files, "beta")["providers"][DOMAIN]["maintainers"] == expected
+
+
+def test_code_owners_come_from_a_version_that_is_offered(files: Files) -> None:
+    """A blocked or failed version names no maintainer; without an offered one, the owner alone."""
+    requirements = ["some-package==1.0"]
+
+    def owners(*handles: str) -> dict[str, Any]:
+        return {**manifest(DOMAIN, requirements), "codeowners": list(handles)}
+
+    files.provider(blocked_versions={"9.0.0": "Sends the library elsewhere"})
+    files.version("9.0.0", lines={"nightly": True}, manifest=owners("@victim"))
+    files.version("8.0.0", lines={"nightly": False, "beta": False}, manifest=owners("@another"))
+    files.version("1.0.0", lines={"beta": True}, manifest=owners("@first"))
+
+    assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone", "first"]
+    files.version("1.0.0", lines={}, manifest=owners("@first"))
+    assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone"]
+
+
 def test_latest_is_the_highest_version_not_the_newest_text_or_date(files: Files) -> None:
     """Versions are compared as versions: 1.10.0 is above 1.9.0, also when released earlier."""
     files.provider()

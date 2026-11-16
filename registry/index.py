@@ -130,7 +130,7 @@ def _index_provider(provider: Provider, line: str) -> IndexProvider:
         added=file.added,
         reason=file.reason,
         reason_url=file.reason_url,
-        maintainers=file.maintainers,
+        maintainers=provider.maintainers(),
         icon_svg=shown.icon_svg,
         latest=latest.version if latest else None,
         versions={version.version: _index_version(version) for version in passed[:LISTED_VERSIONS]},

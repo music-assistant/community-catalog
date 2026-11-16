@@ -1,0 +1,46 @@
+name: Report or change a provider
+description: Report a provider that breaks the rules, make a takedown request, or change or remove a provider you maintain.
+title: "Report or change a provider"
+labels: [report]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Use this form to report a provider in the community catalog, to make a copyright or
+        takedown request, or to change or remove a provider you maintain. A registry maintainer
+        reads it. For a bug or a question, ask the maintainer of the provider: the Get help
+        button in the app, or the repository of the provider. Report a risk to users privately,
+        on the [Security tab](https://github.com/music-assistant/community-catalog/security).
+  - type: input
+    id: provider
+    attributes:
+      label: Provider
+      description: Its name or domain.
+      placeholder: sample_music
+    validations:
+      required: true
+  - type: dropdown
+    id: about
+    attributes:
+      label: What this is about
+      options:
+        - It breaks the rules of the community catalog
+        - Copyright or takedown request
+        - I maintain it, and its repository, folder or tag prefix changed
+        - I maintain it, and want it removed
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Details
+      description: >-
+        For a report: what the provider does and how you noticed, with links. For a change: what
+        changes, such as the new repository.
+    validations:
+      required: true
+  - type: input
+    id: requester
+    attributes:
+      label: Who asks
+      description: For a copyright or takedown request only. Who you are, and on whose behalf you ask.

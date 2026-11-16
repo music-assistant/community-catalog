@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import io
+import itertools
 import json
 import os
 import re
@@ -14,7 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, BinaryIO
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -45,6 +47,8 @@ ARCHIVE_ROOT = "someone-sample-0123456"
 # the ids GitHub gives the sample repository and its owner
 REPOSITORY_ID = 101
 OWNER_ID = 201
+# the account of the app that opens the pull requests of submissions
+BOT_LOGIN = "a-bot[bot]"
 
 
 def manifest(domain: str = DOMAIN, requirements: Sequence[str] = ()) -> dict[str, Any]:
@@ -77,10 +81,8 @@ def provider_file(domain: str = DOMAIN, **changes: Any) -> dict[str, Any]:
         "repository_id": REPOSITORY_ID,
         "owner_id": OWNER_ID,
         "folder": f"providers/{domain}",
-        "maintainers": ["someone"],
         "status": "listed",
         "added": ADDED,
-        "admission": {"decided_by": "a-maintainer", "decided": ADDED, "pull_request": 1},
     }
     data.update(changes)
     return {key: value for key, value in data.items() if value is not None}
@@ -271,7 +273,20 @@ class FakeGitHub:
         # the issues that exist, as (owner/name, author, key)
         self.issues: set[tuple[str, str, str]] = set()
         self.created: list[tuple[str, dict[str, Any]]] = []
+        # each issue as the API answers it, by (owner/name, number)
+        self.issue_answers: dict[tuple[str, int], dict[str, Any]] = {}
+        # the comments of each issue or pull request, by (owner/name, number)
+        self.comments: dict[tuple[str, int], list[dict[str, Any]]] = {}
+        # the pull requests of each repository as the API answers them, open or closed
+        self.pulls: dict[str, list[dict[str, Any]]] = {}
+        # the commit of each branch, by (owner/name, branch)
+        self.branches: dict[tuple[str, str], str] = {}
+        # the files committed through the contents API and their commit messages, by owner/name,
+        # branch and path
+        self.files: dict[tuple[str, str, str], bytes] = {}
+        self.messages: dict[tuple[str, str, str], str] = {}
         self.requests: list[urllib.request.Request] = []
+        self._ids = itertools.count(1)
 
     def repository(
         self,
@@ -287,6 +302,7 @@ class FakeGitHub:
         :param changes: Fields of the GraphQL node to set.
         """
         self.repositories[name] = {
+            "nameWithOwner": name,
             "databaseId": REPOSITORY_ID,
             "isPrivate": False,
             "isArchived": False,
@@ -296,6 +312,47 @@ class FakeGitHub:
             "releases": {"nodes": list(releases)},
             **changes,
         }
+
+    def issue(self, repository: str, number: int, body: str, **changes: Any) -> None:
+        """
+        Add an issue with the label of a submission.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue.
+        :param body: The text of the issue.
+        :param changes: Fields of the answer to set.
+        """
+        self.issue_answers[repository, number] = {
+            "number": number,
+            "user": {"login": "someone"},
+            "body": body,
+            "labels": [{"name": "submission"}],
+            "state": "open",
+            **changes,
+        }
+
+    def pull(self, repository: str, branch: str, body: str, **changes: Any) -> dict[str, Any]:
+        """
+        Add an open pull request of the bot from a branch of the repository, and return it.
+
+        :param repository: The repository, as owner/name.
+        :param branch: The branch of the pull request.
+        :param body: The text of the pull request.
+        :param changes: Fields of the answer to set.
+        """
+        pulls = self.pulls.setdefault(repository, [])
+        number = 100 + len(pulls)
+        pull = {
+            "number": number,
+            "html_url": f"https://github.com/{repository}/pull/{number}",
+            "user": {"login": BOT_LOGIN},
+            "head": {"ref": branch, "repo": {"full_name": repository}},
+            "body": body,
+            "state": "open",
+            **changes,
+        }
+        pulls.append(pull)
+        return pull
 
     def __call__(self, request: urllib.request.Request) -> tuple[int, BinaryIO]:
         """Answer a request."""
@@ -314,6 +371,8 @@ class FakeGitHub:
             owner, name, _, commit = url.removeprefix("https://codeload.github.com/").split("/")
             archive = self.archives.get((f"{owner}/{name}", commit))
             return (200, archive) if archive is not None else (404, b"Not Found")
+        if url.startswith("https://api.github.com/repos/"):
+            return self._repository_api(request)
         if url == "https://api.github.com/user":
             return 200, json.dumps({"login": self.LOGIN}).encode()
         if url.startswith("https://api.github.com/search/issues?"):
@@ -323,13 +382,136 @@ class FakeGitHub:
             key, repository, author = found.groups()
             count = int((repository, author, key) in self.issues)
             return 200, json.dumps({"total_count": count}).encode()
-        if url.startswith("https://api.github.com/repos/") and url.endswith("/issues"):
-            repository = url.removeprefix("https://api.github.com/repos/").removesuffix("/issues")
+        return 404, b"{}"
+
+    def _repository_api(self, request: urllib.request.Request) -> tuple[int, bytes]:
+        """Answer for issues, comments, pull requests, branches and files of a repository."""
+        url = request.full_url
+        found = re.fullmatch(r"https://api\.github\.com/repos/([\w-]+/[\w-]+)/(.+)", url)
+        assert found is not None, url
+        repository, path = found[1], found[2]
+        if path.startswith("pulls"):
+            return self._pulls(request, repository, path)
+        if path.startswith("issues"):
+            return self._issues(request, repository, path)
+        return self._git(request, repository, path)
+
+    def _issues(
+        self, request: urllib.request.Request, repository: str, path: str
+    ) -> tuple[int, bytes]:
+        """Open an issue, read one, or list, add or update a comment."""
+        if path == "issues":
             self.created.append((repository, request_json(request)))
             return 201, json.dumps(
                 {"html_url": f"https://github.com/{repository}/issues/1"}
             ).encode()
+        if found := re.fullmatch(r"issues/(\d+)", path):
+            issue = self.issue_answers.get((repository, int(found[1])))
+            return (404, b"{}") if issue is None else (200, json.dumps(issue).encode())
+        if found := re.fullmatch(r"issues/comments/(\d+)", path):
+            assert request.get_method() == "PATCH"
+            [comment] = [
+                c for c in itertools.chain(*self.comments.values()) if c["id"] == int(found[1])
+            ]
+            comment["body"] = request_json(request)["body"]
+            return 200, json.dumps(comment).encode()
+        if found := re.fullmatch(r"issues/(\d+)/comments\b.*", path):
+            return self._comments(request, repository, int(found[1]))
         return 404, b"{}"
+
+    def _git(
+        self, request: urllib.request.Request, repository: str, path: str
+    ) -> tuple[int, bytes]:
+        """Read, create or move a branch, or commit a file to one."""
+        method = request.get_method()
+        if found := re.fullmatch(r"git/matching-refs/heads/(.*)", path):
+            prefix = unquote(found[1])
+            refs = [
+                {"ref": f"refs/heads/{branch}"}
+                for owner, branch in sorted(self.branches)
+                if owner == repository and branch.startswith(prefix)
+            ]
+            return 200, json.dumps(refs).encode()
+        if found := re.fullmatch(r"git/ref/heads/(.+)", path):
+            commit = self.branches.get((repository, unquote(found[1])))
+            answer = {"object": {"sha": commit, "type": "commit"}}
+            return (404, b"{}") if commit is None else (200, json.dumps(answer).encode())
+        if path == "git/refs" and method == "POST":
+            data = request_json(request)
+            branch = data["ref"].removeprefix("refs/heads/")
+            assert (repository, branch) not in self.branches
+            self.branches[repository, branch] = data["sha"]
+            return 201, b"{}"
+        if found := re.fullmatch(r"git/refs/heads/(.+)", path):
+            return self._move_branch(request, repository, unquote(found[1]))
+        if (found := re.fullmatch(r"contents/(.+)", path)) and method == "PUT":
+            data = request_json(request)
+            key = (repository, data["branch"], unquote(found[1]))
+            assert (repository, data["branch"]) in self.branches
+            assert key not in self.files
+            self.files[key] = base64.b64decode(data["content"])
+            self.messages[key] = data["message"]
+            return 201, b"{}"
+        return 404, b"{}"
+
+    def _move_branch(
+        self, request: urllib.request.Request, repository: str, branch: str
+    ) -> tuple[int, bytes]:
+        """Point a branch at another commit, or delete it; either drops its files."""
+        for key in [key for key in self.files if key[:2] == (repository, branch)]:
+            del self.files[key]
+        if request.get_method() == "DELETE":
+            gone = self.branches.pop((repository, branch), None) is None
+            return (422, b'{"message": "Reference does not exist"}') if gone else (204, b"")
+        assert request.get_method() == "PATCH"
+        data = request_json(request)
+        assert data["force"] is True
+        self.branches[repository, branch] = data["sha"]
+        return 200, b"{}"
+
+    def _comments(
+        self, request: urllib.request.Request, repository: str, number: int
+    ) -> tuple[int, bytes]:
+        """List the comments of an issue or a pull request, or add one."""
+        comments = self.comments.setdefault((repository, number), [])
+        if request.get_method() == "POST":
+            comment = {
+                "id": next(self._ids),
+                "user": {"login": "github-actions[bot]"},
+                "body": request_json(request)["body"],
+                "html_url": f"https://github.com/{repository}/pull/{number}#c{len(comments)}",
+            }
+            comments.append(comment)
+            return 201, json.dumps(comment).encode()
+        query = parse_qs(urlsplit(request.full_url).query)
+        size, page = int(query["per_page"][0]), int(query["page"][0])
+        return 200, json.dumps(comments[(page - 1) * size : page * size]).encode()
+
+    def _pulls(
+        self, request: urllib.request.Request, repository: str, path: str
+    ) -> tuple[int, bytes]:
+        """List the open pull requests of a repository, open one, or change one."""
+        method = request.get_method()
+        pulls = self.pulls.setdefault(repository, [])
+        if found := re.fullmatch(r"pulls/(\d+)", path):
+            assert method == "PATCH"
+            [pull] = [pull for pull in pulls if pull["number"] == int(found[1])]
+            pull.update(request_json(request))
+            return 200, json.dumps(pull).encode()
+        if method == "POST":
+            data = request_json(request)
+            assert data["base"] == "main"
+            assert (repository, data["head"]) in self.branches
+            # GitHub keeps one open pull request per head and base
+            if any(p["head"]["ref"] == data["head"] and p["state"] == "open" for p in pulls):
+                return 422, b'{"message": "A pull request already exists"}'
+            pull = self.pull(repository, data["head"], data["body"], title=data["title"])
+            return 201, json.dumps(pull).encode()
+        query = parse_qs(urlsplit(request.full_url).query)
+        assert query["state"] == ["open"]
+        size, page = int(query["per_page"][0]), int(query["page"][0])
+        listed = [pull for pull in pulls if pull["state"] == "open"]
+        return 200, json.dumps(listed[(page - 1) * size : page * size]).encode()
 
     def _graphql(self, request: urllib.request.Request) -> dict[str, Any]:
         """Answer a GraphQL query for repositories, by the variables it passes."""

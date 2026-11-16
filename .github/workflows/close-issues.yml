@@ -1,0 +1,61 @@
+name: Close issues
+
+# This repository gives no support: an issue that is not one of its forms gets one fixed comment
+# that says where to go, and is closed as not planned. Exempt are people with write access, bots
+# and the account that opens the issues of the release pipeline. Nothing of the issue but its
+# number reaches the script or the comment.
+
+on:
+  issues:
+    types: [opened, reopened]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  close:
+    name: Close an issue that is not a form
+    # the variable REPORT_ACCOUNT is the handle of the account that opens the issues of the
+    # release pipeline
+    if: >-
+      ${{ !contains(github.event.issue.labels.*.name, 'submission')
+      && !contains(github.event.issue.labels.*.name, 'report')
+      && !contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'),
+      github.event.issue.author_association)
+      && github.event.issue.user.type != 'Bot'
+      && github.event.issue.user.login != vars.REPORT_ACCOUNT }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      # to comment on the issue and close it
+      issues: write
+    steps:
+      # a reopened issue already holds the comment, so it is only closed again
+      - name: Say where to go, once, and close the issue
+        # bash sets pipefail, so a listing that fails stops the step instead of a second comment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.issue.number }}
+          REPOSITORY: ${{ github.repository }}
+          MARKER: "<!-- not-a-form -->"
+          COMMENT: |
+            This repository is the registry of the Music Assistant community catalog and gives no support, so this issue is closed.
+
+            - **Help with a provider** from the community catalog: its own maintainer, through the **Get help** button in the app or the provider's repository.
+            - **Help with Music Assistant**: the [support repository](https://github.com/music-assistant/support/issues/new/choose) or [Discord](https://discord.gg/kaVm8hGpne).
+            - **Submitting a provider**: the form [Submit a provider](https://github.com/music-assistant/community-catalog/issues/new?template=submit-provider.yml).
+            - **Reporting a provider**, or changing or removing your own: the form [Report or change a provider](https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml).
+        run: |
+          posted=$(gh api --paginate "repos/$REPOSITORY/issues/$NUMBER/comments" | jq -r \
+            --arg marker "$MARKER" '.[] | select(.user.login == "github-actions[bot]"
+              and (.body | startswith($marker))) | .id')
+          if [ -z "$posted" ]; then
+            body=$(printf '%s\n%s' "$MARKER" "$COMMENT")
+            gh api "repos/$REPOSITORY/issues/$NUMBER/comments" -f body="$body" > /dev/null
+          fi
+          gh api -X PATCH "repos/$REPOSITORY/issues/$NUMBER" -f state=closed \
+            -f state_reason=not_planned > /dev/null

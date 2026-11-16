@@ -5,10 +5,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 import sys
 from pathlib import Path
 
-from registry.admission import check_admission, prepare_admission
+from registry.admission import (
+    COMMENT_MARKER,
+    Outcome,
+    Proposal,
+    admission_comment,
+    check_admission,
+    prepare_admission,
+    propose_admission,
+)
 from registry.edit import (
     CommandError,
     add_version,
@@ -55,6 +64,9 @@ from registry.reserved import add_server_domains
 
 # the token the commands that talk to GitHub read from the environment
 TOKEN_VARIABLE = "GITHUB_TOKEN"  # noqa: S105 - the name, not a token
+# the account of the token of a workflow, which writes the comment of the admission checks
+ACTIONS_LOGIN = "github-actions[bot]"
+_PULL_REQUEST_URL = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[0-9]+")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,31 +259,80 @@ def _check_changes(args: argparse.Namespace) -> int:
 
 
 def _prepare_admission(args: argparse.Namespace) -> None:
-    """Run the admission checks that need GitHub and add the latest release of the provider."""
-    changed = args.changed.read_text(encoding="utf-8").splitlines()
+    """Run the admission checks of a submission that need GitHub and take its latest release."""
     report = prepare_admission(
         args.root,
-        args.pull_request,
-        changed,
-        author=args.author,
+        repository=args.repository,
+        issue=args.issue,
         github=GitHub(_token()),
         work=args.work,
     )
     path = args.work / ADMISSION_REPORT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(dumps(report.to_dict()))
+    if report.refusal is not None:
+        print(f"refused: {report.refusal!r}")
     for finding in report.findings:
         detail = f": {finding.detail!r}" if finding.detail is not None else ""
         print(f"{'passed' if finding.passed else 'failed'}: {finding.text}{detail}")
 
 
 def _check_admission(args: argparse.Namespace) -> int:
-    """Print the result of the admission checks of a provider, with the checks of its release."""
-    report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
-    results = read_results(args.results, read_plan(args.work))
-    passed, text = check_admission(load_registry(args.root), report, results)
+    """Print the result of the admission checks of a submission, with the checks of its release."""
+    report, results = _admission(args)
+    passed, text = check_admission(
+        load_registry(args.root),
+        report,
+        results,
+        run_url=args.run_url,
+        proposal=Proposal(Outcome(args.outcome), args.pull_request or None, args.others.split())
+        if args.proposal == "success" and args.outcome
+        else None,
+        proposal_failed=args.proposal == "failure",
+    )
     print(text)
+    if args.comment is not None:
+        args.comment.write_text(admission_comment(text, args.run_url), encoding="utf-8")
     return 0 if passed else 1
+
+
+def _post_admission_comment(args: argparse.Namespace) -> None:
+    """Write the result of the admission checks as the one comment of them on the issue."""
+    body = args.comment.read_text(encoding="utf-8")
+    github = GitHub(_token())
+    url = github.set_comment(
+        args.repository, args.issue, body, marker=COMMENT_MARKER, author=ACTIONS_LOGIN
+    )
+    print(url)
+
+
+def _propose_admission(args: argparse.Namespace) -> None:
+    """Open or update the pull request that adds a provider whose checks passed, or close it."""
+    report, results = _admission(args)
+    proposal = propose_admission(
+        load_registry(args.root),
+        report,
+        results,
+        repository=args.repository,
+        issue=args.issue,
+        author=args.author,
+        run_url=args.run_url,
+        github=GitHub(_token()),
+    )
+    print(f"{proposal.outcome}: {proposal.url or 'no pull request'}")
+    for url in proposal.others:
+        print(f"another submission for the domain: {url}")
+    if args.output is not None:
+        # the outputs of the job, one line each; addresses GitHub answered, checked all the same
+        urls = [url for url in [proposal.url or "", *proposal.others] if url]
+        if not all(_PULL_REQUEST_URL.fullmatch(url) for url in urls):
+            msg = f"GitHub answered an address that is not a pull request: {urls!r}"
+            raise CommandError(msg)
+        with args.output.open("a", encoding="utf-8") as output:
+            output.write(
+                f"outcome={proposal.outcome}\nurl={proposal.url or ''}\n"
+                f"others={' '.join(proposal.others)}\n"
+            )
 
 
 def _set_status(args: argparse.Namespace) -> None:
@@ -291,6 +352,22 @@ def _unblock_version(args: argparse.Namespace) -> None:
     """Lift the block of a version of a provider, and write the index files."""
     block_version(load_registry(args.root), args.domain, args.version, None)
     write_indexes(args.root)
+
+
+def _admission(args: argparse.Namespace) -> tuple[AdmissionReport | None, list[LineResults]]:
+    """
+    Return the report of the prepare step and the results of the check step.
+
+    The report is None, and there are no results, when the prepare step did not finish.
+
+    :param args: The arguments, with the work folder and the folder of the results files.
+    """
+    try:
+        report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
+        return report, read_results(args.results, read_plan(args.work))
+    except CommandError as err:
+        print(f"warning: the admission checks did not run: {err}", file=sys.stderr)
+        return None, []
 
 
 def _token() -> str:
@@ -318,6 +395,31 @@ def _load[T: (FetchReport, Issue, AdmissionReport)](path: Path, model: type[T]) 
     except (ValueError, OSError) as err:
         msg = f"{path}: {err}"
         raise CommandError(msg) from err
+
+
+def _pull_request_url(value: str) -> str:
+    """
+    Return the address of a pull request on GitHub, or an empty value as it is.
+
+    :param value: The value of the argument.
+    :raises argparse.ArgumentTypeError: It is another address.
+    """
+    if value and not _PULL_REQUEST_URL.fullmatch(value):
+        msg = f"{value!r} is not the address of a pull request on GitHub"
+        raise argparse.ArgumentTypeError(msg)
+    return value
+
+
+def _pull_request_urls(value: str) -> str:
+    """
+    Return addresses of pull requests on GitHub separated by spaces, or an empty value.
+
+    :param value: The value of the argument.
+    :raises argparse.ArgumentTypeError: One is another address.
+    """
+    for url in value.split():
+        _pull_request_url(url)
+    return value
 
 
 def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per argument
@@ -410,24 +512,64 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     )
     command.set_defaults(run=_check_changes)
 
+    issue = argparse.ArgumentParser(add_help=False)
+    issue.add_argument(
+        "--repository", required=True, help="the repository of the registry, as owner/name"
+    )
+    issue.add_argument("--issue", type=int, required=True, help="the number of the submission")
+
     command = commands.add_parser(
-        "prepare-admission", help=_prepare_admission.__doc__, parents=[work]
+        "prepare-admission", help=_prepare_admission.__doc__, parents=[work, issue]
     )
-    command.add_argument(
-        "--pull-request", type=Path, required=True, help="a checkout of the pull request"
-    )
-    command.add_argument(
-        "--changed",
-        type=Path,
-        required=True,
-        help="a file with the files the pull request changes, one per line",
-    )
-    command.add_argument("--author", required=True, help="the author of the pull request")
     command.set_defaults(run=_prepare_admission)
 
     command = commands.add_parser("check-admission", help=_check_admission.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")
+    command.add_argument(
+        "--comment", type=Path, help="a file to write the result into as a comment"
+    )
+    command.add_argument("--run-url", help="the address of the workflow run, to link to")
+    command.add_argument(
+        "--pull-request",
+        type=_pull_request_url,
+        default="",
+        help="the address of the pull request of the outcome; empty for none",
+    )
+    command.add_argument(
+        "--proposal", help="the result of the job that takes care of the pull request: success"
+    )
+    command.add_argument(
+        "--outcome",
+        choices=["", *(outcome.value for outcome in Outcome)],
+        default="",
+        help="what that job did with the pull request",
+    )
+    command.add_argument(
+        "--others",
+        type=_pull_request_urls,
+        default="",
+        help="the pull requests of other submissions of the domain, separated by spaces",
+    )
     command.set_defaults(run=_check_admission)
+
+    command = commands.add_parser(
+        "post-admission-comment", help=_post_admission_comment.__doc__, parents=[issue]
+    )
+    command.add_argument("comment", type=Path, help="the file check-admission wrote")
+    command.set_defaults(run=_post_admission_comment)
+
+    command = commands.add_parser(
+        "propose-admission", help=_propose_admission.__doc__, parents=[work, issue]
+    )
+    command.add_argument("results", type=Path, help="the folder with the results files")
+    command.add_argument(
+        "--author", required=True, help="the account of the token, which opens pull requests"
+    )
+    command.add_argument("--run-url", required=True, help="the address of the workflow run")
+    command.add_argument(
+        "--output", type=Path, help="a file to add the outputs of the job to: outcome, url, others"
+    )
+    command.set_defaults(run=_propose_admission)
 
     command = commands.add_parser("set-status", help=_set_status.__doc__)
     command.add_argument("domain")

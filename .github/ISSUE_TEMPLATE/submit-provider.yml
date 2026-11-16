@@ -1,0 +1,47 @@
+name: Submit a provider
+description: Ask for your provider to be listed in the community catalog.
+title: "Submit a provider"
+labels: [submission]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Use this form to have your provider listed in the community catalog. Have ready: a
+        public repository with a published release that meets
+        [the requirements](https://github.com/music-assistant/community-catalog#getting-your-provider-listed).
+        The result of the checks appears as a comment on this issue. To change your submission
+        later, edit only the values of the fields and keep their headings.
+  - type: input
+    id: repository
+    attributes:
+      label: Repository
+      description: Your repository on GitHub, as `owner/name` or its address.
+      placeholder: someone/ma-sample-music
+    validations:
+      required: true
+  - type: input
+    id: folder
+    attributes:
+      label: Folder
+      description: >-
+        Leave empty when the provider is in the folder `provider`, or in the only top-level
+        folder with a `manifest.json`. Otherwise, the path of the provider folder.
+      placeholder: providers/sample_music
+  - type: input
+    id: tag-prefix
+    attributes:
+      label: Tag prefix
+      description: >-
+        Leave empty unless the repository holds several providers. Then, what the release tags
+        of this provider start with.
+      placeholder: sample_music-
+  - type: checkboxes
+    id: confirmations
+    attributes:
+      label: Before you submit
+      options:
+        - label: I own this repository, or I am a code owner in the manifest of its provider.
+          required: true
+        - label: >-
+            I have read the [rules of the community catalog](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md).
+          required: true
