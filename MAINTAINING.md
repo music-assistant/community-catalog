@@ -7,7 +7,7 @@ provider maintainer needs is in the [README](README.md).
 ## How a server uses it
 
 - A server reads one file, once a day: the index of its own server line, at
-  `https://music-assistant.github.io/community-catalog/v1/<line>.json`. The line is `nightly`,
+  `https://catalog.music-assistant.io/v1/<line>.json`. The line is `nightly`,
   `beta`, or the stable minor line such as `2.11`. A server that has not enabled the community
   catalog and has no community provider installed makes no request at all.
 - It installs only a version its index lists: it downloads the GitHub archive of the pinned
