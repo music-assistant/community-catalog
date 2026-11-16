@@ -424,6 +424,14 @@ class FakeGitHub:
     ) -> tuple[int, bytes]:
         """Read, create or move a branch, or commit a file to one."""
         method = request.get_method()
+        if found := re.fullmatch(r"git/matching-refs/heads/(.*)", path):
+            prefix = unquote(found[1])
+            refs = [
+                {"ref": f"refs/heads/{branch}"}
+                for owner, branch in sorted(self.branches)
+                if owner == repository and branch.startswith(prefix)
+            ]
+            return 200, json.dumps(refs).encode()
         if found := re.fullmatch(r"git/ref/heads/(.+)", path):
             commit = self.branches.get((repository, unquote(found[1])))
             answer = {"object": {"sha": commit, "type": "commit"}}

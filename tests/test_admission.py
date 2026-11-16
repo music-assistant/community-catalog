@@ -517,7 +517,7 @@ def test_checks_that_could_not_run(files: Files) -> None:
         (Proposal(Outcome.CLOSED), False, "but the issue was closed meanwhile, so nothing"),
         (Proposal(Outcome.CHANGED), False, "but the issue changed while it was checked, so"),
         (Proposal(Outcome.CONFLICT, PULL), False, f"but [another pull request]({PULL}) uses"),
-        (None, True, "but the pull request that adds the provider could not be opened"),
+        (None, True, "but this run could not finish the step that takes care of its pull"),
         (None, False, "Only a run on main opens the pull request that adds it."),
     ],
     ids=["opened", "stands", "closed", "changed", "conflict", "failed", "not on main"],
@@ -529,11 +529,20 @@ def test_the_result_says_what_became_of_the_pull_request(
     results = [_results("nightly", passed=True), _results("beta", passed=True)]
 
     passed, text = check_admission(
-        load_registry(files.root), _passed(), results, proposal=proposal, proposal_failed=failed
+        load_registry(files.root),
+        _passed(),
+        results,
+        run_url=RUN_URL,
+        proposal=proposal,
+        proposal_failed=failed,
     )
 
     assert passed
     assert expected in text
+    if failed:
+        # the pull request may have been opened before the step failed
+        assert f"[The run]({RUN_URL}) shows why" in text
+        assert "could not be opened" not in text
     holds = proposal is not None and proposal.outcome in {Outcome.OPENED, Outcome.STANDS}
     assert ("decides by merging" in text) == holds
 
@@ -743,11 +752,58 @@ def test_an_interrupted_run_leaves_no_pull_request_that_disagrees(
         open_pulls = _open(github)
         assert len(open_pulls) <= 1, done
         assert all(_consistent(github, pull) for pull in open_pulls), done
-        # the next run finishes what this one began
+        # the next run finishes what this one began, and leaves no branch of the issue unused
         _propose(files, github, report)
         open_pulls = _open(github)
         assert len(open_pulls) == (change != "closed"), done
         assert all(_consistent(github, pull) for pull in open_pulls), done
+        branches = {branch for owner, branch in github.branches if branch.endswith(f"-{ISSUE}")}
+        assert branches == {pull["head"]["ref"] for pull in open_pulls}, done
+
+
+def test_a_stand_cannot_be_forged_by_the_text_of_a_submission(
+    files: Files, github: FakeGitHub
+) -> None:
+    """A manifest name that carries the fingerprint of another submission makes nothing stand."""
+    later = _passed()
+    _changed_repository(later)
+    assert later.provider is not None
+    first = _passed()
+    first.name = f"<!-- proposal: {proposal_fingerprint(later.provider, later)} -->"
+    _propose(files, github, first)
+    github.issue_answers[REGISTRY, ISSUE]["body"] = body("another/ma-sample")
+
+    proposal = _propose(files, github, later)
+
+    assert proposal.outcome == Outcome.OPENED
+    old, new = github.pulls[REGISTRY]
+    assert (old["state"], new["state"]) == ("closed", "open")
+    assert _consistent(github, new)
+
+
+def test_unused_branches_of_the_issue_are_deleted_first(files: Files, github: FakeGitHub) -> None:
+    """Only branches admit/<domain>-<issue> of this issue that no open pull request uses go."""
+    left = [f"admit/{DOMAIN}-{ISSUE}", f"admit/other_music-{ISSUE}"]
+    kept = [
+        f"admit/{DOMAIN}-{ISSUE}7",
+        f"admit/{DOMAIN}-1{ISSUE}",
+        f"admit/{DOMAIN}-{ISSUE}-x",
+        f"admit/Sample-{ISSUE}",
+        f"admit/third_music-{ISSUE}",
+        f"other/{DOMAIN}-{ISSUE}",
+    ]
+    for branch in left + kept:
+        github.branches[REGISTRY, branch] = "6" * 40
+    # a branch of the issue that a person's open pull request uses stays
+    github.pull(REGISTRY, f"admit/third_music-{ISSUE}", "theirs", user={"login": "a-maintainer"})
+    github.issue_answers[REGISTRY, ISSUE]["state"] = "closed"
+
+    _propose(files, github, None)
+
+    remaining = {branch for owner, branch in github.branches if owner == REGISTRY}
+    assert remaining == {*kept, "main"}
+    deleted = [r.full_url for r in github.requests if r.get_method() == "DELETE"]
+    assert sorted(url.rsplit("/heads/", 1)[1] for url in deleted) == sorted(left)
 
 
 def test_propose_closes_the_pull_request_of_another_domain(
@@ -817,15 +873,18 @@ def test_a_closed_issue_gets_no_pull_request(files: Files, github: FakeGitHub) -
 
 
 def test_closing_leaves_a_merged_pull_request_alone(files: Files, github: FakeGitHub) -> None:
-    """Merging closes the issue; the merged pull request and its branch stay as they are."""
+    """Merging closes the issue; the merged pull request gets no line, its unused branch goes."""
     _propose(files, github, _passed())
-    github.pulls[REGISTRY][0].update(state="closed", merged=True)
+    merged = github.pulls[REGISTRY][0]
+    merged.update(state="closed", merged=True)
     github.issue_answers[REGISTRY, ISSUE]["state"] = "closed"
+    before = dict(merged)
 
     _propose(files, github, None)
 
     assert github.comments == {}
-    assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") in github.branches
+    assert merged == before
+    assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") not in github.branches
 
 
 def test_a_branch_another_pull_request_uses_is_left_alone(files: Files, github: FakeGitHub) -> None:

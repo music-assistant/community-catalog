@@ -118,6 +118,10 @@ jobs:
     timeout-minutes: 10
     # holds the key of the app, which only a run on main gets
     environment: releases
+    # a cancelled job does not stop at once: the next one for the issue waits until it has ended
+    concurrency:
+      group: admission-propose-${{ github.event.issue.number || inputs.issue }}
+      cancel-in-progress: false
     permissions:
       contents: read
     outputs:

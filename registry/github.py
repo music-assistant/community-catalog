@@ -370,6 +370,23 @@ class GitHub:
             raise GitHubError(msg)
         return commit
 
+    def branches(self, repository: str, prefix: str) -> list[str]:
+        """
+        Return the names of the branches that start with a prefix.
+
+        :param repository: The repository, as owner/name.
+        :param prefix: What the names start with, such as admit/.
+        :raises GitHubError: GitHub refused the request, or answered no list of branches.
+        """
+        url = f"{API_URL}/repos/{repository}/git/matching-refs/heads/{urllib.parse.quote(prefix)}"
+        found = self._answer(self._request(url))
+        if not isinstance(found, list) or not all(
+            isinstance(ref, dict) and isinstance(ref.get("ref"), str) for ref in found
+        ):
+            msg = f"{url} answered no list of branches"
+            raise GitHubError(msg)
+        return [ref["ref"].removeprefix("refs/heads/") for ref in found]
+
     def set_branch(self, repository: str, branch: str, commit: str) -> None:
         """
         Point a branch at a commit, creating the branch or moving it there whatever it held.

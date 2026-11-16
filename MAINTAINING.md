@@ -393,12 +393,14 @@ Its jobs:
    * Nothing is written to the branch while another pull request (of a person, say) uses it:
      the outcome is a conflict, which the result names.
    * Otherwise, and when the issue is closed, the open pull request of the issue is closed with
-     a line that says why and its branch deleted; a merged pull request is left alone.
+     a line that says why and its branch deleted; a merged pull request gets no line.
 
    The branch belongs to the issue, so two submissions of one domain give two pull requests, and
    the result of the second names the first. Titles and commit messages hold the domain only:
-   GitHub reads keywords such as "Closes #1" and "[skip ci]" in them. The job reports its
-   outcome to the next one;
+   GitHub reads keywords such as "Closes #1" and "[skip ci]" in them. A branch of the issue
+   that no open pull request uses, left by an interrupted run, is deleted first. One propose job
+   per issue runs at a time: the next waits until the one before has ended, also when that one
+   was cancelled. The job reports its outcome to the next one;
 4. **result** writes the result in the job summary and as one comment on the issue, which every
    run updates, with the workflow's own token: what was checked (repository, release, commit and
    when), what passed and what happens next, also when the issue is no valid submission or the
@@ -412,6 +414,9 @@ maintainer reviews the provider against the
 [rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md) and
 decides by approving and merging the pull request. The next night the release pipeline takes its
 latest release.
+
+Removing the label `submission` takes an issue out of the flow: no run looks at it any more, so
+whoever removes the label closes the bot's pull request of that issue by hand.
 
 A change to a listed provider (its repository, folder or tag prefix, withdrawing it) comes as an
 issue; a registry maintainer makes it with the commands above in an ordinary pull request. CI

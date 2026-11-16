@@ -188,7 +188,7 @@ def check_admission(
     passed = passed_on_a_line and all(finding.passed for finding in report.findings)
     rows = "".join(_row(finding) for finding in findings)
     if passed:
-        verdict = _proposal_verdict(proposal, proposal_failed=proposal_failed)
+        verdict = _proposal_verdict(proposal, proposal_failed=proposal_failed, run_url=run_url)
     else:
         verdict = (
             "Not every check passed. Fix what failed, then run the checks again: edit this "
@@ -233,7 +233,8 @@ def propose_admission(
     An open pull request of the issue that holds the same provider.json and release stands;
     any other is closed with a line that says why and its branch deleted, before a new one is
     made. A pull request is proposed only while the issue is open, labelled and holds the text
-    that was checked, and never on a branch another pull request uses.
+    that was checked, and never on a branch another pull request uses. A branch of the issue
+    that no open pull request uses is deleted first.
 
     :param registry: The registry of main.
     :param report: The admission checks of the prepare step, None when they did not run.
@@ -251,6 +252,7 @@ def propose_admission(
         pull for pull in github.pull_requests(repository) if pull.head_repository == repository
     ]
     ours = [pull for pull in pulls if pull.author == author and _branch_issue(pull.branch) == issue]
+    _delete_unused_branches(github, repository, issue, pulls)
     passed = check_admission(registry, report, results)[0]
     unchanged = (
         report is not None
@@ -287,7 +289,10 @@ def propose_admission(
     if taken := [pull for pull in pulls if pull.branch == branch and pull not in ours]:
         return Proposal(Outcome.CONFLICT, taken[0].url, others)
     marker = f"<!-- proposal: {proposal_fingerprint(provider, report)} -->"
-    standing = next((p for p in ours if p.branch == branch and marker in p.body), None)
+    # the body quotes text of the submission, so only its first line tells what it holds
+    standing = next(
+        (p for p in ours if p.branch == branch and p.body.split("\n", 1)[0] == marker), None
+    )
     for pull in ours:
         if pull is not standing:
             why = f"Closed: [this run]({run_url}) checked #{issue} again, with another result."
@@ -493,6 +498,23 @@ def _check_proposal(registry: Registry, provider: ProviderFile) -> None:
         raise CommandError("; ".join(problems))
 
 
+def _delete_unused_branches(
+    github: GitHub, repository: str, issue: int, pulls: list[PullRequest]
+) -> None:
+    """
+    Delete the branches of an issue that no open pull request uses, left by an interrupted run.
+
+    :param github: The GitHub client.
+    :param repository: The repository of the registry, as owner/name.
+    :param issue: The number of the issue; only branches admit/<domain>-<issue> are deleted.
+    :param pulls: The open pull requests of the repository.
+    """
+    used = {pull.branch for pull in pulls}
+    for branch in github.branches(repository, BRANCH_PREFIX):
+        if _branch_issue(branch) == issue and branch not in used:
+            github.delete_branch(repository, branch)
+
+
 def _close(github: GitHub, repository: str, pull: PullRequest, why: str) -> None:
     """Close a pull request of the bot, say why, and delete its branch."""
     github.update_pull_request(repository, pull.number, state="closed")
@@ -512,18 +534,22 @@ def _branch_domain(branch: str) -> str | None:
     return found[1] if found else None
 
 
-def _proposal_verdict(proposal: Proposal | None, *, proposal_failed: bool) -> str:
+def _proposal_verdict(
+    proposal: Proposal | None, *, proposal_failed: bool, run_url: str | None
+) -> str:
     """
     Return what happens next for a submission whose checks passed.
 
     :param proposal: What became of its pull request in this run, None when no run on main
         took care of it.
     :param proposal_failed: Whether the job that takes care of the pull request failed.
+    :param run_url: The address of the workflow run.
     """
     if proposal_failed:
+        run = f"[The run]({run_url})" if run_url else "The run"
         return (
-            "Every check passed, but the pull request that adds the provider could not be "
-            "opened. The run shows why; a registry maintainer looks into it."
+            "Every check passed, but this run could not finish the step that takes care of its "
+            f"pull request. {run} shows why; a registry maintainer looks into it."
         )
     if proposal is None:
         return "Every check passed. Only a run on main opens the pull request that adds it."

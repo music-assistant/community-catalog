@@ -194,6 +194,17 @@ def test_admission_writes_only_its_comment_and_pull_request() -> None:
     }
 
 
+def test_one_propose_job_runs_per_issue() -> None:
+    """A cancelled propose job may still write, so the next one of the issue waits for it."""
+    jobs = ADMISSION["jobs"]
+
+    assert jobs["propose"]["concurrency"] == {
+        "group": "admission-propose-${{ github.event.issue.number || inputs.issue }}",
+        "cancel-in-progress": False,
+    }
+    assert [job for job, definition in jobs.items() if "concurrency" in definition] == ["propose"]
+
+
 def test_admission_reports_also_after_a_failure() -> None:
     """The jobs that report run when an earlier job failed, but not when the run was cancelled."""
     jobs = ADMISSION["jobs"]
