@@ -39,9 +39,10 @@ Report a risk to users privately: "Report a vulnerability" on the
    It holds a working provider, its tests and the checks of the community catalog for your CI.
 2. **Meet the requirements:**
    - a public repository with an open source licence;
-   - the provider in a folder named after its domain, or `provider`;
-   - a domain that is free;
    - a valid `manifest.json`;
+   - a `domain` in that manifest (the unique id of the provider, such as `sample_music`) that no
+     other provider uses;
+   - the provider in a folder named after that domain, or `provider`;
    - requirements that install as wheels;
    - <a name="the-icon"></a>optionally an `icon.svg` ([what it may hold](MAINTAINING.md#the-icon)).
 
@@ -72,11 +73,12 @@ the issue withdraws the submission.
 
 ## Releasing updates
 
-After admission, you publish releases. Every night, the newest release that is new to the
-registry is checked on each server line (nightly, beta and the stable lines). A release that
-passes reaches the servers of that line without review. A release that is refused or fails gets
-an issue on this repository that mentions you, with the reason; it closes by itself when a later
-release passes. A refused release is not tried again; publish a new version.
+After admission, you release whenever you want: publish a GitHub release, and nothing else is
+needed. The registry looks for new releases once a night and checks the newest one on each
+server line (nightly, beta and the stable lines). A release that passes reaches the servers of
+that line without review. A release that is refused or fails gets an issue on this repository
+that mentions you, with the reason; it closes by itself when a later release passes. A refused
+release is not tried again; publish a new version.
 
 ## Changing or leaving
 
