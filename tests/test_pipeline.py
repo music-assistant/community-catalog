@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -10,17 +11,17 @@ import pytest
 from registry.cli import main
 from registry.edit import refuse_release
 from registry.files import load_model
-from registry.github import GitHub, post_issue
+from registry.github import GitHub
 from registry.models import (
     FetchReport,
-    Issue,
     LineResults,
+    ProviderReport,
     RefusedRelease,
     RepositoryState,
 )
 from registry.pipeline import versions_to_check
 from registry.registry import load_registry
-from registry.report import REGISTRY_REPOSITORY, build_issues
+from registry.report import LABEL, build_reports, is_settled, open_issues, post_report
 from tests.conftest import (
     CHECKED,
     COMMIT,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from tests.conftest import Files
 
 REPOSITORY = "someone/ma-sample"
+REGISTRY = "music-assistant/community-catalog"
 
 
 def _results(line: str, *results: dict[str, Any]) -> dict[str, Any]:
@@ -313,15 +315,15 @@ def test_a_missing_result_and_a_frozen_line(
     assert load_registry(files.root).providers[DOMAIN].versions["1.0.0"].checks == {}
 
 
-def _fetched(*, has_issues: bool = True, refused: bool = False) -> FetchReport:
+def _fetched(*, refused: bool = False, owner_id: int = OWNER_ID) -> FetchReport:
     """Return the report of a fetch step that read the sample repository."""
     state = RepositoryState(
         owner="someone",
         repository_id=REPOSITORY_ID,
-        owner_id=OWNER_ID,
+        owner_id=owner_id,
         private=False,
         archived=False,
-        has_issues=has_issues,
+        has_issues=True,
         license="mit",
     )
     return FetchReport.from_dict(
@@ -332,118 +334,330 @@ def _fetched(*, has_issues: bool = True, refused: bool = False) -> FetchReport:
     )
 
 
-def test_issues_for_failures_and_refusals(files: Files) -> None:
-    """Each failed check and each release refused in this run gets an issue on the repository."""
+def _report(
+    files: Files, *results: tuple[str, dict[str, Any]], fetched: FetchReport | None = None
+) -> ProviderReport:
+    """Return the report of the sample provider after one result per (line, result)."""
+    files_results = [LineResults.from_dict(_results(line, result)) for line, result in results]
+    [report] = build_reports(load_registry(files.root), fetched or _fetched(), files_results)
+    return report
+
+
+def _night(
+    files: Files, github: FakeGitHub, *results: tuple[str, dict[str, Any]], **fetched: Any
+) -> str | None:
+    """Run the report and the posting of one night for the sample provider; return what was done."""
+    report = _report(files, *results, fetched=_fetched(**fetched))
+    client = GitHub("a-token", github)
+    return post_report(report, open_issues(client, REGISTRY).get(DOMAIN), client, REGISTRY)
+
+
+def _refuse(files: Files, version: str, reason: str) -> None:
+    """Record a refused release of the sample provider."""
+    release = RefusedRelease(
+        version=version,
+        tag=f"v{version}",
+        commit=COMMIT,
+        released=RELEASED,
+        refused=CHECKED,
+        reason=reason,
+    )
+    refuse_release(load_registry(files.root), DOMAIN, release)
+
+
+def _mentions(markdown: str) -> list[str]:
+    """Return the handles a text mentions outside code and comments, as GitHub reads it."""
+    text = re.sub(r"(?ms)^(`{3,})\n.*?^\1$", "", markdown)
+    text = re.sub(r"(?s)(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", "", text)
+    text = re.sub(r"(?s)<!--.*?-->", "", text)
+    return re.findall(r"(?<![\w`])@([A-Za-z0-9-]+)", text)
+
+
+def _issues(github: FakeGitHub) -> list[dict[str, Any]]:
+    """Return the issues on the registry, by number."""
+    return [
+        issue for (owner, _), issue in sorted(github.issue_answers.items()) if owner == REGISTRY
+    ]
+
+
+def test_reports_for_failures_and_refusals(files: Files) -> None:
+    """A refused release and each failed check are failures, their text of the provider fenced."""
     files.provider()
     files.version("1.0.0", lines={})
     files.version("1.1.0", lines={})
-    registry = load_registry(files.root)
-    reason = "unknown key 'x'\n```\ninjected"
-    refuse_release(
-        registry,
-        DOMAIN,
-        RefusedRelease(
-            version="2.0.0",
-            tag="v2.0.0",
-            commit=COMMIT,
-            released=RELEASED,
-            refused=CHECKED,
-            reason=reason,
-        ),
+    _refuse(files, "2.0.0", "unknown key 'x'\n```\ninjected")
+
+    report = _report(
+        files,
+        ("nightly", _result("1.0.0", "load: broken", output="Traceback\n````\nload: broken")),
+        ("nightly", _result("1.1.0", "load: broken", passed_before=True)),
+        fetched=_fetched(refused=True),
     )
-    results = [
-        load_model(
-            files.write(
-                "results/nightly.json",
-                _results(
-                    "nightly",
-                    _result("1.0.0", "load: broken", output="Traceback\n````\nload: broken"),
-                    _result("1.1.0", "load: broken", passed_before=True),
-                    {**_result("1.1.0"), "domain": DOMAIN},
-                ),
-            ),
-            LineResults,
-        )
+
+    assert report.title == "Sample music (sample_music): release checks failed"
+    assert [failure.key for failure in report.failures] == [
+        "refused 2.0.0",
+        "check 1.0.0 nightly",
+        "check 1.1.0 nightly",
     ]
-
-    issues = build_issues(load_registry(files.root), _fetched(refused=True), results)
-
-    assert [issue.title for issue in issues] == [
-        "Release v2.0.0 of sample_music was refused by the community catalog",
-        "sample_music 1.0.0 does not pass the community catalog checks on nightly",
-        "sample_music 1.1.0 no longer passes the community catalog checks on nightly",
-    ]
-    assert {issue.repository for issue in issues} == {REPOSITORY}
-    refused, failed, stopped = issues
-    assert "````\nunknown key 'x'\n```\ninjected\n````" in refused.body
-    assert "<summary>Output</summary>\n\n`````\nTraceback\n````\nload: broken\n`````" in failed.body
-    assert "It passed before" in stopped.body
-    assert f"<!-- community-catalog: {failed.key} -->" in failed.body
-    assert len({issue.key for issue in issues}) == 3
-    # the same failure always has the same key
-    again = build_issues(load_registry(files.root), _fetched(refused=True), results)
-    assert [issue.key for issue in again] == [issue.key for issue in issues]
-
-
-def test_the_output_in_an_issue_fits_github(files: Files) -> None:
-    """GitHub takes 65536 characters in an issue: the end of a long output is kept."""
-    files.provider()
-    files.version("1.0.0", lines={})
-    output = "start" + "x" * 60_000 + "load: the end"
-    results = [
-        LineResults.from_dict(_results("nightly", _result("1.0.0", "load: x", output=output)))
-    ]
-
-    [issue] = build_issues(load_registry(files.root), _fetched(), results)
-
-    assert len(issue.body) < 45_000
-    assert "load: the end\n" in issue.body
-    assert "start" not in issue.body
+    refused, failed, stopped = report.failures
+    assert "````\nunknown key 'x'\n```\ninjected\n````" in refused.text
+    assert "not tried again" in refused.text
+    assert failed.output == "Traceback\n````\nload: broken"
+    assert "It passed before" in stopped.text
+    assert (report.newest, report.tested, report.passed, report.admitted) == (
+        "2.0.0",
+        ["beta", "nightly"],
+        [],
+        True,
+    )
+    assert report.maintainers == ["someone"]
 
 
 def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
-    """Another repository under the name of a provider gets an issue on the registry, once."""
+    """Another repository under the name of a provider is a failure until GitHub gives it again."""
+    files.provider()
+    files.version("1.0.0", lines={"beta": True})
+
+    report = _report(files, fetched=_fetched(owner_id=999))
+
+    [failure] = report.failures
+    assert failure.key == f"repository {REPOSITORY_ID} 999"
+    assert "Report or change a provider" in failure.text
+    assert not report.admitted
+    assert is_settled(_report(files), failure.key)
+
+
+@pytest.mark.parametrize(
+    ("checks", "refused", "key", "settled"),
+    [
+        # the newest version passed on the line of the failure
+        (
+            {"1.0.0": {"nightly": False}, "1.1.0": {"nightly": True}},
+            None,
+            "check 1.0.0 nightly",
+            True,
+        ),
+        # it passed on another line only
+        (
+            {"1.0.0": {"nightly": False}, "1.1.0": {"beta": True}},
+            None,
+            "check 1.0.0 nightly",
+            False,
+        ),
+        # a version that failed and passed again
+        ({"1.0.0": {"nightly": True}}, None, "check 1.0.0 nightly", True),
+        # a line that is no longer tested, while the newest version passes on another one
+        ({"1.0.0": {"beta": True}}, None, "check 1.0.0 2.11", True),
+        ({"1.0.0": {}}, None, "check 1.0.0 2.11", False),
+        # a refused release, settled by a higher version that passed on a line
+        ({"2.1.0": {"beta": True}}, "2.0.0", "refused 2.0.0", True),
+        ({"2.1.0": {"beta": False}}, "2.0.0", "refused 2.0.0", False),
+        # a newest release that was refused settles nothing
+        ({"1.0.0": {"nightly": True, "beta": True}}, "2.0.0", "check 0.9.0 nightly", False),
+        ({"1.0.0": {"nightly": True}}, None, "repository 1 2", True),
+        ({"1.0.0": {"nightly": True}}, None, "unknown", False),
+    ],
+)
+def test_when_a_failure_is_settled(
+    files: Files,
+    checks: dict[str, dict[str, bool]],
+    refused: str | None,
+    key: str,
+    settled: bool,
+) -> None:
+    """A failure is settled once the newest version passed where it failed, or anywhere at all."""
+    files.provider()
+    for version, lines in checks.items():
+        files.version(version, lines=lines)
+    if refused is not None:
+        _refuse(files, refused, "refused")
+
+    assert is_settled(_report(files), key) is settled
+
+
+def test_the_report_leaves_out_what_is_settled(files: Files) -> None:
+    """A failure of an older version on a line where the newest passes needs nobody."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    files.version("1.1.0", lines={"nightly": True})
+
+    report = _report(files, ("nightly", _result("1.0.0", "load: x")))
+
+    assert report.failures == []
+
+
+def test_a_first_failure_opens_one_issue(files: Files) -> None:
+    """The first failure opens one labelled issue on the registry that mentions the maintainers."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+
+    done = _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
+
+    [(repository, created)] = github.created
+    assert (repository, done) == (REGISTRY, f"https://github.com/{REGISTRY}/issues/1")
+    assert created["title"] == "Sample music (sample_music): release checks failed"
+    assert created["labels"] == [LABEL]
+    body = created["body"]
+    assert body.startswith("<!-- release-check: sample_music; check 1.0.0 nightly -->\n")
+    assert "### Version 1.0.0 does not pass the checks on nightly" in body
+    assert "```\nload: broken\n```" in body
+    assert "#releasing-updates" in body
+    assert "closes by itself" in body
+    assert _mentions(body) == ["someone"]
+    # the same failure the next night is told no more
+    assert _night(files, github, ("nightly", _result("1.0.0", "load: broken"))) is None
+    assert len(github.created) == 1
+    assert github.comments.get((REGISTRY, 1), []) == []
+
+
+def test_a_new_issue_mentions_at_most_ten(files: Files) -> None:
+    """The owner and the code owners of the newest version that passed: at most ten of them."""
+    owners = [f"@owner-{number}" for number in range(10)]
     files.provider()
     files.version(
         "1.0.0",
         lines={"beta": True},
-        manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
+        manifest={**manifest(requirements=["some-package==1.0"]), "codeowners": owners},
     )
-    fetched = _fetched()
-    fetched.repositories[REPOSITORY].owner_id = 999
+    github = FakeGitHub()
 
-    [issue] = build_issues(load_registry(files.root), fetched, [])
+    _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
 
-    assert issue.repository == REGISTRY_REPOSITORY
-    assert issue.title == "The repository of sample_music is not the one that was admitted"
-    assert f"GitHub gives it repository_id {REPOSITORY_ID}, owner_id 999" in issue.body
-    assert "\n@someone @another\n" in issue.body
-    assert build_issues(load_registry(files.root), fetched, [])[0].key == issue.key
+    [(_, created)] = github.created
+    assert _mentions(created["body"]) == ["someone", *(f"owner-{n}" for n in range(9))]
 
 
-def test_issue_goes_to_the_registry_without_issues(files: Files) -> None:
-    """When the provider's repository has issues switched off, the registry gets the issue."""
+def test_a_new_failure_while_open_is_a_comment(files: Files) -> None:
+    """Another failure while the issue is open is one comment, without mentions, told once."""
     files.provider()
-    files.version(
-        "1.0.0",
-        lines={"beta": True},
-        manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
+    files.version("1.0.0", lines={"nightly": False})
+    files.version("1.1.0", lines={})
+
+    done = _night(files, github, ("beta", _result("1.1.0", "load: other")))
+    again = _night(files, github, ("beta", _result("1.1.0", "load: other")))
+
+    assert (done, again) == ("#1: 1 new failure(s)", None)
+    assert len(github.created) == 1
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"].startswith("<!-- release-check: sample_music; check 1.1.0 beta -->\n")
+    assert "### Version 1.1.0 does not pass the checks on beta" in comment["body"]
+    assert _mentions(comment["body"]) == []
+
+
+def test_a_passing_release_closes_the_issue(files: Files) -> None:
+    """When the newest version passed where the issue says it failed, it is closed, once."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
+    files.version("1.0.0", lines={"nightly": False})
+    files.version("1.1.0", lines={})
+
+    done = _night(files, github, ("nightly", _result("1.1.0")))
+
+    assert done == "#1: closed"
+    [issue] = _issues(github)
+    assert (issue["state"], issue["state_reason"]) == ("closed", "completed")
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"] == "Version 1.1.0 passed the checks, so this issue is closed."
+    # a failure after that opens a new issue
+    files.version("1.1.0", lines={"nightly": True})
+    files.version("1.2.0", lines={})
+    assert _night(files, github, ("nightly", _result("1.2.0", "load: again"))) == (
+        f"https://github.com/{REGISTRY}/issues/2"
     )
-    results = [
-        load_model(
-            files.write("results/nightly.json", _results("nightly", _result("1.0.0", "load: x"))),
-            LineResults,
-        )
-    ]
-
-    [issue] = build_issues(load_registry(files.root), _fetched(has_issues=False), results)
-
-    assert issue.repository == REGISTRY_REPOSITORY
-    assert f"`{REPOSITORY}` has issues switched off. @someone @another" in issue.body
+    assert [issue["state"] for issue in _issues(github)] == ["closed", "open"]
 
 
-def test_report_writes_the_issues(files: Files) -> None:
-    """The report command writes each issue as a file named after its key."""
+def test_an_issue_stays_open_until_every_line_passes(files: Files) -> None:
+    """A newest version that passes on one line of the issue only leaves it open."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    _night(files, github, ("nightly", _result("1.0.0", "load: x")), ("beta", _result("1.0.0", "y")))
+    files.version("1.0.0", lines={"nightly": False, "beta": False})
+    files.version("1.1.0", lines={"nightly": True})
+
+    assert _night(files, github, ("beta", _result("1.1.0", "y"))) == "#1: 1 new failure(s)"
+    files.version("1.1.0", lines={"nightly": True, "beta": False})
+    assert _night(files, github) is None
+    assert _issues(github)[0]["state"] == "open"
+
+
+def test_a_key_written_by_someone_else_does_not_count(files: Files) -> None:
+    """Only the issue and comments of the pipeline's account count, and only their first line."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    marker = "<!-- release-check: sample_music; check 1.0.0 nightly; check 1.0.0 beta -->"
+    # an issue of a stranger with the label, and one of the pipeline that quotes a marker
+    github.issue(REGISTRY, 1, f"{marker}\n", labels=[{"name": LABEL}])
+    github.issue(
+        REGISTRY,
+        2,
+        "<!-- release-check: sample_music; refused 0.1.0 -->\n```\n" + marker + "\n```\n",
+        labels=[{"name": LABEL}],
+        user={"login": "github-actions[bot]"},
+    )
+    github.comments[REGISTRY, 2] = [{"id": 7, "user": {"login": "a-stranger"}, "body": marker}]
+
+    done = _night(files, github, ("nightly", _result("1.0.0", "load: x")))
+
+    assert done == "#2: 1 new failure(s)"
+    assert github.created == []
+
+
+def test_text_of_a_provider_mentions_nobody(files: Files) -> None:
+    """A mention in a manifest name, a reason or an output stays code and leaves the title."""
+    evil = {**manifest(DOMAIN, ["some-package==1.0"]), "name": "@evil `` @evil", "codeowners": [
+        "@someone", "@another"]}  # fmt: skip
+    files.provider()
+    files.version("1.0.0", lines={}, manifest=evil)
+    _refuse(files, "2.0.0", "@evil ```` @evil\n@evil")
+    github = FakeGitHub()
+
+    _night(
+        files,
+        github,
+        ("nightly", _result("1.0.0", "load: @evil", output="````\n@evil\n`` @evil")),
+        refused=True,
+    )
+
+    [(_, created)] = github.created
+    assert created["title"] == "sample_music: release checks failed"
+    # the owner alone: no version passed, so the code owners of a manifest do not count
+    assert _mentions(created["body"]) == ["someone"]
+    # the reason of the refusal (3), of the check (1) and the output (2), all as code
+    assert created["body"].count("@evil") == 6
+
+
+def test_the_output_in_a_post_fits_github(files: Files) -> None:
+    """GitHub takes 65536 characters in an issue: the failures share the end of their output."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    output = "start" + "x" * 60_000 + "load: the end"
+    github = FakeGitHub()
+
+    _night(
+        files,
+        github,
+        ("nightly", _result("1.0.0", "load: x", output=output)),
+        ("beta", _result("1.0.0", "load: x", output=output)),
+    )
+
+    [(_, created)] = github.created
+    assert len(created["body"]) < 45_000
+    assert created["body"].count("load: the end\n") == 2
+    assert "start" not in created["body"]
+
+
+def test_report_writes_the_reports(files: Files) -> None:
+    """The report command writes the report of each provider, only from results of the plan."""
     files.provider()
     files.version("1.0.0", lines={})
     _plan(files, {"nightly": ["1.0.0"]})
@@ -455,42 +669,45 @@ def test_report_writes_the_issues(files: Files) -> None:
     assert _run(files, "report", str(files.root / "results")) == 0
 
     [path] = (files.root / "work" / "issues").iterdir()
-    issue = load_model(path, Issue)
-    assert path.name == f"{issue.key}.json"
-    assert issue.repository == REPOSITORY
-
-
-def test_post_issue_opens_an_issue_once() -> None:
-    """An issue is opened unless the same account opened an issue with its key."""
-    github = FakeGitHub()
-    client = GitHub("a-token", github)
-    issue = Issue(key="0123456789abcdef", repository=REPOSITORY, title="A title", body="A body")
-    # a stranger who copies the key into an issue of their own does not stop ours
-    github.issues.add((REPOSITORY, "a-stranger", issue.key))
-
-    assert post_issue(issue, client) == f"https://github.com/{REPOSITORY}/issues/1"
-    github.issues.add((REPOSITORY, FakeGitHub.LOGIN, issue.key))
-    assert post_issue(issue, client) is None
-
-    assert github.created == [(REPOSITORY, {"title": "A title", "body": "A body"})]
-    assert all(r.get_header("Authorization") == "Bearer a-token" for r in github.requests)
-    # the account is asked for once
-    assert [r.full_url for r in github.requests].count("https://api.github.com/user") == 1
+    report = load_model(path, ProviderReport)
+    assert path.name == f"{DOMAIN}.json"
+    assert [failure.text.count("load: x") for failure in report.failures] == [1]
 
 
 def test_post_issues_goes_on_after_a_refusal(
     files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An issue GitHub refuses is reported, and the other issues are opened all the same."""
+    """A provider whose issue GitHub refuses is reported, and the others are posted all the same."""
     github = FakeGitHub()
-    for key, repository in (("0000000000000001", "someone/gone"), ("0000000000000002", REPOSITORY)):
-        issue = Issue(key=key, repository=repository, title=key, body="A body")
-        files.write(f"work/issues/{key}.json", issue.to_dict())
-    github.broken["https://api.github.com/repos/someone/gone/issues"] = OSError("refused")
+    files.provider()
+    files.provider("other_music")
+    files.version("1.0.0", lines={})
+    files.version("1.0.0", domain="other_music", lines={})
+    results = [
+        LineResults.from_dict(
+            _results(
+                "nightly", _result("1.0.0", "x"), {**_result("1.0.0", "x"), "domain": "other_music"}
+            )
+        )
+    ]
+    for report in build_reports(load_registry(files.root), _fetched(), results):
+        files.write(f"work/issues/{report.domain}.json", report.to_dict())
+    # other_music has an open issue, on which GitHub refuses the comment
+    github.issue(
+        REGISTRY,
+        1,
+        "<!-- release-check: other_music; refused 0.1.0 -->\n",
+        labels=[{"name": LABEL}],
+        user={"login": "github-actions[bot]"},
+    )
+    github.broken[f"https://api.github.com/repos/{REGISTRY}/issues/1/comments"] = OSError("no")
     monkeypatch.setenv("GITHUB_TOKEN", "a-token")
     monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
 
-    assert _run(files, "post-issues") == 1
+    assert _run(files, "post-issues", "--repository", REGISTRY) == 1
 
-    assert [repository for repository, _ in github.created] == ["someone/gone", REPOSITORY]
-    assert "warning: someone/gone:" in capsys.readouterr().err
+    assert [data["title"] for _, data in github.created] == [
+        "Sample music (sample_music): release checks failed"
+    ]
+    assert "warning: other_music: no" in capsys.readouterr().err
+    assert all(r.get_header("Authorization") == "Bearer a-token" for r in github.requests)

@@ -269,15 +269,35 @@ class AdmissionReport(StrictModel):
 
 
 @dataclass
-class Issue(StrictModel):
-    """An issue for the maintainer of a provider."""
+class Failure(StrictModel):
+    """A failure of a provider that its maintainers are told about."""
 
-    # the same failure always has the same key, so it is reported once
+    # the same failure always has the same key, such as "check 1.2.0 beta", so it is told once
     key: str
-    # owner/name of the repository the issue is opened on
-    repository: str
+    heading: str
+    # what failed and what it means, in Markdown
+    text: str
+    # the end of the output of a check that failed, shown as code
+    output: str | None = None
+
+
+@dataclass
+class ProviderReport(StrictModel):
+    """`issues/<domain>.json`: what the issue of a provider on the registry says and settles."""
+
+    domain: str
     title: str
-    body: str
+    # the GitHub handles mentioned in a new issue
+    maintainers: list[str]
+    # the failures of this run that are not settled
+    failures: list[Failure]
+    # the highest version of the provider, with a version file or refused
+    newest: str | None
+    # the tested server lines, and those the newest version passed on
+    tested: list[str]
+    passed: list[str]
+    # whether GitHub gives the repository the ids of provider.json
+    admitted: bool
 
 
 # The index, in the shape the server reads it: CatalogIndex and the classes below it in

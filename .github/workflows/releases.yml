@@ -2,8 +2,8 @@ name: Releases
 
 # Turns the releases of the providers into version files with check results. The jobs share only
 # files: fetch reads GitHub and plans the checks, check runs provider code in the server image of
-# each line without any token, apply records the results and pushes, report writes an issue per
-# failure. Only a run on main records or reports anything.
+# each line without any token, apply records the results and pushes, report keeps one issue per
+# provider with failures on this repository. Only a run on main records or reports anything.
 
 on:
   schedule:
@@ -167,10 +167,10 @@ jobs:
     if: ${{ !cancelled() && needs.apply.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # holds the token for the issues, which only a run on main gets
-    environment: releases
     permissions:
       contents: read
+      # to open, comment on and close the issues of the pipeline on this repository
+      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -183,6 +183,8 @@ jobs:
         with:
           name: fetched
           path: ${{ runner.temp }}/fetched
+      # only the files of the providers and the work folder; the code that runs here is the
+      # checked out code
       - name: Take the files of the fetch step
         run: |
           if [ -d "$RUNNER_TEMP/fetched/providers" ]; then
@@ -202,9 +204,8 @@ jobs:
           path: work/issues/
           if-no-files-found: ignore
           retention-days: 30
-      # switched on with the repository variable POST_ISSUES once REPORT_TOKEN is set
-      - name: Open the issues
-        if: vars.POST_ISSUES == 'true'
+      - name: Open, add to or close the issues
         env:
-          GITHUB_TOKEN: ${{ secrets.REPORT_TOKEN }}
-        run: uv run --no-dev python -m registry post-issues
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: uv run --no-dev python -m registry post-issues --repository "$REPOSITORY"

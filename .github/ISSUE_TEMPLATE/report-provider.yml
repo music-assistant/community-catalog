@@ -28,6 +28,7 @@ body:
         - Copyright or takedown request
         - I maintain it, and its repository, folder or tag prefix changed
         - I maintain it, and want it removed
+        - I maintain it, and ask for it to be listed again
     validations:
       required: true
   - type: textarea
