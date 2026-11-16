@@ -12,6 +12,8 @@ from registry.markdown import code_block, code_span
 from registry.models import Failure, ProviderReport
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from registry.github import GitHub
     from registry.models import FetchReport, LineResults, VersionResult
     from registry.registry import Provider, Registry
@@ -24,8 +26,9 @@ CHANGE_FORM_URL = (
 )
 # the most maintainers a new issue mentions
 MAX_MENTIONS = 10
-# GitHub takes 65536 characters in an issue or a comment; the failures of one post share this
-# much of the end of their output
+# GitHub takes 65536 characters in an issue or a comment, counted as UTF-16
+_MAX_TEXT = 65_536
+# the failures of one post share at most this much of the end of their output
 _MAX_OUTPUT = 40_000
 # the first line of an issue or comment of the pipeline: the domain and the keys of its failures
 _MARKER = re.compile(r"<!-- release-check: ([a-z][a-z0-9_]*)((?:; [a-z0-9. ]+)*) -->")
@@ -123,25 +126,30 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     return False
 
 
-def open_issues(github: GitHub, repository: str) -> dict[str, OpenIssue]:
+def open_issues(github: GitHub, repository: str) -> dict[str, OpenIssue | OSError]:
     """
     Return the open issue of the pipeline of each provider, by domain.
 
     Only what the pipeline's own account wrote counts, so nobody can settle or hide a failure by
-    writing its key.
+    writing its key. A provider whose issue could not be read this time gets the error instead.
 
     :param github: A client.
     :param repository: The repository of the registry, as owner/name.
-    :raises GitHubError: GitHub refused a request.
+    :raises OSError: The issues could not be listed.
     """
-    result: dict[str, OpenIssue] = {}
+    result: dict[str, OpenIssue | OSError] = {}
     for issue in sorted(github.issues(repository, LABEL), key=lambda issue: issue.number):
         if issue.author != ACTIONS_LOGIN or (told := _marker(issue.body)) is None:
             continue
         domain, keys = told
         if domain in result:
             continue
-        for comment in github.comments(repository, issue.number):
+        try:
+            comments = github.comments(repository, issue.number)
+        except OSError as err:
+            result[domain] = err
+            continue
+        for comment in comments:
             if comment.author == ACTIONS_LOGIN and (more := _marker(comment.body)) is not None:
                 keys |= more[1]
         result[domain] = OpenIssue(issue.number, keys)
@@ -175,17 +183,19 @@ def post_report(
             if any(not failure.key.startswith("repository ") for failure in new)
             else ""
         )
-        body = (
-            f"{_marker_line(report.domain, new)}\n"
-            f"The Music Assistant community catalog checks the releases of `{report.domain}`. "
-            f"This needs the attention of its maintainers:\n\n{_failures(new)}"
-            f"### What to do\n\n{fix}[Releasing updates]({README_URL}) tells how releases are "
-            "checked. This issue closes by itself once the newest release passes the checks.\n\n"
-            f"{mentions}\n"
+        body = _fit(
+            lambda room: (
+                f"{_marker_line(report.domain, new)}\n"
+                f"The Music Assistant community catalog checks the releases of `{report.domain}`. "
+                f"This needs the attention of its maintainers:\n\n{_failures(new, room)}"
+                f"### What to do\n\n{fix}[Releasing updates]({README_URL}) tells how releases are "
+                "checked. This issue closes by itself once the newest release passes the checks."
+                f"\n\n{mentions}\n"
+            )
         )
         return github.create_issue(repository, report.title, body, [LABEL])
     if new:
-        body = f"{_marker_line(report.domain, new)}\n{_failures(new)}"
+        body = _fit(lambda room: f"{_marker_line(report.domain, new)}\n{_failures(new, room)}")
         github.add_comment(repository, issue.number, body)
         return f"#{issue.number}: {len(new)} new failure(s)"
     if all(is_settled(report, key) for key in told):
@@ -218,7 +228,7 @@ def _check_failure(provider: Provider, line: str, result: VersionResult) -> Fail
         key=f"check {version} {line}",
         heading=heading,
         text=text,
-        output=output[-_MAX_OUTPUT:] if output else None,
+        output=output,
     )
 
 
@@ -261,15 +271,34 @@ def _title(provider: Provider) -> str:
     return f"{domain}: release checks failed"
 
 
-def _failures(failures: list[Failure]) -> str:
+def _fit(render: Callable[[int], str]) -> str:
+    """
+    Return the text of a post with as much output as GitHub takes in it.
+
+    :param render: Returns the text with at most this many characters of output.
+    """
+    room = _MAX_OUTPUT
+    # the fences grow with the output, so the whole text is measured
+    while len((text := render(room)).encode("utf-16-le")) // 2 > _MAX_TEXT and room:
+        room //= 2
+    return text
+
+
+def _failures(failures: list[Failure], room: int) -> str:
     """Return failures in Markdown, each under its heading, sharing the room for output."""
-    room = _MAX_OUTPUT // len(failures)
+    share = room // len(failures)
     text = ""
     for failure in failures:
         text += f"### {failure.heading}\n\n{failure.text}\n\n"
         if failure.output:
-            output = code_block(failure.output[-room:])
-            text += f"<details><summary>Output</summary>\n\n{output}\n</details>\n\n"
+            shown = failure.output[-share:] if share else ""
+            summary = (
+                "Output"
+                if shown == failure.output
+                else f"Output, shortened to its last {len(shown)} characters"
+            )
+            output = code_block(shown)
+            text += f"<details><summary>{summary}</summary>\n\n{output}\n</details>\n\n"
     return text
 
 

@@ -467,8 +467,9 @@ a registry maintainer reads it and makes the change in an ordinary pull request:
 
 The release pipeline keeps one open issue per provider that needs its maintainers, with the label
 `release-check`, opened by `github-actions[bot]`; `is:issue is:open label:release-check` lists
-them. A new issue mentions the maintainers of the provider (at most 10). A new failure while it is
-open becomes a comment without mentions, and a failure is never told twice: the first line of the
+them. A new issue mentions the maintainers of the provider (at most 10): the owner of its
+repository and the code owners in its manifest. A provider that uses its manifest to notify others
+is blocked. A new failure while it is open becomes a comment without mentions, and a failure is never told twice: the first line of the
 issue and of each comment of the pipeline names the failures it tells, and only those lines of
 `github-actions[bot]` count. Everything a provider controls (reasons, output, manifest values) is
 shown as code; the title shows the name of the manifest only when it is plain text.

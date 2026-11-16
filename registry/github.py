@@ -30,9 +30,11 @@ BATCH_SIZE = 50
 RELEASES_PER_REPOSITORY = 30
 # the largest archive of a commit that is downloaded; a larger one is refused
 MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
-# the issues, comments and pull requests read per request, the most GitHub answers
-ISSUES_PER_PAGE = 100
-COMMENTS_PER_PAGE = 100
+# the issues and comments read per request: GitHub takes 65536 characters in each, at most 6
+# bytes apiece as JSON (\uXXXX), so a full page stays below the largest answer read
+ISSUES_PER_PAGE = 25
+COMMENTS_PER_PAGE = 25
+# the pull requests read per request, the most GitHub answers
 PULL_REQUESTS_PER_PAGE = 100
 # far more than any answer of the API the registry asks for
 _MAX_ANSWER_SIZE = 10 * 1024 * 1024

@@ -11,7 +11,8 @@ import pytest
 from registry.cli import main
 from registry.edit import refuse_release
 from registry.files import load_model
-from registry.github import GitHub
+from registry.github import COMMENTS_PER_PAGE, GitHub
+from registry.markdown import code_block
 from registry.models import (
     FetchReport,
     LineResults,
@@ -349,7 +350,9 @@ def _night(
     """Run the report and the posting of one night for the sample provider; return what was done."""
     report = _report(files, *results, fetched=_fetched(**fetched))
     client = GitHub("a-token", github)
-    return post_report(report, open_issues(client, REGISTRY).get(DOMAIN), client, REGISTRY)
+    issue = open_issues(client, REGISTRY).get(DOMAIN)
+    assert not isinstance(issue, OSError)
+    return post_report(report, issue, client, REGISTRY)
 
 
 def _refuse(files: Files, version: str, reason: str) -> None:
@@ -654,6 +657,102 @@ def test_the_output_in_a_post_fits_github(files: Files) -> None:
     assert len(created["body"]) < 45_000
     assert created["body"].count("load: the end\n") == 2
     assert "start" not in created["body"]
+
+
+@pytest.mark.parametrize(
+    "output",
+    ["`" * 40_000, "~" * 60_000, "\U0001f600" * 40_000],
+    ids=["backticks", "tildes", "astral"],
+)
+@pytest.mark.parametrize("open_issue", [False, True], ids=["issue", "comment"])
+def test_a_post_fits_github_whatever_the_output(
+    files: Files,
+    output: str,
+    open_issue: bool,
+) -> None:
+    """The whole text of an issue or comment stays within 65536 characters, fences and all."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    if open_issue:
+        github.issue(
+            REGISTRY,
+            1,
+            "<!-- release-check: sample_music; refused 0.1.0 -->\n",
+            labels=[{"name": LABEL}],
+            user={"login": "github-actions[bot]"},
+        )
+
+    _night(files, github, ("nightly", _result("1.0.0", "load: x", output=output + "end")))
+
+    if open_issue:
+        [comment] = github.comments[REGISTRY, 1]
+        body = comment["body"]
+    else:
+        [(_, created)] = github.created
+        body = created["body"]
+    assert len(body.encode("utf-16-le")) // 2 <= 65_536
+    assert body.startswith("<!-- release-check: sample_music; check 1.0.0 nightly -->\n")
+    found = re.search(r"Output, shortened to its last (\d+) characters", body)
+    assert found is not None
+    shown = (output + "end")[-int(found[1]) :]
+    assert shown.endswith("end")
+    assert code_block(shown) in body
+
+
+def test_the_largest_comments_are_read() -> None:
+    """A full page of comments of 65536 characters, each escaped in JSON, fits an answer."""
+    github = FakeGitHub()
+    body = "\x01" * 65_536
+    github.comments[REGISTRY, 1] = [
+        {"id": number, "user": {"login": "github-actions[bot]"}, "body": body}
+        for number in range(100)
+    ]
+
+    comments = GitHub("a-token", github).comments(REGISTRY, 1)
+
+    assert len(comments) == 100
+
+
+def test_a_provider_whose_issue_cannot_be_read_is_skipped(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The others are still reported, the skipped one gets no second issue, and the run fails."""
+    github = FakeGitHub()
+    for domain in ("other_music", DOMAIN, "third_music"):
+        files.provider(domain)
+        files.version("1.0.0", domain=domain, lines={})
+    results = [
+        LineResults.from_dict(
+            _results(
+                "nightly",
+                *({**_result("1.0.0", "x"), "domain": d} for d in ("other_music", "third_music")),
+                _result("1.0.0", "x"),
+            )
+        )
+    ]
+    for report in build_reports(load_registry(files.root), _fetched(), results):
+        files.write(f"work/issues/{report.domain}.json", report.to_dict())
+    # the comments of the open issue of sample_music cannot be read
+    github.issue(
+        REGISTRY,
+        1,
+        "<!-- release-check: sample_music; refused 0.1.0 -->\n",
+        labels=[{"name": LABEL}],
+        user={"login": "github-actions[bot]"},
+    )
+    comments = f"https://api.github.com/repos/{REGISTRY}/issues/1/comments?per_page={COMMENTS_PER_PAGE}&page=1"
+    github.broken[comments] = OSError("too large")
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
+
+    assert _run(files, "post-issues", "--repository", REGISTRY) == 1
+
+    assert [data["title"] for _, data in github.created] == [
+        "Sample music (other_music): release checks failed",
+        "Sample music (third_music): release checks failed",
+    ]
+    assert "warning: sample_music: skipped, its issue cannot be read" in capsys.readouterr().err
 
 
 def test_report_writes_the_reports(files: Files) -> None:

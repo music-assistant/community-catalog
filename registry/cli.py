@@ -233,8 +233,17 @@ def _post_issues(args: argparse.Namespace) -> int:
     failed = 0
     for path in sorted((args.work / ISSUES_FOLDER).glob("*.json")):
         report = _load(path, ProviderReport)
+        issue = issues.get(report.domain)
+        # without its issue, a provider is skipped rather than given a second one
+        if isinstance(issue, OSError):
+            failed += 1
+            print(
+                f"warning: {report.domain}: skipped, its issue cannot be read: {issue}",
+                file=sys.stderr,
+            )
+            continue
         try:
-            done = post_report(report, issues.get(report.domain), github, args.repository)
+            done = post_report(report, issue, github, args.repository)
         except OSError as err:
             failed += 1
             print(f"warning: {report.domain}: {err}", file=sys.stderr)
