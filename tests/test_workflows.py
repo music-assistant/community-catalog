@@ -152,9 +152,11 @@ def test_admission_runs_on_submissions() -> None:
     prepare = ADMISSION["jobs"]["prepare"]["if"]
     assert "github.event.issue.state == 'open'" in prepare
     assert "contains(github.event.issue.labels.*.name, 'submission')" in prepare
-    # closing a submission closes its pull request
+    # every event of a closed submission closes its pull request: an edit of it cancels the run
+    # of its closing
     propose = ADMISSION["jobs"]["propose"]["if"]
-    assert "github.event.action == 'closed'" in propose
+    assert "github.event.issue.state == 'closed'" in propose
+    assert "github.event.action" not in propose
 
 
 def test_admission_checks_out_the_commit_of_the_run() -> None:

@@ -389,17 +389,25 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     )
     comment = files.root / "comment.md"
     url = "https://github.com/music-assistant/community-catalog/pull/12"
-    assert _run(files, "check-admission", results, "--comment", str(comment),
-                "--pull-request", url, "--proposal", "success") == 0  # fmt: skip
+    assert _run(files, "check-admission", results, "--comment", str(comment), "--proposal",
+                "success", "--outcome", "opened", "--pull-request", url) == 0  # fmt: skip
     out = capsys.readouterr().out
     assert "Every check passed. A registry maintainer reviews" in out
     assert f"[the pull request that adds it]({url})" in out
     assert comment.read_text() == out.removesuffix("\n")
-    assert _run(files, "check-admission", results, "--pull-request", "",
-                "--proposal", "failure") == 0  # fmt: skip
+    # a declined proposal is never offered for merging
+    assert _run(files, "check-admission", results, "--proposal", "success", "--outcome",
+                "changed", "--pull-request", "", "--others", "") == 0  # fmt: skip
+    out = capsys.readouterr().out
+    assert "but the issue changed while it was checked" in out
+    assert "merging" not in out
+    assert _run(files, "check-admission", results, "--proposal", "failure", "--outcome", "",
+                "--pull-request", "") == 0  # fmt: skip
     assert "the pull request that adds the provider could not be opened" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         _run(files, "check-admission", results, "--pull-request", "https://example.com/pull/1")
+    with pytest.raises(SystemExit):
+        _run(files, "check-admission", results, "--outcome", "merged")
 
 
 def test_check_admission_without_the_prepare_step(

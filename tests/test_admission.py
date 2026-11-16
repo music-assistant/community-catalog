@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -12,11 +13,13 @@ from registry.admission import (
     FORM_URL,
     MAX_COMMENT_SIZE,
     RULES_URL,
+    Outcome,
     Proposal,
     admission_comment,
     check_admission,
     issue_digest,
     prepare_admission,
+    proposal_fingerprint,
     propose_admission,
 )
 from registry.cli import main
@@ -40,6 +43,7 @@ from tests.conftest import (
 from tests.test_submission import body
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from typing import BinaryIO
     from urllib.request import Request
 
@@ -55,6 +59,8 @@ MAIN = "2" * 40
 RUN_URL = "https://github.com/music-assistant/community-catalog/actions/runs/1"
 ISSUE_URL = f"https://api.github.com/repos/{REGISTRY}/issues/{ISSUE}"
 CHECKED = "2026-11-16T12:00:00Z"
+PULL = f"https://github.com/{REGISTRY}/pull/12"
+MERGE = f"decides by merging [the pull request that adds it]({PULL});"
 
 
 def _release(domain: str = DOMAIN, folder: str = DOMAIN, **changes: Any) -> bytes:
@@ -67,6 +73,11 @@ def _release(domain: str = DOMAIN, folder: str = DOMAIN, **changes: Any) -> byte
 
 @pytest.fixture
 def github() -> FakeGitHub:
+    """Return a GitHub with the sample repository, one release and its submission."""
+    return _github()
+
+
+def _github() -> FakeGitHub:
     """Return a GitHub with the sample repository, one release and its submission."""
     github = FakeGitHub()
     github.repository(REPOSITORY, [release("v1.0.0", COMMIT)])
@@ -142,10 +153,11 @@ def _propose(
 ) -> Proposal:
     """Run the propose step for an issue with the results of the nightly line."""
     domain = report.domain or DOMAIN if report else DOMAIN
+    version = report.version or "1.0.0" if report else "1.0.0"
     return propose_admission(
         load_registry(files.root),
         report,
-        [_results("nightly", passed, domain=domain)],
+        [_results("nightly", passed, version, domain)],
         repository=REGISTRY,
         issue=issue,
         author=BOT_LOGIN,
@@ -200,7 +212,10 @@ def test_a_submission_that_passes(files: Files, github: FakeGitHub) -> None:
     }
 
     passed, text = check_admission(
-        registry, report, [_results("nightly", passed=True), _results("beta", passed=False)]
+        registry,
+        report,
+        [_results("nightly", passed=True), _results("beta", passed=False)],
+        proposal=Proposal(Outcome.OPENED, PULL),
     )
 
     assert passed
@@ -494,17 +509,33 @@ def test_checks_that_could_not_run(files: Files) -> None:
     assert f"[The run of these checks]({RUN_URL})" in text
 
 
-def test_the_result_links_the_pull_request(files: Files) -> None:
-    """A result that passed links the pull request, or says it could not be opened."""
-    registry = load_registry(files.root)
+@pytest.mark.parametrize(
+    ("proposal", "failed", "expected"),
+    [
+        (Proposal(Outcome.OPENED, PULL), False, MERGE),
+        (Proposal(Outcome.STANDS, PULL), False, MERGE),
+        (Proposal(Outcome.CLOSED), False, "but the issue was closed meanwhile, so nothing"),
+        (Proposal(Outcome.CHANGED), False, "but the issue changed while it was checked, so"),
+        (Proposal(Outcome.CONFLICT, PULL), False, f"but [another pull request]({PULL}) uses"),
+        (None, True, "but the pull request that adds the provider could not be opened"),
+        (None, False, "Only a run on main opens the pull request that adds it."),
+    ],
+    ids=["opened", "stands", "closed", "changed", "conflict", "failed", "not on main"],
+)
+def test_the_result_says_what_became_of_the_pull_request(
+    files: Files, proposal: Proposal | None, failed: bool, expected: str
+) -> None:
+    """Only a pull request that holds what the run checked is offered for merging."""
     results = [_results("nightly", passed=True), _results("beta", passed=True)]
-    url = f"https://github.com/{REGISTRY}/pull/12"
 
-    _, linked = check_admission(registry, _passed(), results, pull_request=url)
-    _, failed = check_admission(registry, _passed(), results, proposal_failed=True)
+    passed, text = check_admission(
+        load_registry(files.root), _passed(), results, proposal=proposal, proposal_failed=failed
+    )
 
-    assert f"decides by merging [the pull request that adds it]({url});" in linked
-    assert "the pull request that adds the provider could not be opened" in failed
+    assert passed
+    assert expected in text
+    holds = proposal is not None and proposal.outcome in {Outcome.OPENED, Outcome.STANDS}
+    assert ("decides by merging" in text) == holds
 
 
 def test_a_comment_holds_the_result_up_to_its_limit() -> None:
@@ -519,12 +550,40 @@ def test_a_comment_holds_the_result_up_to_its_limit() -> None:
     )
 
 
+def _open(github: FakeGitHub, issue: int = ISSUE) -> list[dict[str, Any]]:
+    """Return the open pull requests of the bot for an issue."""
+    return [
+        pull
+        for pull in github.pulls.get(REGISTRY, [])
+        if pull["state"] == "open" and pull["head"]["ref"].endswith(f"-{issue}")
+    ]
+
+
+def _consistent(github: FakeGitHub, pull: dict[str, Any]) -> bool:
+    """Return whether a pull request holds the provider.json and release its text names."""
+    branch = pull["head"]["ref"]
+    domain = branch.removeprefix("admit/").rsplit("-", 1)[0]
+    content = github.files.get((REGISTRY, branch, f"providers/{domain}/provider.json"))
+    release = re.search(r"release ` (\S+) ` \(commit ` ([0-9a-f]{40}) `\)", pull["body"])
+    marker = re.search(r"<!-- proposal: ([0-9a-f]{64}) -->", pull["body"])
+    if content is None or release is None or marker is None:
+        return False
+    provider = ProviderFile.from_dict(json.loads(content))
+    checked = AdmissionReport(
+        checked="", findings=[], issue_digest="", tag=release[1], commit=release[2]
+    )
+    return (
+        marker[1] == proposal_fingerprint(provider, checked)
+        and f"from ` {provider.repository} `" in pull["body"]
+    )
+
+
 def test_propose_opens_a_pull_request(files: Files, github: FakeGitHub) -> None:
     """A passed submission gets a branch of its own from main with its provider.json."""
     proposal = _propose(files, github, _passed())
 
     branch = f"admit/{DOMAIN}-{ISSUE}"
-    assert proposal == Proposal(url=f"https://github.com/{REGISTRY}/pull/100", others=[])
+    assert proposal == Proposal(Outcome.OPENED, f"https://github.com/{REGISTRY}/pull/100")
     assert github.branches[REGISTRY, branch] == MAIN
     key = (REGISTRY, branch, f"providers/{DOMAIN}/provider.json")
     assert list(github.files) == [key]
@@ -538,12 +597,14 @@ def test_propose_opens_a_pull_request(files: Files, github: FakeGitHub) -> None:
     }
     [pull] = github.pulls[REGISTRY]
     assert pull["head"]["ref"] == branch
-    assert pull["body"].startswith(
-        f"Closes #{ISSUE}\n\nAdds ` providers/{DOMAIN}/provider.json `: "
-        f"`` Sample `music` @a-maintainer `` from ` {REPOSITORY} `.\n\n"
+    assert re.match(
+        rf"<!-- proposal: [0-9a-f]{{64}} -->\nCloses #{ISSUE}\n\nAdds "
+        rf"` providers/{DOMAIN}/provider.json `: `` Sample `music` @a-maintainer `` from "
+        rf"` {REPOSITORY} `\.\n\n",
+        pull["body"],
     )
-    assert "Every check passed." in pull["body"]
-    assert f"release ` v1.0.0 ` (commit ` {COMMIT} `)" in pull["body"]
+    assert "decides by merging this pull request;" in pull["body"]
+    assert _consistent(github, pull)
 
 
 def test_no_text_of_a_submission_reaches_a_title_or_a_commit(
@@ -561,43 +622,180 @@ def test_no_text_of_a_submission_reaches_a_title_or_a_commit(
     assert f"`: ` {report.name} ` from" in pull["body"]
 
 
-def test_propose_updates_its_pull_request(files: Files, github: FakeGitHub) -> None:
-    """A later run makes the branch afresh and updates the pull request of the issue."""
+def test_a_pull_request_that_holds_the_same_stands(files: Files, github: FakeGitHub) -> None:
+    """A later run that checked the same provider.json and release changes nothing."""
+    first = _propose(files, github, _passed())
     report = _passed()
-    url = _propose(files, github, report).url
-    github.branches[REGISTRY, "main"] = "4" * 40
     report.checked = "2026-11-17T12:00:00Z"
+    assert report.provider is not None
+    report.provider.added = report.checked
+    requests = len(github.requests)
 
-    assert _propose(files, github, report).url == url
+    assert _propose(files, github, report) == Proposal(Outcome.STANDS, first.url)
 
+    assert all(request.get_method() == "GET" for request in github.requests[requests:])
     [pull] = github.pulls[REGISTRY]
     assert pull["state"] == "open"
-    assert "Checked 2026-11-17T12:00:00Z" in pull["body"]
-    assert github.branches[REGISTRY, f"admit/{DOMAIN}-{ISSUE}"] == "4" * 40
-    assert len(github.files) == 1
 
 
 @pytest.mark.parametrize(
-    ("change", "why"),
+    "change",
+    [{"commit": "5" * 40}, {"tag": "v1.0.1", "version": "1.0.1"}, {"repository": "someone/new"}],
+    ids=["commit", "release", "provider.json"],
+)
+def test_a_pull_request_is_never_changed(
+    files: Files, github: FakeGitHub, change: dict[str, str]
+) -> None:
+    """Another release or provider.json closes the pull request, and a new one follows."""
+    first = _propose(files, github, _passed())
+    report = _passed()
+    for key, value in change.items():
+        setattr(report.provider if key == "repository" else report, key, value)
+
+    second = _propose(files, github, report)
+
+    assert second.outcome == Outcome.OPENED
+    assert second.url != first.url
+    old, new = github.pulls[REGISTRY]
+    assert (old["state"], new["state"]) == ("closed", "open")
+    [comment] = github.comments[REGISTRY, old["number"]]
+    assert comment["body"] == (
+        f"Closed: [this run]({RUN_URL}) checked #{ISSUE} again, with another result."
+    )
+    assert _consistent(github, new)
+
+
+def _interrupting(github: FakeGitHub, writes: int) -> Transport:
+    """Return a transport that stops the run after a number of writes, as a cancellation does."""
+    done = 0
+
+    def transport(request: Request) -> tuple[int, BinaryIO]:
+        nonlocal done
+        if done >= writes:
+            raise _InterruptedError
+        answer = github(request)
+        done += request.get_method() != "GET"
+        return answer
+
+    return transport
+
+
+class _InterruptedError(Exception):
+    """The run was cancelled."""
+
+
+def _changed_release(report: AdmissionReport) -> None:
+    report.commit = "5" * 40
+
+
+def _changed_repository(report: AdmissionReport) -> None:
+    assert report.provider is not None
+    report.provider.repository = report.repository = "another/ma-sample"
+    report.issue_digest = issue_digest(body("another/ma-sample"))
+
+
+def _changed_domain(report: AdmissionReport) -> None:
+    assert report.provider is not None
+    report.domain = report.provider.domain = report.provider.folder = "other_music"
+
+
+@pytest.mark.parametrize(
+    "change",
+    [None, _changed_release, _changed_repository, _changed_domain, "closed"],
+    ids=["new", "another release", "another repository", "another domain", "withdrawn"],
+)
+def test_an_interrupted_run_leaves_no_pull_request_that_disagrees(
+    files: Files, change: Callable[[AdmissionReport], None] | str | None
+) -> None:
+    """Stopped after each write in turn, no open pull request differs from its own text."""
+
+    def run(writes: int | None) -> tuple[FakeGitHub, list[str], AdmissionReport | None]:
+        github = _github()
+        if change is not None:
+            _propose(files, github, _passed())
+        report: AdmissionReport | None = _passed()
+        if change == "closed":
+            github.issue_answers[REGISTRY, ISSUE]["state"] = "closed"
+            report = None
+        elif callable(change):
+            assert report is not None
+            change(report)
+            github.issue_answers[REGISTRY, ISSUE]["body"] = body(report.repository or "")
+        first = len(github.requests)
+        transport = github if writes is None else _interrupting(github, writes)
+        try:
+            _propose(files, transport, report)
+        except _InterruptedError:
+            assert writes is not None
+        done = [
+            f"{request.get_method()} {request.full_url.split('/repos/', 1)[1]}"
+            for request in github.requests[first:]
+            if request.get_method() != "GET"
+        ]
+        return github, done, report
+
+    _, all_writes, _ = run(None)
+    assert len(all_writes) >= 3
+    for writes in range(len(all_writes) + 1):
+        github, done, report = run(writes)
+        # the run stopped right after this many writes
+        assert done == all_writes[:writes]
+        open_pulls = _open(github)
+        assert len(open_pulls) <= 1, done
+        assert all(_consistent(github, pull) for pull in open_pulls), done
+        # the next run finishes what this one began
+        _propose(files, github, report)
+        open_pulls = _open(github)
+        assert len(open_pulls) == (change != "closed"), done
+        assert all(_consistent(github, pull) for pull in open_pulls), done
+
+
+def test_propose_closes_the_pull_request_of_another_domain(
+    files: Files, github: FakeGitHub
+) -> None:
+    """When the issue names another provider, its earlier pull request is closed."""
+    _propose(files, github, _passed())
+    report = _passed()
+    _changed_domain(report)
+
+    url = _propose(files, github, report).url
+
+    first, second = github.pulls[REGISTRY]
+    assert (first["state"], second["state"]) == ("closed", "open")
+    assert second["html_url"] == url
+    assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") not in github.branches
+
+
+@pytest.mark.parametrize(
+    ("change", "outcome", "why"),
     [
-        ({}, f"Closed: the checks of #{ISSUE} did not pass in [this run]({RUN_URL})."),
-        ({"state": "closed"}, f"Closed: #{ISSUE} is closed."),
-        ({"labels": []}, f"Closed: #{ISSUE} changed while [this run]({RUN_URL}) checked it."),
+        (
+            {},
+            Outcome.NOT_PASSED,
+            f"Closed: the checks of #{ISSUE} did not pass in [this run]({RUN_URL}).",
+        ),
+        ({"state": "closed"}, Outcome.CLOSED, f"Closed: #{ISSUE} is closed."),
+        (
+            {"labels": []},
+            Outcome.CHANGED,
+            f"Closed: #{ISSUE} changed while [this run]({RUN_URL}) checked it.",
+        ),
         (
             {"body": body("someone/another")},
+            Outcome.CHANGED,
             f"Closed: #{ISSUE} changed while [this run]({RUN_URL}) checked it.",
         ),
     ],
     ids=["failed", "closed", "unlabelled", "edited"],
 )
 def test_propose_closes_its_pull_request(
-    files: Files, github: FakeGitHub, change: dict[str, Any], why: str
+    files: Files, github: FakeGitHub, change: dict[str, Any], outcome: Outcome, why: str
 ) -> None:
     """A run that fails, or an issue closed or changed meanwhile, closes the pull request."""
     _propose(files, github, _passed())
     github.issue_answers[REGISTRY, ISSUE].update(change)
 
-    assert _propose(files, github, _passed(), passed=bool(change)).url is None
+    assert _propose(files, github, _passed(), passed=bool(change)) == Proposal(outcome)
 
     [pull] = github.pulls[REGISTRY]
     assert pull["state"] == "closed"
@@ -611,8 +809,8 @@ def test_a_closed_issue_gets_no_pull_request(files: Files, github: FakeGitHub) -
     """A submission closed while it was checked is not proposed, however it passed."""
     github.issue_answers[REGISTRY, ISSUE]["state"] = "closed"
 
-    assert _propose(files, github, _passed()).url is None
-    assert _propose(files, github, None).url is None
+    assert _propose(files, github, _passed()) == Proposal(Outcome.CLOSED)
+    assert _propose(files, github, None) == Proposal(Outcome.CLOSED)
 
     assert github.pulls.get(REGISTRY, []) == []
     assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") not in github.branches
@@ -630,23 +828,20 @@ def test_closing_leaves_a_merged_pull_request_alone(files: Files, github: FakeGi
     assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") in github.branches
 
 
-def test_propose_closes_the_pull_request_of_another_domain(
-    files: Files, github: FakeGitHub
-) -> None:
-    """When the issue names another provider, its earlier pull request is closed."""
-    _propose(files, github, _passed())
-    report = _passed()
-    assert report.provider is not None
-    report.domain = report.provider.domain = report.provider.folder = "other_music"
+def test_a_branch_another_pull_request_uses_is_left_alone(files: Files, github: FakeGitHub) -> None:
+    """Nothing is written to the branch of the submission while a person's pull request uses it."""
+    branch = f"admit/{DOMAIN}-{ISSUE}"
+    github.branches[REGISTRY, branch] = "6" * 40
+    theirs = github.pull(REGISTRY, branch, "their work", user={"login": "a-maintainer"})
+    before = json.dumps(github.pulls)
+    requests = len(github.requests)
 
-    url = _propose(files, github, report).url
+    proposal = _propose(files, github, _passed())
 
-    first, second = github.pulls[REGISTRY]
-    assert (first["state"], second["state"]) == ("closed", "open")
-    assert second["html_url"] == url
-    [comment] = github.comments[REGISTRY, first["number"]]
-    assert comment["body"] == f"Closed: #{ISSUE} names another provider, {url}."
-    assert (REGISTRY, f"admit/{DOMAIN}-{ISSUE}") not in github.branches
+    assert proposal == Proposal(Outcome.CONFLICT, theirs["html_url"])
+    assert all(request.get_method() == "GET" for request in github.requests[requests:])
+    assert json.dumps(github.pulls) == before
+    assert github.branches[REGISTRY, branch] == "6" * 40
 
 
 def test_two_submissions_of_one_domain_racing(files: Files, github: FakeGitHub) -> None:
@@ -671,11 +866,8 @@ def test_two_submissions_of_one_domain_racing(files: Files, github: FakeGitHub) 
     assert len(pulls) == 2
     for pull in pulls.values():
         number = int(pull["head"]["ref"].rsplit("-", 1)[1])
-        content = github.files[REGISTRY, pull["head"]["ref"], f"providers/{DOMAIN}/provider.json"]
-        expected = REPOSITORY if number == ISSUE else "another/ma-sample"
-        assert json.loads(content)["repository"] == expected
-        assert pull["body"].startswith(f"Closes #{number}\n")
-        assert f"from ` {expected} `" in pull["body"]
+        assert f"\nCloses #{number}\n" in pull["body"]
+        assert _consistent(github, pull)
     assert first.url is not None
     assert pulls[int(first.url.rsplit("/", 1)[1])]["head"]["ref"] == f"admit/{DOMAIN}-{ISSUE}"
 
@@ -694,7 +886,7 @@ def test_another_submission_of_the_domain_is_named(files: Files, github: FakeGit
         load_registry(files.root),
         _passed(other, "another/ma-sample"),
         [_results("nightly", passed=True), _results("beta", passed=True)],
-        others=second.others,
+        proposal=second,
     )
     assert (
         f"Another submission for this domain has an open pull request: [#100]({first.url})." in text
@@ -702,14 +894,14 @@ def test_another_submission_of_the_domain_is_named(files: Files, github: FakeGit
 
 
 def test_propose_leaves_other_pull_requests_alone(files: Files, github: FakeGitHub) -> None:
-    """A pull request of a person, a fork or another issue is never changed."""
+    """A pull request of a person, a fork or another issue is never closed by the bot."""
     github.pull(REGISTRY, f"admit/{DOMAIN}-{ISSUE}", "x", user={"login": "a-stranger"})
     fork = {"ref": f"admit/{DOMAIN}-{ISSUE}", "repo": {"full_name": "someone/fork"}}
     github.pull(REGISTRY, "x", "x", head=fork)
     github.pull(REGISTRY, f"admit/{DOMAIN}-8", "Closes #8\n")
     before = json.dumps(github.pulls)
 
-    assert _propose(files, github, _passed(), passed=False).url is None
+    assert _propose(files, github, _passed(), passed=False) == Proposal(Outcome.NOT_PASSED)
 
     assert json.dumps(github.pulls) == before
     assert github.comments == {}
@@ -728,7 +920,7 @@ def test_propose_refuses_what_main_cannot_take(files: Files, github: FakeGitHub)
 def test_propose_writes_the_outputs_of_its_job(
     files: Files, github: FakeGitHub, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The command adds the address of the pull request and of the others to the job outputs."""
+    """The command adds its outcome, its pull request and those of the others to the outputs."""
     monkeypatch.setenv("GITHUB_TOKEN", "a-token")
     monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
     github.pull(REGISTRY, f"admit/{DOMAIN}-8", "Closes #8\n")
@@ -743,9 +935,10 @@ def test_propose_writes_the_outputs_of_its_job(
 
     assert main(args) == 0
     assert output.read_text() == (
-        f"url=https://github.com/{REGISTRY}/pull/101\nothers=https://github.com/{REGISTRY}/pull/100\n"
+        f"outcome=opened\nurl=https://github.com/{REGISTRY}/pull/101\n"
+        f"others=https://github.com/{REGISTRY}/pull/100\n"
     )
-    (files.root / "work" / "admission.json").unlink()
+    github.issue_answers[REGISTRY, ISSUE]["labels"] = []
     assert main(args) == 0
-    assert output.read_text().endswith("url=\nothers=\n")
+    assert output.read_text().endswith("outcome=changed\nurl=\nothers=\n")
     assert github.pulls[REGISTRY][1]["state"] == "closed"

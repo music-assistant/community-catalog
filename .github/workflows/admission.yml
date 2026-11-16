@@ -108,11 +108,11 @@ jobs:
   propose:
     name: Open or close the pull request
     needs: [prepare, check]
-    # also when the checks failed or could not run, and when a submission is closed, to close the
-    # pull request of an earlier run
+    # also when the checks failed or could not run, and for every event of a closed submission
+    # (an edit of it cancels the run of its closing), to close the pull request of an earlier run
     if: >-
       ${{ !cancelled() && github.ref == 'refs/heads/main' && (needs.prepare.result != 'skipped'
-      || (github.event.action == 'closed'
+      || (github.event.issue.state == 'closed'
       && contains(github.event.issue.labels.*.name, 'submission'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -121,6 +121,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      outcome: ${{ steps.propose.outputs.outcome }}
       url: ${{ steps.propose.outputs.url }}
       others: ${{ steps.propose.outputs.others }}
     steps:
@@ -158,7 +159,7 @@ jobs:
           merge-multiple: true
           path: results
       # the results files are data from containers that ran provider code, read only as data
-      - name: Open, update or close the pull request
+      - name: Open or close the pull request
         id: propose
         env:
           APP_SLUG: ${{ steps.token.outputs.app-slug }}
@@ -210,13 +211,15 @@ jobs:
         shell: bash
         env:
           OTHERS: ${{ needs.propose.outputs.others }}
+          OUTCOME: ${{ needs.propose.outputs.outcome }}
           PROPOSAL: ${{ needs.propose.result }}
           PULL_REQUEST: ${{ needs.propose.outputs.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           uv run --no-dev python -m registry check-admission results
           --comment "$RUNNER_TEMP/comment.md" --run-url "$RUN_URL"
-          --pull-request "$PULL_REQUEST" --proposal "$PROPOSAL" --others "$OTHERS"
+          --proposal "$PROPOSAL" --outcome "$OUTCOME" --pull-request "$PULL_REQUEST"
+          --others "$OTHERS"
           | tee -a "$GITHUB_STEP_SUMMARY"
       # also when not every check passed
       - name: Write the result as a comment on the issue

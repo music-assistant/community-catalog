@@ -11,6 +11,8 @@ from pathlib import Path
 
 from registry.admission import (
     COMMENT_MARKER,
+    Outcome,
+    Proposal,
     admission_comment,
     check_admission,
     prepare_admission,
@@ -283,9 +285,10 @@ def _check_admission(args: argparse.Namespace) -> int:
         report,
         results,
         run_url=args.run_url,
-        pull_request=args.pull_request or None,
+        proposal=Proposal(Outcome(args.outcome), args.pull_request or None, args.others.split())
+        if args.proposal == "success" and args.outcome
+        else None,
         proposal_failed=args.proposal == "failure",
-        others=args.others.split() if args.others else [],
     )
     print(text)
     if args.comment is not None:
@@ -316,7 +319,7 @@ def _propose_admission(args: argparse.Namespace) -> None:
         run_url=args.run_url,
         github=GitHub(_token()),
     )
-    print(f"pull request: {proposal.url or 'none'}")
+    print(f"{proposal.outcome}: {proposal.url or 'no pull request'}")
     for url in proposal.others:
         print(f"another submission for the domain: {url}")
     if args.output is not None:
@@ -326,7 +329,10 @@ def _propose_admission(args: argparse.Namespace) -> None:
             msg = f"GitHub answered an address that is not a pull request: {urls!r}"
             raise CommandError(msg)
         with args.output.open("a", encoding="utf-8") as output:
-            output.write(f"url={proposal.url or ''}\nothers={' '.join(proposal.others)}\n")
+            output.write(
+                f"outcome={proposal.outcome}\nurl={proposal.url or ''}\n"
+                f"others={' '.join(proposal.others)}\n"
+            )
 
 
 def _set_status(args: argparse.Namespace) -> None:
@@ -526,14 +532,22 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.add_argument(
         "--pull-request",
         type=_pull_request_url,
-        help="the address of the pull request that adds the provider; empty for none",
+        default="",
+        help="the address of the pull request of the outcome; empty for none",
     )
     command.add_argument(
-        "--proposal", help="the result of the job that opens that pull request, such as failure"
+        "--proposal", help="the result of the job that takes care of the pull request: success"
+    )
+    command.add_argument(
+        "--outcome",
+        choices=["", *(outcome.value for outcome in Outcome)],
+        default="",
+        help="what that job did with the pull request",
     )
     command.add_argument(
         "--others",
         type=_pull_request_urls,
+        default="",
         help="the pull requests of other submissions of the domain, separated by spaces",
     )
     command.set_defaults(run=_check_admission)
@@ -553,7 +567,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     )
     command.add_argument("--run-url", required=True, help="the address of the workflow run")
     command.add_argument(
-        "--output", type=Path, help="a file to add the outputs of the job to: url and others"
+        "--output", type=Path, help="a file to add the outputs of the job to: outcome, url, others"
     )
     command.set_defaults(run=_propose_admission)
 

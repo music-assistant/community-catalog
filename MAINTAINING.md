@@ -204,8 +204,8 @@ The commands of the release pipeline, which the workflows run:
 | `report <folder>` | Writes an issue for every failed check, every refused release and every repository that is not the admitted one into the work folder. |
 | `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
-| `check-admission <folder> [--comment <file>] [--run-url <url>] [--pull-request <url>] [--proposal <result>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. Exits with 1 when the checks did not pass. |
-| `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | When the checks passed and the issue is still open and unchanged, makes the branch `admit/<domain>-<issue>` afresh from `main` with only the `provider.json` and opens or updates its pull request; otherwise closes the open pull request of the issue and deletes its branch. Adds the address of the pull request, and of those of other submissions of the domain, to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
+| `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
+| `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | Opens the pull request of a submission whose checks passed, leaves standing the open one that holds the same, or closes it (see [Admission](#admission)). Adds its outcome (`opened`, `stands`, `not-passed`, `closed`, `changed` or `conflict`), the address of its pull request and those of other submissions of the domain to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
 | `post-admission-comment <file> --repository <owner/name> --issue <number>` | Writes the comment on the issue, or updates the one an earlier run wrote. Needs `GITHUB_TOKEN`. |
 | `check-changes <file>` | Fails when a pull request adds or changes a version file or a refusal; the file lists the changed paths, separated by NUL characters. |
 
@@ -380,19 +380,32 @@ Its jobs:
 3. **propose** runs only on `main`, in the environment `releases`, with a token of the Music
    Assistant Bot app limited to the contents and pull requests of this repository, and to
    reading its issues. It runs only its checked out code, and reads the report, the plan and the
-   results as data. It reads the issue again: only while it is open, labelled and holds the text
-   that was checked, and the checks passed, it makes the branch `admit/<domain>-<issue>` afresh
-   from `main` with only the `provider.json`, and opens or updates the pull request
-   "Admit <domain>" that carries the result and closes the issue when merged. The branch belongs
-   to the issue, so two submissions of one domain give two pull requests, and the result of the
-   second names the first. Otherwise, and when the issue is closed, it closes the open pull
-   request of the issue with a line that says why and deletes its branch; a merged pull request
-   is left alone. Titles and commit messages hold the domain only: GitHub reads keywords such as
-   "Closes #1" and "[skip ci]" in them;
+   results as data. It runs also for every event of a closed submission. It reads the issue
+   again, and a pull request is never changed: it holds what one run checked.
+   * The checks passed and the issue is still open, labelled and holds the text that was
+     checked: when the open pull request of the issue holds the same `provider.json` (whatever
+     its `added`) and release, it stands. Otherwise that pull request is closed first, with a
+     line that says why, and its branch deleted; then the branch `admit/<domain>-<issue>` is
+     made from `main` with one commit that adds only the `provider.json`, and only then the pull
+     request "Admit <domain>" is opened, with the result, and closes the issue when merged. A run
+     cut off at any of these steps leaves no open pull request whose file and text disagree, and
+     the next run finishes the work.
+   * Nothing is written to the branch while another pull request (of a person, say) uses it:
+     the outcome is a conflict, which the result names.
+   * Otherwise, and when the issue is closed, the open pull request of the issue is closed with
+     a line that says why and its branch deleted; a merged pull request is left alone.
+
+   The branch belongs to the issue, so two submissions of one domain give two pull requests, and
+   the result of the second names the first. Titles and commit messages hold the domain only:
+   GitHub reads keywords such as "Closes #1" and "[skip ci]" in them. The job reports its
+   outcome to the next one;
 4. **result** writes the result in the job summary and as one comment on the issue, which every
    run updates, with the workflow's own token: what was checked (repository, release, commit and
    when), what passed and what happens next, also when the issue is no valid submission or the
-   checks could not run. It links the pull request, and fails when the checks did not pass.
+   checks could not run. What happens next follows from the outcome of propose: only a pull
+   request that holds what this run checked is offered for merging, with its link; a closed or
+   changed issue, a conflict on the branch or a failed propose job says so instead. The job fails
+   when the checks did not pass.
 
 Everything the issue, the repository or the release holds is shown as code. A registry
 maintainer reviews the provider against the

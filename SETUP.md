@@ -8,19 +8,22 @@ by an owner of the `music-assistant` organisation.
 - [ ] Create the public repository `music-assistant/community-catalog`, without a README or
       licence (both are here), and push `main`.
 - [ ] Settings → General: enable Issues; disable Wiki and Projects. Under Pull Requests, allow
-      only squash merging, with the default commit message "Pull request title", so no text of
-      a submission (a reason in the result of its checks) ends up in a commit message, where
-      GitHub reads closing keywords.
+      only squash merging, with the commit title from the pull request title and the commit
+      message empty, so the description of a pull request (which holds the result of the checks,
+      with text of the submission) never reaches a commit message, where GitHub reads closing
+      keywords.
 - [ ] Issues → Labels: create the label `submission`. The form "Submit a provider" gives it to
       an issue, and only an issue with it starts the admission checks; GitHub leaves out a label
       the repository does not have.
 - [ ] Give the team of registry maintainers named in `.github/CODEOWNERS`
       (`@music-assistant/core`) write access to this repository.
 - [ ] Settings → Rules: a ruleset for `main` that requires a pull request with the review of a
-      code owner, dismisses an approval when new commits are pushed (the bot updates the pull
-      request of a submission on every run), requires the status check "Lint, types, tests and
-      validation", and blocks force pushes and deletion. Add the Music Assistant Bot app to its bypass list: the Releases
-      workflow pushes the new version files and results to `main` as that app.
+      code owner, dismisses an approval when new commits are pushed, requires the status check
+      "Lint, types, tests and validation", and blocks force pushes and deletion. The bot never
+      pushes to the branch of an open pull request: a submission that changes gets a new pull
+      request. Dismissing approvals is for pull requests of people, whose author can push after
+      the review. Add the Music Assistant Bot app to its bypass list: the Releases workflow
+      pushes the new version files and results to `main` as that app.
 
 ## GitHub Pages
 
