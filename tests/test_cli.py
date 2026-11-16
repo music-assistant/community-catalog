@@ -403,9 +403,7 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     assert "merging" not in out
     assert _run(files, "check-admission", results, "--proposal", "failure", "--outcome", "",
                 "--pull-request", "") == 0  # fmt: skip
-    assert "this run could not finish the step that takes care of its pull request" in (
-        capsys.readouterr().out
-    )
+    assert "but a step after the checks could not finish" in (capsys.readouterr().out)
     with pytest.raises(SystemExit):
         _run(files, "check-admission", results, "--pull-request", "https://example.com/pull/1")
     with pytest.raises(SystemExit):
@@ -425,7 +423,7 @@ def test_check_admission_without_the_prepare_step(
     assert code == 1
     captured = capsys.readouterr()
     assert "warning: the admission checks did not run: " in captured.err
-    assert "The admission checks could not run" in captured.out
+    assert "The checks could not finish." in captured.out
     assert comment.read_text() == captured.out.removesuffix("\n")
     assert f"[The run of these checks]({run_url})" in comment.read_text()
 

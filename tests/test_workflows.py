@@ -51,6 +51,7 @@ def _load(path: Path) -> dict[Any, Any]:
     return workflow
 
 
+CLOSE_ISSUES: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "close-issues.yml")
 ADMISSION: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "admission.yml")
 JOBS = [
     pytest.param(_load(path), job, id=f"{path.name}:{job}")
@@ -141,6 +142,71 @@ def test_provider_code_runs_in_a_job_without_permissions(
             step.get("uses", "").startswith("actions/checkout@") for step in _steps(definition)
         )
         assert "secrets." not in json.dumps(definition)
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_no_workflow_reads_the_text_of_an_issue(path: Path) -> None:
+    """The title and body of an issue are written by anyone, so no workflow takes them."""
+    text = path.read_text()
+
+    assert "github.event.issue.title" not in text
+    assert "github.event.issue.body" not in text
+
+
+def test_close_issues_runs_on_new_issues_only() -> None:
+    """Only opening or reopening an issue starts it, and one run per issue at a time."""
+    assert _on(CLOSE_ISSUES) == {"issues": {"types": ["opened", "reopened"]}}
+    assert CLOSE_ISSUES["concurrency"] == {
+        "group": "${{ github.workflow }}-${{ github.event.issue.number }}",
+        "cancel-in-progress": False,
+    }
+
+
+def test_close_issues_can_only_write_issues() -> None:
+    """It holds the issues scope and nothing else, checks nothing out and uses no action."""
+    [job] = CLOSE_ISSUES["jobs"]
+
+    assert CLOSE_ISSUES["permissions"] == {}
+    assert _effective(CLOSE_ISSUES, job) == {"issues": "write"}
+    assert all("uses" not in step for step in _steps(CLOSE_ISSUES["jobs"][job]))
+    # pipefail: a listing of the comments that fails stops the step before a second comment
+    assert all(step["shell"] == "bash" for step in _steps(CLOSE_ISSUES["jobs"][job]))
+
+
+def test_close_issues_leaves_forms_and_trusted_authors_alone() -> None:
+    """The forms, people with write access, bots and the pipeline's own account are exempt."""
+    condition = CLOSE_ISSUES["jobs"]["close"]["if"]
+
+    for exemption in (
+        "!contains(github.event.issue.labels.*.name, 'submission')",
+        "!contains(github.event.issue.labels.*.name, 'report')",
+        (
+            '!contains(fromJSON(\'["OWNER", "MEMBER", "COLLABORATOR"]\'),'
+            " github.event.issue.author_association)"
+        ),
+        "github.event.issue.user.type != 'Bot'",
+        "github.event.issue.user.login != vars.REPORT_ACCOUNT",
+    ):
+        assert exemption in condition, exemption
+    assert "||" not in condition
+
+
+def test_admission_ignores_every_issue_but_a_submission() -> None:
+    """A report, or any issue without the label submission, starts no admission job."""
+    jobs = ADMISSION["jobs"]
+
+    assert jobs["prepare"]["if"] == (
+        "github.event_name == 'workflow_dispatch' || (github.event.issue.state == 'open' "
+        "&& contains(github.event.issue.labels.*.name, 'submission'))"
+    )
+    # the other jobs follow prepare, except the withdrawal of a closed submission
+    assert jobs["check"]["needs"] == "prepare"
+    assert "needs.prepare.result != 'skipped'" in jobs["result"]["if"]
+    assert (
+        "(github.event.issue.state == 'closed' && contains(github.event.issue.labels.*.name, "
+        "'submission'))"
+    ) in jobs["propose"]["if"]
+    assert "report" not in json.dumps(ADMISSION)
 
 
 def test_admission_runs_on_submissions() -> None:

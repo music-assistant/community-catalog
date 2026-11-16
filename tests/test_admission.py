@@ -267,8 +267,8 @@ def test_the_release_must_pass_on_a_line(files: Files, github: FakeGitHub) -> No
     assert not other
     assert "- ❌ beta: the checks did not run" in failed_text
     assert "- ❌ nightly: failed:" in failed_text
-    assert "Not every check passed. Fix what failed, then run the checks again: edit" in failed_text
-    assert "close and reopen it, for example after you published a new release" in failed_text
+    assert "Not every check passed. Fix what failed, then edit this issue" in failed_text
+    assert "close and reopen it after you publish a new release" in failed_text
 
 
 @pytest.mark.parametrize(
@@ -292,6 +292,7 @@ def test_the_repository_must_qualify(
     ("changes", "refusal"),
     [
         ({"labels": []}, f"#{ISSUE} is no issue with the label submission"),
+        ({"labels": [{"name": "report"}]}, f"#{ISSUE} is no issue with the label submission"),
         ({"pull_request": {"url": "x"}}, f"#{ISSUE} is no issue with the label submission"),
         ({"state": "closed"}, f"#{ISSUE} is closed"),
         ({"body": "Please add my provider"}, "does not hold the fields of the form"),
@@ -496,7 +497,7 @@ def test_a_refusal_is_quoted_as_code(files: Files) -> None:
         "This issue is not a valid submission"
     )
     assert f"\n`````\n{refusal}\n`````\n" in text
-    assert "Edit the issue to fix it, and the checks run again by themselves." in text
+    assert "Edit the issue to correct it; the checks then run again." in text
     assert text.endswith(f"[The run of these checks]({RUN_URL})\n")
 
 
@@ -505,7 +506,7 @@ def test_checks_that_could_not_run(files: Files) -> None:
     passed, text = check_admission(load_registry(files.root), None, [], run_url=RUN_URL)
 
     assert not passed
-    assert text.startswith("## Admission checks\n\nThe admission checks could not run")
+    assert text.startswith("## Admission checks\n\nThe checks could not finish.")
     assert f"[The run of these checks]({RUN_URL})" in text
 
 
@@ -514,11 +515,15 @@ def test_checks_that_could_not_run(files: Files) -> None:
     [
         (Proposal(Outcome.OPENED, PULL), False, MERGE),
         (Proposal(Outcome.STANDS, PULL), False, MERGE),
-        (Proposal(Outcome.CLOSED), False, "but the issue was closed meanwhile, so nothing"),
+        (Proposal(Outcome.CLOSED), False, "but the issue was closed, so the submission is"),
         (Proposal(Outcome.CHANGED), False, "but the issue changed while it was checked, so"),
-        (Proposal(Outcome.CONFLICT, PULL), False, f"but [another pull request]({PULL}) uses"),
-        (None, True, "but this run could not finish the step that takes care of its pull"),
-        (None, False, "Only a run on main opens the pull request that adds it."),
+        (
+            Proposal(Outcome.CONFLICT, PULL),
+            False,
+            f"a conflict with [another pull request]({PULL})",
+        ),
+        (None, True, "but a step after the checks could not finish"),
+        (None, False, "A test run from a branch opens no pull request."),
     ],
     ids=["opened", "stands", "closed", "changed", "conflict", "failed", "not on main"],
 )
@@ -541,7 +546,7 @@ def test_the_result_says_what_became_of_the_pull_request(
     assert expected in text
     if failed:
         # the pull request may have been opened before the step failed
-        assert f"[The run]({RUN_URL}) shows why" in text
+        assert f"[the run]({RUN_URL}) shows why" in text
         assert "could not be opened" not in text
     holds = proposal is not None and proposal.outcome in {Outcome.OPENED, Outcome.STANDS}
     assert ("decides by merging" in text) == holds
@@ -947,9 +952,7 @@ def test_another_submission_of_the_domain_is_named(files: Files, github: FakeGit
         [_results("nightly", passed=True), _results("beta", passed=True)],
         proposal=second,
     )
-    assert (
-        f"Another submission for this domain has an open pull request: [#100]({first.url})." in text
-    )
+    assert f"Another submission for this domain is open: [#100]({first.url})." in text
 
 
 def test_propose_leaves_other_pull_requests_alone(files: Files, github: FakeGitHub) -> None:

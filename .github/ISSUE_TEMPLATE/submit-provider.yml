@@ -1,20 +1,21 @@
 name: Submit a provider
-description: Ask for your provider to be listed in the community catalog. The checks run by themselves.
+description: Ask for your provider to be listed in the community catalog.
 title: "Submit a provider"
 labels: [submission]
 body:
   - type: markdown
     attributes:
       value: >-
-        Before you submit, read [Getting your provider listed](https://github.com/music-assistant/community-catalog#getting-your-provider-listed).
-        The checks run as soon as you submit and report in a comment on this issue. When they
-        pass, a pull request that adds your provider follows, and a registry maintainer decides
-        on it. Leave the rest of the issue as the form writes it: edit only the fields.
+        Use this form to have your provider listed in the community catalog. Have ready: a
+        public repository with a published release that meets
+        [the requirements](https://github.com/music-assistant/community-catalog#getting-your-provider-listed).
+        The result of the checks appears as a comment on this issue. To change your submission
+        later, edit only the values of the fields and keep their headings.
   - type: input
     id: repository
     attributes:
       label: Repository
-      description: Your repository on GitHub, as `owner/name` or its github.com address.
+      description: Your repository on GitHub, as `owner/name` or its address.
       placeholder: someone/ma-sample-music
     validations:
       required: true
@@ -23,16 +24,16 @@ body:
     attributes:
       label: Folder
       description: >-
-        Only when the checks cannot find it: the path of the provider folder in your repository.
-        Without it, they take `provider`, or else the one top-level folder with a `manifest.json`.
+        Leave empty when the provider is in the folder `provider`, or in the only top-level
+        folder with a `manifest.json`. Otherwise, the path of the provider folder.
       placeholder: providers/sample_music
   - type: input
     id: tag-prefix
     attributes:
       label: Tag prefix
       description: >-
-        Only for a repository with several providers: what the release tags of this one start
-        with.
+        Leave empty unless the repository holds several providers. Then, what the release tags
+        of this provider start with.
       placeholder: sample_music-
   - type: checkboxes
     id: confirmations

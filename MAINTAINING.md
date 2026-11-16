@@ -1,8 +1,8 @@
 # Maintaining the registry
 
 How the registry of the community catalog works inside: its files, its commands and its
-workflows. What a user or a provider maintainer needs is in the [README](README.md); setting up
-the repository on GitHub is in [SETUP.md](SETUP.md).
+workflows, and what a registry maintainer does with a submission and a report. What a user or a
+provider maintainer needs is in the [README](README.md).
 
 ## How a server uses it
 
@@ -13,6 +13,26 @@ the repository on GitHub is in [SETUP.md](SETUP.md).
 - It installs only a version its index lists: it downloads the GitHub archive of the pinned
   commit, takes the provider folder from it and compares its content hash with the index.
 - It stops loading a provider, or a version, the index blocks.
+
+## What a provider needs
+
+The exact rules a provider and its releases meet; the checks name the one that fails.
+
+- The repository is public, not archived, and has an open source licence GitHub recognises.
+- The provider is in a folder named after its domain, or named `provider`. The domain folder is
+  what lets a server in development mode, the test fixture and the Dev app import it.
+- The domain is free: not in `reserved_domains.json` (see [Reserved domains](#reserved-domains))
+  and not a folder in `providers/`.
+- The `manifest.json` is plain JSON the server reads (no `NaN` or `Infinity`, no key twice), at
+  most 16 KiB, with at most 10 `codeowners` and 50 `requirements`.
+- Each requirement is a package name with version specifiers (no URLs, markers or options) of at
+  most 100 characters, available as wheels for linux amd64 and arm64.
+- An `icon.svg` is optional: at most 5 KB, and it only draws ([The icon](#the-icon)); an icon
+  that does not pass is left out.
+- Once installed, a provider never writes into its own folder: the server replaces a folder that
+  differs from the release.
+- A release is a published GitHub release, not a draft or pre-release, whose tag is the version,
+  `MAJOR.MINOR.PATCH` with or without `v`, after the tag prefix of the provider when it has one.
 
 ## Layout
 
@@ -305,9 +325,9 @@ reports anything. Its jobs share only files:
    time) gives no result; the version is checked again the next night. The provider's own tests
    are not run.
 3. **Apply** records the results with the rules of `record-check`, writes the index files,
-   validates and pushes, as the Music Assistant Bot app. A version that stops passing on a line
-   leaves that line's index: the newest version that still passes there becomes `latest`. The
-   push starts the Publish workflow.
+   validates and pushes to `main` with the token of the Music Assistant Bot app. A version that
+   stops passing on a line leaves that line's index: the newest version that still passes there
+   becomes `latest`. The push starts the Publish workflow.
 4. **Report** writes an issue for every version that failed a check on a line (first checks and
    versions that stopped passing), every release refused in this run, and every repository that
    is not the admitted one. The issue goes to the provider's repository, or to this repository,
@@ -315,8 +335,8 @@ reports anything. Its jobs share only files:
    admitted one. Each issue has a key, written into its body, that is the same
    for the same failure; an issue is not opened when the account that opens them opened one with
    its key before. Everything a provider controls (reasons, output, manifest values) is shown as
-   code. Opening them is switched on with the repository variable `POST_ISSUES`; until then they
-   are kept as an artifact of the run.
+   code. The issues are opened with the token of one account of their own, and only when the
+   variable `POST_ISSUES` is `true`; otherwise they are kept as an artifact of the run.
 
 ### Provider code runs without secrets
 
@@ -418,17 +438,38 @@ latest release.
 Removing the label `submission` takes an issue out of the flow: no run looks at it any more, so
 whoever removes the label closes the bot's pull request of that issue by hand.
 
-A change to a listed provider (its repository, folder or tag prefix, withdrawing it) comes as an
-issue; a registry maintainer makes it with the commands above in an ordinary pull request. CI
-refuses a pull request that adds or changes a version file or a refusal, which only the pipeline
-writes.
+CI refuses a pull request that adds or changes a version file or a refusal, which only the
+pipeline writes.
+
+## Issues
+
+This repository gives no support, and takes issues only through its two forms. The workflow
+`close-issues.yml` closes any other issue as not planned, with one fixed comment that says where
+to go (a reopened one is closed again without a second comment). Exempt are issues by people with
+write access (a registry maintainer may open a plain issue about the registry), bots, and the
+account that opens the issues of the release pipeline, whose handle is the variable
+`REPORT_ACCOUNT`. The workflow never reads the title or text of an issue.
+
+An issue of the form "Report or change a provider" has the label `report`. No workflow acts on it;
+a registry maintainer reads it and makes the change in an ordinary pull request:
+
+- **it breaks the rules**, or **a copyright or takedown request**: when it holds, block the
+  provider (`set-status <domain> blocked --reason <text> --reason-url <issue>`), withdraw it
+  (`set-status <domain> withdrawn ...`), or block one version (`block-version`);
+- **its maintainer changed the repository, folder or tag prefix**: check that the author owns the
+  repository or is a code owner in its manifest, then edit `repository` (and `repository_id` and
+  `owner_id` when it is another repository: `gh api repos/<owner>/<name> --jq
+  '{repository_id: .id, owner_id: .owner.id}'`), `folder` or `tag_prefix` in its `provider.json`,
+  and run `validate`;
+- **its maintainer wants it removed**: after the same check,
+  `set-status <domain> withdrawn --reason "Withdrawn by its maintainer" --reason-url <issue>`.
 
 ## Still open
 
-- The app token of `propose` could write to `main` if that job were ever compromised: the app is
-  on the bypass list of the ruleset for the pushes of the Releases workflow. A separate app for
-  the pull requests, without the bypass, would remove that.
+- The app token of `propose` could write to `main` if that job were ever compromised, since the
+  same app pushes the commits of the release pipeline to `main`. A separate app for the pull
+  requests would remove that.
 - Running the provider's own tests in the check step.
 - The reading of every release against the red lines by Bot-MArley, and its summary on the pull
   request of a submission.
-- A form for the changes to a listed provider.
+- Making the changes a maintainer asks for with the form "Report or change a provider" by the bot.

@@ -76,14 +76,14 @@ BRANCH_PREFIX = "admit/"
 BASE_BRANCH = "main"
 _BRANCH = re.compile(rf"{BRANCH_PREFIX}([a-z][a-z0-9_]*)-([1-9][0-9]*)")
 _TITLE = "## Admission checks"
-# what happens next for a submission whose checks passed and that is not proposed
+# what happens next for a submission whose checks passed and that gets no pull request
 _NOT_PROPOSED = {
     Outcome.CLOSED: (
-        "Every check passed, but the issue was closed meanwhile, so nothing is proposed."
+        "Every check passed, but the issue was closed, so the submission is withdrawn."
     ),
     Outcome.CHANGED: (
-        "Every check passed, but the issue changed while it was checked, so nothing is "
-        "proposed. When it holds a submission again, the checks run again."
+        "Every check passed, but the issue changed while it was checked, so this result does "
+        "not count."
     ),
 }
 
@@ -152,15 +152,15 @@ def check_admission(
     link = f"\n[The run of these checks]({run_url})\n" if run_url else ""
     if report is None:
         text = (
-            "The admission checks could not run to the end this time. The run shows why; a "
-            "registry maintainer starts them again."
+            "The checks could not finish. A registry maintainer runs them again; there is "
+            "nothing for you to do."
         )
         return False, f"{_TITLE}\n\n{text}\n{link}"
     what = _what(report)
     if report.refusal is not None or report.domain is None:
         intro = "This issue is not a valid submission, so nothing was checked:"
         advice = (
-            "Edit the issue to fix it, and the checks run again by themselves. The "
+            "Edit the issue to correct it; the checks then run again. The "
             f"[form]({FORM_URL}) says what each field holds."
         )
         refusal = code_block(report.refusal or "")
@@ -191,8 +191,8 @@ def check_admission(
         verdict = _proposal_verdict(proposal, proposal_failed=proposal_failed, run_url=run_url)
     else:
         verdict = (
-            "Not every check passed. Fix what failed, then run the checks again: edit this "
-            "issue, or close and reopen it, for example after you published a new release."
+            "Not every check passed. Fix what failed, then edit this issue, or close and reopen "
+            "it after you publish a new release; the checks then run again."
         )
     title = f"{_TITLE} for {code_span(report.domain)}"
     return passed, f"{title}\n\n{what}{rows}\n{verdict}\n{link}"
@@ -546,13 +546,13 @@ def _proposal_verdict(
     :param run_url: The address of the workflow run.
     """
     if proposal_failed:
-        run = f"[The run]({run_url})" if run_url else "The run"
+        run = f"[the run]({run_url})" if run_url else "the run"
         return (
-            "Every check passed, but this run could not finish the step that takes care of its "
-            f"pull request. {run} shows why; a registry maintainer looks into it."
+            "Every check passed, but a step after the checks could not finish. A registry "
+            f"maintainer looks into it; {run} shows why."
         )
     if proposal is None:
-        return "Every check passed. Only a run on main opens the pull request that adds it."
+        return "Every check passed. A test run from a branch opens no pull request."
     outcome = proposal.outcome
     if outcome in {Outcome.OPENED, Outcome.STANDS}:
         adds = (
@@ -568,16 +568,16 @@ def _proposal_verdict(
         if proposal.others:
             links = ", ".join(f"[#{url.rsplit('/', 1)[-1]}]({url})" for url in proposal.others)
             verdict += (
-                f"\n\nAnother submission for this domain has an open pull request: {links}. The "
-                "registry maintainer decides between them."
+                f"\n\nAnother submission for this domain is open: {links}. A registry "
+                "maintainer decides between them."
             )
         return verdict
     if outcome == Outcome.CONFLICT:
         return (
-            f"Every check passed, but [another pull request]({proposal.url}) uses the branch of "
-            "this submission, so nothing is proposed. A registry maintainer looks into it."
+            "Every check passed. Before the provider can be added, a registry maintainer "
+            f"resolves a conflict with [another pull request]({proposal.url})."
         )
-    return _NOT_PROPOSED.get(outcome, "Every check passed, but nothing is proposed.")
+    return _NOT_PROPOSED.get(outcome, "Every check passed.")
 
 
 def _what(report: AdmissionReport) -> str:
