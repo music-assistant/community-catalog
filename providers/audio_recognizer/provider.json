@@ -1,0 +1,19 @@
+{
+  "domain": "audio_recognizer",
+  "repository": "ChrisMisker/music-assistant-audio-recognizer",
+  "repository_id": 1459649643,
+  "owner_id": 37826263,
+  "folder": "audio_recognizer",
+  "tag_prefix": "",
+  "maintainers": ["ChrisMisker"],
+  "status": "listed",
+  "reason": null,
+  "reason_url": null,
+  "blocked_versions": {},
+  "added": "2026-11-16T00:00:00Z",
+  "admission": {
+    "decided_by": "ChrisMisker",
+    "decided": "2026-11-16T00:00:00Z",
+    "pull_request": 1
+  }
+}
