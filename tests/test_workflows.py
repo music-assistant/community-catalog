@@ -1,11 +1,15 @@
-"""Tests for the rules every workflow of the registry follows."""
+"""Tests for the rules every workflow of the registry follows, read from the parsed workflows."""
 
 from __future__ import annotations
 
-import re
-from typing import TYPE_CHECKING
+import json
+import os
+import shutil
+import subprocess
+from typing import TYPE_CHECKING, Any
 
 import pytest
+import yaml
 
 from tests.conftest import ROOT
 
@@ -13,187 +17,265 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
-ADMISSION = (ROOT / ".github" / "workflows" / "admission.yml").read_text()
-# what gives a job a token beyond its own read-only one, or lets it push
-_POWERS = ("secrets.", "create-github-app-token", "git push")
 # the scopes of the token of a job
-_SCOPES = (
-    "actions",
-    "attestations",
-    "checks",
-    "contents",
-    "deployments",
-    "discussions",
-    "id-token",
-    "issues",
-    "models",
-    "packages",
-    "pages",
-    "pull-requests",
-    "security-events",
-    "statuses",
+SCOPES = frozenset(
+    {
+        "actions",
+        "attestations",
+        "checks",
+        "contents",
+        "deployments",
+        "discussions",
+        "id-token",
+        "issues",
+        "models",
+        "packages",
+        "pages",
+        "pull-requests",
+        "security-events",
+        "statuses",
+    }
 )
+# the events that run a workflow for a pull request, which may come from a fork; a reusable
+# workflow runs in the pull requests of the repositories that call it
+PULL_REQUEST_EVENTS = frozenset(
+    {"pull_request", "pull_request_target", "pull_request_review", "workflow_call"}
+)
+APP_TOKEN = "actions/create-github-app-token@"  # noqa: S105 - an action, not a token
 
 
-def _jobs(text: str) -> dict[str, str]:
-    """Return the text of each job of a workflow, by its id."""
-    body = text.split("\njobs:\n", 1)[1]
-    parts = re.split(r"^  ([a-z][a-z0-9_-]*):\n", body, flags=re.MULTILINE)
-    return dict(zip(parts[1::2], parts[2::2], strict=True))
+def _load(path: Path) -> dict[Any, Any]:
+    """Return a workflow as GitHub reads it."""
+    workflow = yaml.safe_load(path.read_text())
+    assert isinstance(workflow, dict)
+    return workflow
 
 
+ADMISSION: dict[str, Any] = _load(ROOT / ".github" / "workflows" / "admission.yml")
 JOBS = [
-    pytest.param(job, text, id=f"{path.name}:{job}")
+    pytest.param(_load(path), job, id=f"{path.name}:{job}")
     for path in WORKFLOWS
-    for job, text in _jobs(path.read_text()).items()
+    for job in _load(path)["jobs"]
 ]
 
 
-@pytest.mark.parametrize(("job", "text"), JOBS)
-def test_every_job_has_a_time_limit(job: str, text: str) -> None:
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_permissions_are_explicit(path: Path) -> None:
+    """Every workflow sets its permissions, each {} or a mapping of known scopes."""
+    workflow = _load(path)
+
+    assert "permissions" in workflow
+    for value in [
+        workflow["permissions"],
+        *(job.get("permissions", {}) for job in _jobs(workflow)),
+    ]:
+        assert isinstance(value, dict), value
+        for scope, access in value.items():
+            assert scope in SCOPES, scope
+            assert access in {"read", "write", "none"}, access
+
+
+@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
+def test_nothing_writes_on_a_pull_request(path: Path) -> None:
+    """A pull request, also from a fork, never runs a job that can write."""
+    workflow = _load(path)
+    events = _events(workflow)
+
+    assert "pull_request_target" not in events
+    if events & PULL_REQUEST_EVENTS:
+        for job in workflow["jobs"]:
+            assert _writes(workflow, job) == set(), job
+            assert not _app_tokens(workflow["jobs"][job]), job
+
+
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_every_job_has_a_time_limit(workflow: dict[str, Any], job: str) -> None:
     """A job that hangs ends."""
-    assert "\n    timeout-minutes: " in text, job
+    assert isinstance(workflow["jobs"][job].get("timeout-minutes"), int)
 
 
-@pytest.mark.parametrize(("job", "text"), JOBS)
-def test_no_job_uses_a_cache(job: str, text: str) -> None:
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_no_job_uses_a_cache(workflow: dict[str, Any], job: str) -> None:
     """A cache is shared with other runs, so no job restores one."""
-    assert "actions/cache" not in text
-    for step in text.split("\n      - ")[1:]:
-        if step.startswith("uses: astral-sh/setup-uv@"):
-            assert "enable-cache: false" in step, job
+    for step in _steps(workflow["jobs"][job]):
+        uses = step.get("uses", "")
+        assert not uses.startswith("actions/cache"), job
+        if uses.startswith("astral-sh/setup-uv@"):
+            assert step["with"]["enable-cache"] is False, job
 
 
-@pytest.mark.parametrize(("job", "text"), JOBS)
-def test_only_main_holds_a_token_or_pushes(job: str, text: str) -> None:
-    """A job with a secret or a push runs only on main, in the environment of the releases."""
-    if any(power in text for power in _POWERS):
-        assert "github.ref == 'refs/heads/main'" in text.split("\n    steps:", 1)[0], job
-        assert "\n    environment: releases\n" in text, job
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_only_main_holds_a_token_or_pushes(workflow: dict[str, Any], job: str) -> None:
+    """A job with a secret, the app token or a push runs only on main, in its environment."""
+    definition = workflow["jobs"][job]
+    text = json.dumps(definition)
+    if "secrets." in text or _app_tokens(definition) or "git push" in text:
+        assert "github.ref == 'refs/heads/main'" in definition["if"], job
+        assert definition["environment"] == "releases", job
 
 
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
-def test_no_expression_in_a_script(path: Path) -> None:
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_no_expression_in_a_script(workflow: dict[str, Any], job: str) -> None:
     """Values reach a script through its environment, so no value can become shell code."""
-    for script in _scripts(path.read_text()):
-        assert "${{" not in script, script
+    for step in _steps(workflow["jobs"][job]):
+        assert "${{" not in step.get("run", ""), step
 
 
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
-def test_permissions_are_spelled_as_the_tests_read_them(path: Path) -> None:
-    """Every permissions key is {} or a block of known scopes, so no grant hides from the tests."""
-    lines = path.read_text().splitlines()
-    for number, line in enumerate(lines):
-        found = re.fullmatch(r"( *)permissions:(.*)", line)
-        if found is None:
-            continue
-        value = found[2].split("#", 1)[0].strip()
-        assert value in {"", "{}"}, line
-        if value:
-            continue
-        indent = len(found[1])
-        grants = []
-        for following in lines[number + 1 :]:
-            if following.strip() and len(following) - len(following.lstrip()) <= indent:
-                break
-            if following.strip() and not following.strip().startswith("#"):
-                grants.append(following.strip())
-        assert grants, line
-        for grant in grants:
-            assert re.fullmatch(rf"({'|'.join(_SCOPES)}): (read|write|none)", grant), grant
-
-
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
-def test_no_workflow_runs_privileged_on_pull_requests(path: Path) -> None:
-    """A pull request never runs a workflow with more than a read-only token."""
-    assert "pull_request_target" not in path.read_text()
-
-
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
-def test_a_piped_step_fails_with_its_command(path: Path) -> None:
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_a_piped_step_fails_with_its_command(workflow: dict[str, Any], job: str) -> None:
     """A step that pipes through tee runs in bash, whose pipefail keeps the command's failure."""
-    for text in _jobs(path.read_text()).values():
-        for step in text.split("\n      - "):
-            if "| tee" in step:
-                assert "\n        shell: bash\n" in step, step
+    for step in _steps(workflow["jobs"][job]):
+        if "| tee" in step.get("run", ""):
+            assert step.get("shell") == "bash", step
+
+
+@pytest.mark.parametrize(("workflow", "job"), JOBS)
+def test_provider_code_runs_in_a_job_without_permissions(
+    workflow: dict[str, Any], job: str
+) -> None:
+    """The job that runs provider code has no token, no checkout and no secret."""
+    definition = workflow["jobs"][job]
+    if "scripts/check-line.sh" in json.dumps(definition):
+        assert definition["permissions"] == {}, job
+        assert not any(
+            step.get("uses", "").startswith("actions/checkout@") for step in _steps(definition)
+        )
+        assert "secrets." not in json.dumps(definition)
 
 
 def test_admission_runs_on_submissions() -> None:
     """The admission starts from an issue, or by hand for one, never from a pull request."""
-    trigger = ADMISSION.split("\non:\n", 1)[1].split("\npermissions: {}\n", 1)[0]
+    triggers = _on(ADMISSION)
 
-    assert trigger.startswith("  issues:\n    types: [opened, edited, reopened]\n")
-    assert "\n  workflow_dispatch:\n" in trigger
-    assert "pull_request" not in trigger
-    assert "contains(github.event.issue.labels.*.name, 'submission')" in _jobs(ADMISSION)["prepare"]
+    assert set(triggers) == {"issues", "workflow_dispatch"}
+    assert triggers["issues"] == {"types": ["opened", "edited", "reopened", "closed"]}
+    prepare = ADMISSION["jobs"]["prepare"]["if"]
+    assert "github.event.issue.state == 'open'" in prepare
+    assert "contains(github.event.issue.labels.*.name, 'submission')" in prepare
+    # closing a submission closes its pull request
+    propose = ADMISSION["jobs"]["propose"]["if"]
+    assert "github.event.action == 'closed'" in propose
 
 
 def test_admission_checks_out_the_commit_of_the_run() -> None:
     """Every checkout takes the commit the workflow runs at, never one the event names."""
-    steps = [step for text in _jobs(ADMISSION).values() for step in text.split("\n      - ")]
-    checkouts = [step for step in steps if step.startswith("uses: actions/checkout@")]
+    checkouts = [
+        step
+        for job in ADMISSION["jobs"].values()
+        for step in _steps(job)
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
 
     assert checkouts
     for step in checkouts:
-        assert "\n          persist-credentials: false" in step
-        assert "ref:" not in step
-        assert "repository:" not in step
+        assert step["with"] == {"persist-credentials": False}
 
 
 def test_admission_writes_only_its_comment_and_pull_request() -> None:
-    """Only the result writes, and only to issues; the app token only in propose."""
-    jobs = _jobs(ADMISSION)
-    grants = {job: _permissions(text) for job, text in jobs.items()}
+    """The result writes to issues; only propose holds the app token, and only for its work."""
+    grants = {job: _effective(ADMISSION, job) for job in ADMISSION["jobs"]}
 
-    assert "\npermissions: {}\n" in ADMISSION
+    assert ADMISSION["permissions"] == {}
     assert grants == {
-        "prepare": ["contents: read", "issues: read"],
-        "check": [],
-        "propose": ["contents: read"],
-        "result": ["contents: read", "issues: write"],
+        "prepare": {"contents": "read", "issues": "read"},
+        "check": {},
+        "propose": {"contents": "read"},
+        "result": {"contents": "read", "issues": "write"},
     }
-    assert "\n    permissions: {}\n" in jobs["check"]
-    assert [job for job, text in jobs.items() if any(p in text for p in _POWERS)] == ["propose"]
-    token = re.findall(r"^          permission-.*$", jobs["propose"], flags=re.MULTILINE)
-    assert token == [
-        "          permission-contents: write",
-        "          permission-pull-requests: write",
-    ]
+    tokens = {job: _app_tokens(definition) for job, definition in ADMISSION["jobs"].items()}
+    assert {job for job, steps in tokens.items() if steps} == {"propose"}
+    [token] = tokens["propose"]
+    assert {key: value for key, value in token["with"].items() if key.startswith("permission")} == {
+        "permission-contents": "write",
+        "permission-issues": "read",
+        "permission-pull-requests": "write",
+    }
 
 
 def test_admission_reports_also_after_a_failure() -> None:
     """The jobs that report run when an earlier job failed, but not when the run was cancelled."""
-    jobs = _jobs(ADMISSION)
+    jobs = ADMISSION["jobs"]
 
     for job in ("propose", "result"):
-        condition = re.search(r"^    if: (.*)$", jobs[job], flags=re.MULTILINE)
-        assert condition is not None, job
-        assert "!cancelled()" in condition[1], job
-        assert "always()" not in jobs[job], job
-    assert "needs: [prepare, check, propose]" in jobs["result"]
+        assert "!cancelled()" in jobs[job]["if"], job
+        assert "always()" not in json.dumps(jobs[job]), job
+    assert jobs["result"]["needs"] == ["prepare", "check", "propose"]
 
 
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda path: path.name)
-def test_provider_code_runs_in_a_job_without_permissions(path: Path) -> None:
-    """The job that runs provider code has no token, no checkout and no cache."""
-    for job, text in _jobs(path.read_text()).items():
-        if "scripts/check-line.sh" in text:
-            assert "\n    permissions: {}\n" in text, job
-            assert "actions/checkout" not in text, job
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+@pytest.mark.parametrize(
+    ("plan", "lines"),
+    [
+        ({"lines": {}}, []),
+        ({"lines": {"nightly": [], "beta": []}}, []),
+        (
+            {"lines": {"nightly": [{"domain": "x", "version": "1.0.0"}], "beta": []}},
+            [{"line": "nightly", "image": "ghcr.io/music-assistant/server:nightly"}],
+        ),
+    ],
+    ids=["no plan", "nothing planned", "one line"],
+)
+def test_admission_checks_only_the_lines_of_its_plan(
+    tmp_path: Path, plan: dict[str, Any], lines: list[dict[str, str]]
+) -> None:
+    """A submission with nothing to check starts no check job, so its code never runs."""
+    [step] = [step for step in _steps(ADMISSION["jobs"]["prepare"]) if step.get("id") == "lines"]
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "plan.json").write_text(json.dumps(plan))
+    shutil.copy(ROOT / "server_lines.json", tmp_path)
+    output = tmp_path / "output"
+    bash = shutil.which("bash")
+    assert bash is not None
+
+    subprocess.run(
+        [bash, "-e", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "GITHUB_OUTPUT": str(output)},
+        check=True,
+    )
+
+    assert json.loads(output.read_text().removeprefix("lines=")) == lines
+    assert ADMISSION["jobs"]["check"]["if"] == "needs.prepare.outputs.lines != '[]'"
 
 
-def _permissions(job: str) -> list[str]:
-    """
-    Return the permissions a job sets, as `scope: access`; none for `permissions: {}`.
+def _on(workflow: dict[Any, Any]) -> dict[str, Any]:
+    """Return the triggers of a workflow, by event; YAML 1.1 reads the key on as true."""
+    triggers = workflow.get("on", workflow.get(True))
+    if isinstance(triggers, str):
+        return {triggers: None}
+    if isinstance(triggers, list):
+        return dict.fromkeys(triggers)
+    assert isinstance(triggers, dict)
+    return triggers
 
-    Only the spellings test_permissions_are_spelled_as_the_tests_read_them allows are read.
-    """
-    found = re.search(r"^    permissions:\n((?:      .*\n)+)", job, flags=re.MULTILINE)
-    lines = found[1].splitlines() if found else []
-    return [line.strip() for line in lines if not line.strip().startswith("#")]
+
+def _events(workflow: dict[str, Any]) -> set[str]:
+    """Return the events that run a workflow."""
+    return set(_on(workflow))
 
 
-def _scripts(text: str) -> list[str]:
-    """Return the run scripts of the steps of a workflow."""
-    pattern = r"^(?:      - |        )run:.*(?:\n(?:          .*| *))*"
-    return re.findall(pattern, text, flags=re.MULTILINE)
+def _jobs(workflow: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the jobs of a workflow."""
+    return list(workflow["jobs"].values())
+
+
+def _steps(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the steps of a job; none for a job that calls a workflow."""
+    return list(job.get("steps", []))
+
+
+def _effective(workflow: dict[str, Any], job: str) -> dict[str, str]:
+    """Return the permissions the token of a job has, as test_permissions_are_explicit allows."""
+    permissions = workflow["jobs"][job].get("permissions", workflow["permissions"])
+    assert isinstance(permissions, dict)
+    return {scope: access for scope, access in permissions.items() if access != "none"}
+
+
+def _writes(workflow: dict[str, Any], job: str) -> set[str]:
+    """Return the scopes the token of a job can write."""
+    return {scope for scope, access in _effective(workflow, job).items() if access == "write"}
+
+
+def _app_tokens(job: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the steps of a job that make a token of an app."""
+    return [step for step in _steps(job) if step.get("uses", "").startswith(APP_TOKEN)]

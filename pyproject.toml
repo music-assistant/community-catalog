@@ -18,6 +18,8 @@ dev = [
   "mypy==2.3.0",
   "pre-commit==4.6.2",
   "pytest==9.1.1",
+  # the workflow tests read the workflows as GitHub does
+  "pyyaml==6.0.3",
   "ruff==0.16.5",
 ]
 
@@ -44,6 +46,11 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 # installed in the server image the check step runs in, not here
 module = ["music_assistant.*", "music_assistant_models.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pyyaml has no types, and only the tests read YAML
+module = ["yaml"]
 ignore_missing_imports = true
 
 [tool.ruff]

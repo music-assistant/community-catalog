@@ -285,6 +285,7 @@ def _check_admission(args: argparse.Namespace) -> int:
         run_url=args.run_url,
         pull_request=args.pull_request or None,
         proposal_failed=args.proposal == "failure",
+        others=args.others.split() if args.others else [],
     )
     print(text)
     if args.comment is not None:
@@ -305,7 +306,7 @@ def _post_admission_comment(args: argparse.Namespace) -> None:
 def _propose_admission(args: argparse.Namespace) -> None:
     """Open or update the pull request that adds a provider whose checks passed, or close it."""
     report, results = _admission(args)
-    url = propose_admission(
+    proposal = propose_admission(
         load_registry(args.root),
         report,
         results,
@@ -315,9 +316,17 @@ def _propose_admission(args: argparse.Namespace) -> None:
         run_url=args.run_url,
         github=GitHub(_token()),
     )
-    # the address is the output of the job, so nothing else goes to standard output
-    if url is not None:
-        print(url)
+    print(f"pull request: {proposal.url or 'none'}")
+    for url in proposal.others:
+        print(f"another submission for the domain: {url}")
+    if args.output is not None:
+        # the outputs of the job, one line each; addresses GitHub answered, checked all the same
+        urls = [url for url in [proposal.url or "", *proposal.others] if url]
+        if not all(_PULL_REQUEST_URL.fullmatch(url) for url in urls):
+            msg = f"GitHub answered an address that is not a pull request: {urls!r}"
+            raise CommandError(msg)
+        with args.output.open("a", encoding="utf-8") as output:
+            output.write(f"url={proposal.url or ''}\nothers={' '.join(proposal.others)}\n")
 
 
 def _set_status(args: argparse.Namespace) -> None:
@@ -392,6 +401,18 @@ def _pull_request_url(value: str) -> str:
     if value and not _PULL_REQUEST_URL.fullmatch(value):
         msg = f"{value!r} is not the address of a pull request on GitHub"
         raise argparse.ArgumentTypeError(msg)
+    return value
+
+
+def _pull_request_urls(value: str) -> str:
+    """
+    Return addresses of pull requests on GitHub separated by spaces, or an empty value.
+
+    :param value: The value of the argument.
+    :raises argparse.ArgumentTypeError: One is another address.
+    """
+    for url in value.split():
+        _pull_request_url(url)
     return value
 
 
@@ -510,6 +531,11 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.add_argument(
         "--proposal", help="the result of the job that opens that pull request, such as failure"
     )
+    command.add_argument(
+        "--others",
+        type=_pull_request_urls,
+        help="the pull requests of other submissions of the domain, separated by spaces",
+    )
     command.set_defaults(run=_check_admission)
 
     command = commands.add_parser(
@@ -526,6 +552,9 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
         "--author", required=True, help="the account of the token, which opens pull requests"
     )
     command.add_argument("--run-url", required=True, help="the address of the workflow run")
+    command.add_argument(
+        "--output", type=Path, help="a file to add the outputs of the job to: url and others"
+    )
     command.set_defaults(run=_propose_admission)
 
     command = commands.add_parser("set-status", help=_set_status.__doc__)

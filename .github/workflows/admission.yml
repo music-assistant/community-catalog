@@ -2,13 +2,14 @@ name: Admission
 
 # The admission checks of a provider submitted with the issue form "Submit a provider", reported
 # in one comment on the issue. When they pass, the bot opens the pull request that adds the
-# provider, and a registry maintainer decides by merging it. The issue is read through the API
-# as data, provider code runs in the server images without any token, and only the job that
-# opens the pull request holds the key of the app.
+# provider, and a registry maintainer decides by merging it; closing the issue closes that pull
+# request. The issue is read through the API as data, provider code runs in the server images
+# without any token, and only the job that opens or closes the pull request holds the key of the
+# app.
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, closed]
   workflow_dispatch:
     inputs:
       issue:
@@ -54,10 +55,12 @@ jobs:
         run: >-
           uv run --no-dev python -m registry prepare-admission --repository "$REPOSITORY"
           --issue "$ISSUE"
+      # only the lines the plan checks a version on; a submission that failed has an empty plan
       - name: List the server lines
         id: lines
         run: |
-          lines=$(jq -c '[.lines | to_entries[] | select(.value.frozen != true)
+          lines=$(jq -c --slurpfile plan work/plan.json '[.lines | to_entries[]
+            | select(.value.frozen != true and (($plan[0].lines[.key] // []) | length) > 0)
             | {line: .key, image: .value.image}]' server_lines.json)
           echo "lines=$lines" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -105,8 +108,12 @@ jobs:
   propose:
     name: Open or close the pull request
     needs: [prepare, check]
-    # also when the checks failed or could not run, to close the pull request of an earlier run
-    if: ${{ !cancelled() && needs.prepare.result != 'skipped' && github.ref == 'refs/heads/main' }}
+    # also when the checks failed or could not run, and when a submission is closed, to close the
+    # pull request of an earlier run
+    if: >-
+      ${{ !cancelled() && github.ref == 'refs/heads/main' && (needs.prepare.result != 'skipped'
+      || (github.event.action == 'closed'
+      && contains(github.event.issue.labels.*.name, 'submission'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # holds the key of the app, which only a run on main gets
@@ -115,6 +122,7 @@ jobs:
       contents: read
     outputs:
       url: ${{ steps.propose.outputs.url }}
+      others: ${{ steps.propose.outputs.others }}
     steps:
       - id: token
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
@@ -124,6 +132,8 @@ jobs:
           owner: ${{ github.repository_owner }}
           repositories: ${{ github.event.repository.name }}
           permission-contents: write
+          # to see that the issue is still open and holds what was checked
+          permission-issues: read
           permission-pull-requests: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -156,11 +166,10 @@ jobs:
           ISSUE: ${{ github.event.issue.number || inputs.issue }}
           REPOSITORY: ${{ github.repository }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          url=$(uv run --no-dev python -m registry propose-admission results \
-            --repository "$REPOSITORY" --issue "$ISSUE" --author "${APP_SLUG}[bot]" \
-            --run-url "$RUN_URL")
-          echo "url=$url" >> "$GITHUB_OUTPUT"
+        run: >-
+          uv run --no-dev python -m registry propose-admission results
+          --repository "$REPOSITORY" --issue "$ISSUE" --author "${APP_SLUG}[bot]"
+          --run-url "$RUN_URL" --output "$GITHUB_OUTPUT"
 
   result:
     name: Admission checks
@@ -200,13 +209,14 @@ jobs:
       - name: Print the result
         shell: bash
         env:
+          OTHERS: ${{ needs.propose.outputs.others }}
           PROPOSAL: ${{ needs.propose.result }}
           PULL_REQUEST: ${{ needs.propose.outputs.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           uv run --no-dev python -m registry check-admission results
           --comment "$RUNNER_TEMP/comment.md" --run-url "$RUN_URL"
-          --pull-request "$PULL_REQUEST" --proposal "$PROPOSAL"
+          --pull-request "$PULL_REQUEST" --proposal "$PROPOSAL" --others "$OTHERS"
           | tee -a "$GITHUB_STEP_SUMMARY"
       # also when not every check passed
       - name: Write the result as a comment on the issue

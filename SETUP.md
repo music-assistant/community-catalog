@@ -7,7 +7,10 @@ by an owner of the `music-assistant` organisation.
 
 - [ ] Create the public repository `music-assistant/community-catalog`, without a README or
       licence (both are here), and push `main`.
-- [ ] Settings → General: enable Issues; disable Wiki and Projects.
+- [ ] Settings → General: enable Issues; disable Wiki and Projects. Under Pull Requests, allow
+      only squash merging, with the default commit message "Pull request title", so no text of
+      a submission (a reason in the result of its checks) ends up in a commit message, where
+      GitHub reads closing keywords.
 - [ ] Issues → Labels: create the label `submission`. The form "Submit a provider" gives it to
       an issue, and only an issue with it starts the admission checks; GitHub leaves out a label
       the repository does not have.
@@ -51,9 +54,9 @@ submission comes from the bot, on a branch of this repository.
 
 ## Release pipeline
 
-- [ ] Install the Music Assistant Bot app on this repository with Contents read and write, and
-      Pull requests read and write (the Admission workflow opens the pull request of a
-      submission with it).
+- [ ] Install the Music Assistant Bot app on this repository with Contents read and write,
+      Pull requests read and write, and Issues read (the Admission workflow opens the pull
+      request of a submission with it, once it has read the issue again).
 - [ ] Settings → Environments: create the environment `releases`, with deployment branches
       limited to `main`. The jobs of the Releases workflow that push or open issues, and the
       job of the Admission workflow that opens pull requests, run in it, and only on `main`.

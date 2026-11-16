@@ -406,7 +406,7 @@ def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
     files.provider()
     files.version(
         "1.0.0",
-        lines={},
+        lines={"beta": True},
         manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
     )
     fetched = _fetched()
@@ -426,7 +426,7 @@ def test_issue_goes_to_the_registry_without_issues(files: Files) -> None:
     files.provider()
     files.version(
         "1.0.0",
-        lines={},
+        lines={"beta": True},
         manifest={**manifest(DOMAIN, ["some-package==1.0"]), "codeowners": ["@another"]},
     )
     results = [

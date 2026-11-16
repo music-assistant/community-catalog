@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import tarfile
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
@@ -55,6 +55,7 @@ def body(
         "https://github.com/someone/ma-sample/",
         "https://github.com/someone/ma-sample.git",
         "github.com/someone/ma-sample",
+        "https://GitHub.com/someone/ma-sample",
     ],
 )
 def test_a_repository_as_owner_name_or_address(repository: str) -> None:
@@ -188,4 +189,46 @@ def test_a_manifest_that_is_a_link(tmp_path: Path) -> None:
     with pytest.raises(
         SubmissionError, match=re.escape("provider/manifest.json is no regular file")
     ):
+        find_provider(archive, None)
+
+
+def test_only_the_chosen_manifest_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The search looks at names; only the manifest of the folder it takes is read."""
+    folders = [f"providers/{name}_music" for name in "abcdefgh"]
+    archive = _archive(tmp_path, *folders, "provider")
+    read: list[str] = []
+    extract = tarfile.TarFile.extractfile
+
+    def extractfile(tar: tarfile.TarFile, member: tarfile.TarInfo | str) -> Any:
+        read.append(member if isinstance(member, str) else member.name)
+        return extract(tar, member)
+
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", extractfile)
+
+    assert find_provider(archive, None) == ("provider", "provider")
+    assert read == [f"{ARCHIVE_ROOT}/provider/manifest.json"]
+
+
+def test_a_refusal_names_a_few_folders(tmp_path: Path) -> None:
+    """However many folders hold a manifest, the refusal stays short."""
+    archive = _archive(tmp_path, *(f"f{number:03}_{'x' * 300}" for number in range(300)))
+
+    with pytest.raises(SubmissionError) as err:
+        find_provider(archive, None)
+
+    assert "the release has 300 top-level folders with a manifest.json" in str(err.value)
+    assert str(err.value).count("f0") == 5
+    assert " and 295 more): name the provider folder" in str(err.value)
+    assert len(str(err.value)) < 1000
+
+
+@pytest.mark.parametrize("limit", ["MAX_ARCHIVE_MEMBERS", "MAX_ARCHIVE_EXPANDED"])
+def test_the_search_walks_a_bounded_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, limit: str
+) -> None:
+    """An archive with more members or bytes than the search walks is refused."""
+    archive = _archive(tmp_path, *(f"f{number}" for number in range(20)))
+    monkeypatch.setattr(f"registry.submission.{limit}", 10 if "MEMBERS" in limit else 500)
+
+    with pytest.raises(SubmissionError, match="the archive of the release holds more than"):
         find_provider(archive, None)

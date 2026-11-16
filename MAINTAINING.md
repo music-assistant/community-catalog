@@ -44,8 +44,9 @@ No file or folder the commands read or write may be a symbolic link.
 The bot writes it from the submission (see [Admission](#admission)): the ids from GitHub, the
 domain from the manifest of the latest release. A key that has its default value is left out.
 Who decided on the admission, and when, is in the history of its pull request. The maintainers
-of a provider are the owner of its repository and the code owners in the manifest of its
-highest version.
+of a provider are the owner of its repository and the code owners in the manifest of its highest
+version that is offered (not blocked, and passed on a server line); without such a version, the
+owner alone.
 
 | Key | Rule |
 |---|---|
@@ -120,9 +121,9 @@ block.
 
 Each `site/v1/<line>.json` holds, for every provider with at least one version file:
 
-- its status, reason and reason link, repository, maintainers (the owner of the repository and
-  the code owners in the manifest of its highest version, as handles without `@`), the date it
-  entered the catalog, and its blocked versions;
+- its status, reason and reason link, repository, maintainers (see
+  [provider.json](#providerjson), as handles without `@`), the date it entered the catalog, and
+  its blocked versions;
 - `latest`: the highest version that passed the checks for this line and is not blocked.
   Versions are compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
 - `versions`: the five highest of those, each with its commit, folder, content hash,
@@ -204,7 +205,7 @@ The commands of the release pipeline, which the workflows run:
 | `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--pull-request <url>] [--proposal <result>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. Exits with 1 when the checks did not pass. |
-| `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url>` | When the checks passed, makes the branch `admit/<domain>` afresh from `main` with only the `provider.json`, opens or updates its pull request and prints its address; otherwise closes the open pull request of the issue. Needs `GITHUB_TOKEN` of the app. |
+| `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | When the checks passed and the issue is still open and unchanged, makes the branch `admit/<domain>-<issue>` afresh from `main` with only the `provider.json` and opens or updates its pull request; otherwise closes the open pull request of the issue and deletes its branch. Adds the address of the pull request, and of those of other submissions of the domain, to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
 | `post-admission-comment <file> --repository <owner/name> --issue <number>` | Writes the comment on the issue, or updates the one an earlier run wrote. Needs `GITHUB_TOKEN`. |
 | `check-changes <file>` | Fails when a pull request adds or changes a version file or a refusal; the file lists the changed paths, separated by NUL characters. |
 
@@ -336,6 +337,9 @@ The check executes provider code, so it runs in a job of its own:
   version, with a reason of one line. Anything else is ignored with a warning, and a result that
   cannot be recorded skips that version only.
 
+The container of the load stage runs the provider's code and writes the results file itself. The
+check therefore finds honest mistakes; a provider that wants to can write a pass for itself.
+
 The admission runs the same check in the same way. The reusable workflow for a provider's own
 CI runs the same checks on the provider's checkout, in one container.
 
@@ -345,13 +349,16 @@ A provider is submitted with the issue form "Submit a provider"
 (`.github/ISSUE_TEMPLATE/submit-provider.yml`), which gives the issue the label `submission`. It
 holds the repository, and only when needed the provider folder and the tag prefix. Without a
 folder, the checks take `provider` when it holds a `manifest.json`, and otherwise the one
-top-level folder that holds one; several or none is a refusal that asks for the folder.
+top-level folder that holds one; several or none is a refusal that asks for the folder. The
+search reads only the names in the archive of the release, at most 20,000 members and 1 GiB, and
+then the one `manifest.json` it takes.
 
-The workflow `admission.yml` runs when such an issue is opened, edited or reopened, and by hand
-for an issue number (Actions → Admission → Run workflow), for example after a new release. It
-runs the workflow file and the code of the commit it runs at: `main` for an issue, the chosen
-branch by hand. Nothing of the event reaches a script but through its environment; the registry
-reads the issue (author, text) through the API, as data, and accepts only the fields of the form.
+The workflow `admission.yml` runs when such an issue is opened, edited, reopened or closed, and by
+hand for an issue number (Actions → Admission → Run workflow), for example after a new release. It
+runs the workflow file and the code of the commit it runs at: `main` for an issue, the chosen branch
+by hand. Nothing of the event reaches a script but through its environment; the registry reads the
+issue (author, text) through the API, as data, and accepts only the fields of the form.
+
 It checks:
 
 - that the repository exists, is public, not archived, and has an open source licence GitHub
@@ -365,17 +372,23 @@ It checks:
 
 Its jobs:
 
-1. **prepare** reads the issue and GitHub with a read-only token, and plans the check;
-2. **check** runs once per line, exactly as the check of the release pipeline: no token, provider
-   code only in the containers of `scripts/check-line.sh`;
+1. **prepare** reads the issue and GitHub with a read-only token, and plans the check only when
+   every requirement above the release checks passed;
+2. **check** runs once per line the plan holds a version for, exactly as the check of the
+   release pipeline: no token, provider code only in the containers of `scripts/check-line.sh`.
+   A submission that failed a requirement starts no check job, so its code never runs;
 3. **propose** runs only on `main`, in the environment `releases`, with a token of the Music
-   Assistant Bot app limited to contents and pull requests of this repository. It runs only its
-   checked out code, and reads the report, the plan and the results as data. When the checks
-   passed, it makes the branch `admit/<domain>` afresh from `main` with only the `provider.json`,
-   and opens or updates the pull request "Admit <name>" that carries the result and closes the
-   issue when merged. It leaves a branch alone whose open pull request is not of this issue.
-   When they did not pass, or could not run, it closes the open pull request of the issue with a
-   line that says why;
+   Assistant Bot app limited to the contents and pull requests of this repository, and to
+   reading its issues. It runs only its checked out code, and reads the report, the plan and the
+   results as data. It reads the issue again: only while it is open, labelled and holds the text
+   that was checked, and the checks passed, it makes the branch `admit/<domain>-<issue>` afresh
+   from `main` with only the `provider.json`, and opens or updates the pull request
+   "Admit <domain>" that carries the result and closes the issue when merged. The branch belongs
+   to the issue, so two submissions of one domain give two pull requests, and the result of the
+   second names the first. Otherwise, and when the issue is closed, it closes the open pull
+   request of the issue with a line that says why and deletes its branch; a merged pull request
+   is left alone. Titles and commit messages hold the domain only: GitHub reads keywords such as
+   "Closes #1" and "[skip ci]" in them;
 4. **result** writes the result in the job summary and as one comment on the issue, which every
    run updates, with the workflow's own token: what was checked (repository, release, commit and
    when), what passed and what happens next, also when the issue is no valid submission or the
@@ -394,6 +407,9 @@ writes.
 
 ## Still open
 
+- The app token of `propose` could write to `main` if that job were ever compromised: the app is
+  on the bypass list of the ruleset for the pushes of the Releases workflow. A separate app for
+  the pull requests, without the bypass, would remove that.
 - Running the provider's own tests in the check step.
 - The reading of every release against the red lines by Bot-MArley, and its summary on the pull
   request of a submission.

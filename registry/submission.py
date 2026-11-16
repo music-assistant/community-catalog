@@ -27,7 +27,16 @@ MAX_BODY = 10_000
 _NO_RESPONSE = "_No response_"
 # far more than a manifest holds (the index takes 16 KiB); a larger one is not read
 _MAX_MANIFEST = 64 * 1024
-_REPOSITORY_URL = re.compile(r"(?:https?://)?(?:www\.)?github\.com/([^/]+/[^/]+?)(?:\.git)?/?")
+# the most of an archive the search for the provider folder walks: far more than the repository
+# of a provider holds
+MAX_ARCHIVE_MEMBERS = 20_000
+MAX_ARCHIVE_EXPANDED = 1024 * 1024 * 1024
+# the folders a refusal names at most
+_LISTED_FOLDERS = 5
+_MAX_FOLDER_NAME = 100
+_REPOSITORY_URL = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([^/]+/[^/]+?)(?:\.git)?/?", re.IGNORECASE
+)
 _TICKED = re.compile(r"- \[[xX]\] \S.*")
 
 
@@ -92,34 +101,30 @@ def find_provider(archive: Path, folder: str | None) -> tuple[str, str]:
     Return the provider folder in the GitHub archive of a release, and the domain it names.
 
     Without a folder given, it is the folder `provider` when that holds a manifest.json, and
-    otherwise the one top-level folder that holds one.
+    otherwise the one top-level folder that holds one. Only the manifest.json of that folder
+    is read.
 
     :param archive: The archive of the commit of the release.
     :param folder: The provider folder the submission names, or None to find it.
-    :raises SubmissionError: The folder is not there or cannot be found, or its manifest.json
-        does not name a valid domain.
+    :raises SubmissionError: The archive holds more than the search walks, the folder is not
+        there or cannot be found, or its manifest.json does not name a valid domain.
     :raises OSError: The archive cannot be read.
     """
-    manifests = _manifests(archive, folder)
-    if folder is not None:
-        if folder not in manifests:
-            msg = f"the release has no {folder}/{MANIFEST_FILE}"
-            raise SubmissionError(msg)
-    elif formats.PROVIDER_FOLDER_NAME in manifests:
-        folder = formats.PROVIDER_FOLDER_NAME
-    elif len(manifests) == 1:
-        [folder] = manifests
-    else:
-        found = ", ".join(sorted(manifests)) or "none"
-        msg = (
-            f"the release has {len(manifests)} top-level folders with a {MANIFEST_FILE} "
-            f"({found}): name the provider folder in the field Folder"
-        )
-        raise SubmissionError(msg)
-    where = f"{folder}/{MANIFEST_FILE}"
-    if (content := manifests[folder]) is None:
-        msg = f"{where} is no regular file of at most {_MAX_MANIFEST} bytes"
-        raise SubmissionError(msg)
+    try:
+        with tarfile.open(archive, "r:gz") as tar:
+            manifests = _manifests(tar, folder)
+            folder = _choose(manifests, folder)
+            where = f"{folder}/{MANIFEST_FILE}"
+            member = manifests[folder]
+            source = tar.extractfile(member) if member.isfile() else None
+            if source is None or member.size > _MAX_MANIFEST:
+                msg = f"{where} is no regular file of at most {_MAX_MANIFEST} bytes"
+                raise SubmissionError(msg)
+            with source:
+                content = source.read(_MAX_MANIFEST)
+    except (tarfile.TarError, EOFError) as err:
+        msg = f"the archive of the release cannot be read: {err}"
+        raise SubmissionError(msg) from err
     try:
         manifest = loads(content)
     except ValueError as err:
@@ -132,36 +137,61 @@ def find_provider(archive: Path, folder: str | None) -> tuple[str, str]:
     return folder, domain
 
 
-def _manifests(archive: Path, folder: str | None) -> dict[str, bytes | None]:
+def _manifests(tar: tarfile.TarFile, folder: str | None) -> dict[str, tarfile.TarInfo]:
     """
-    Return the manifest.json files of the folders a provider may be in, by folder.
+    Return the manifest.json members of the folders a provider may be in, by folder.
 
-    Those are the given folder, or else every top-level folder. A manifest.json that is no
-    regular file of a sensible size is None.
+    Those are the given folder, or else every top-level folder. Only the names are looked at.
 
-    :param archive: The GitHub archive, with the repository in one top-level folder.
+    :param tar: The GitHub archive, with the repository in one top-level folder.
     :param folder: The provider folder the submission names, or None.
-    :raises SubmissionError: The archive cannot be read.
-    :raises OSError: The archive cannot be opened.
+    :raises SubmissionError: The archive holds more members or bytes than the search walks.
     """
-    result: dict[str, bytes | None] = {}
-    try:
-        with tarfile.open(archive, "r:gz") as tar:
-            for member in tar:
-                # the first part is the top-level folder GitHub names after the repository
-                parts = PurePosixPath(member.name).parts[1:]
-                if len(parts) < 2 or parts[-1] != MANIFEST_FILE or ".." in parts:  # noqa: PLR2004
-                    continue
-                where = "/".join(parts[:-1])
-                if where != folder and (folder is not None or len(parts) != 2):  # noqa: PLR2004
-                    continue
-                source = (
-                    tar.extractfile(member)
-                    if member.isfile() and member.size <= _MAX_MANIFEST
-                    else None
-                )
-                result[where] = source.read() if source is not None else None
-    except (tarfile.TarError, EOFError) as err:
-        msg = f"the archive of the release cannot be read: {err}"
-        raise SubmissionError(msg) from err
+    result: dict[str, tarfile.TarInfo] = {}
+    walked = 0
+    for count, member in enumerate(tar, 1):
+        # walking past a member decompresses it
+        walked += max(member.size, 0)
+        if count > MAX_ARCHIVE_MEMBERS or walked > MAX_ARCHIVE_EXPANDED:
+            msg = (
+                f"the archive of the release holds more than {MAX_ARCHIVE_MEMBERS} files or "
+                f"{MAX_ARCHIVE_EXPANDED} bytes"
+            )
+            raise SubmissionError(msg)
+        # the first part is the top-level folder GitHub names after the repository
+        parts = PurePosixPath(member.name).parts[1:]
+        if len(parts) < 2 or parts[-1] != MANIFEST_FILE or ".." in parts:  # noqa: PLR2004
+            continue
+        where = "/".join(parts[:-1])
+        if where == folder or (folder is None and len(parts) == 2):  # noqa: PLR2004
+            result[where] = member
     return result
+
+
+def _choose(manifests: dict[str, tarfile.TarInfo], folder: str | None) -> str:
+    """
+    Return the provider folder among the folders with a manifest.json.
+
+    :param manifests: The manifest.json members, by folder.
+    :param folder: The provider folder the submission names, or None.
+    :raises SubmissionError: The given folder has no manifest.json, or none or several can be
+        taken.
+    """
+    if folder is not None:
+        if folder not in manifests:
+            msg = f"the release has no {folder}/{MANIFEST_FILE}"
+            raise SubmissionError(msg)
+        return folder
+    if formats.PROVIDER_FOLDER_NAME in manifests:
+        return formats.PROVIDER_FOLDER_NAME
+    if len(manifests) == 1:
+        return next(iter(manifests))
+    names = sorted(manifests)
+    found = ", ".join(name[:_MAX_FOLDER_NAME] for name in names[:_LISTED_FOLDERS]) or "none"
+    if len(names) > _LISTED_FOLDERS:
+        found += f" and {len(names) - _LISTED_FOLDERS} more"
+    msg = (
+        f"the release has {len(names)} top-level folders with a {MANIFEST_FILE} ({found}): "
+        "name the provider folder in the field Folder"
+    )
+    raise SubmissionError(msg)

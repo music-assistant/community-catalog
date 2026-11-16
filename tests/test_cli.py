@@ -359,6 +359,7 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     files.version("1.0.0", lines={})
     report = {
         "checked": "2026-11-15T02:00:00Z",
+        "issue_digest": "",
         "domain": DOMAIN,
         "version": "1.0.0",
         "findings": [{"passed": True, "text": "The domain is free", "detail": DOMAIN}],

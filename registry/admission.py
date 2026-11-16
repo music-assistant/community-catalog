@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import re
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -26,9 +29,22 @@ from registry.submission import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from registry.github import GitHub, IssueInfo, PullRequest, Release, RepositoryInfo
     from registry.models import LineResults
     from registry.registry import Registry
+
+
+@dataclass(frozen=True, slots=True)
+class Proposal:
+    """The pull request of a submission."""
+
+    # None when there is none
+    url: str | None
+    # the open pull requests of other submissions of the same domain
+    others: list[str]
+
 
 # what the comment with the result on the issue starts with, to find it again
 COMMENT_MARKER = "<!-- admission-checks -->"
@@ -38,11 +54,11 @@ RULES_URL = "https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATA
 FORM_URL = (
     "https://github.com/music-assistant/community-catalog/issues/new?template=submit-provider.yml"
 )
-# the branch of the pull request that adds a provider is this and its domain
+# the branch of the pull request of a submission is this, its domain and its issue; a domain
+# holds no hyphen
 BRANCH_PREFIX = "admit/"
 BASE_BRANCH = "main"
-# the longest name of a provider the title of its pull request holds
-MAX_TITLE_NAME = 80
+_BRANCH = re.compile(rf"{BRANCH_PREFIX}([a-z][a-z0-9_]*)-([1-9][0-9]*)")
 _TITLE = "## Admission checks"
 
 
@@ -65,8 +81,10 @@ def prepare_admission(
     :raises CommandError: The author of the issue is not a GitHub handle.
     :raises GitHubError: GitHub could not answer.
     """
-    report = AdmissionReport(checked=format_date(now()), findings=[])
     found = github.issue(repository, issue)
+    report = AdmissionReport(
+        checked=format_date(now()), findings=[], issue_digest=issue_digest(found.body)
+    )
     if not formats.is_github_handle(found.author):
         msg = f"{found.author!r} is not a GitHub handle"
         raise CommandError(msg)
@@ -74,8 +92,9 @@ def prepare_admission(
         report.findings = _prepare(root, report, found, issue=issue, github=github, work=work)
     except SubmissionError as err:
         report.refusal = str(err)
-    plan = make_plan(load_registry(root), work) if report.version else CheckPlan(lines={})
-    write_plan(plan, work)
+    # the release of a submission that failed a requirement is not checked: its code never runs
+    admitted = report.version is not None and all(finding.passed for finding in report.findings)
+    write_plan(make_plan(load_registry(root), work) if admitted else CheckPlan(lines={}), work)
     return report
 
 
@@ -87,6 +106,7 @@ def check_admission(
     run_url: str | None = None,
     pull_request: str | None = None,
     proposal_failed: bool = False,
+    others: Sequence[str] = (),
 ) -> tuple[bool, str]:
     """
     Return whether every admission check passed, and the result in Markdown.
@@ -103,6 +123,7 @@ def check_admission(
     :param pull_request: The address of the pull request that adds the provider, when there is
         one.
     :param proposal_failed: Whether opening that pull request failed.
+    :param others: The open pull requests of other submissions of the same domain.
     """
     link = f"\n[The run of these checks]({run_url})\n" if run_url else ""
     if report is None:
@@ -122,7 +143,8 @@ def check_admission(
         return False, f"{_TITLE}\n\n{what}{intro}\n\n{refusal}\n{advice}\n{link}"
     findings = list(report.findings)
     passed_on_a_line = False
-    if report.version is not None:
+    # without every requirement met, the release is not checked on any line
+    if report.version is not None and all(finding.passed for finding in report.findings):
         by_line = {
             file.line: (result.passed, result.reason)
             for file in results
@@ -153,6 +175,12 @@ def check_admission(
             f"[rules of the community catalog]({RULES_URL}) and decides by merging "
             f"{adds or 'the pull request that adds it'}; there is nothing more for you to do."
         )
+        if others:
+            links = ", ".join(f"[#{url.rsplit('/', 1)[-1]}]({url})" for url in others)
+            verdict += (
+                f"\n\nAnother submission for this domain has an open pull request: {links}. The "
+                "registry maintainer decides between them."
+            )
     else:
         verdict = (
             "Not every check passed. Fix what failed, then run the checks again: edit this "
@@ -187,55 +215,67 @@ def propose_admission(
     author: str,
     run_url: str,
     github: GitHub,
-) -> str | None:
+) -> Proposal:
     """
     Open or update the pull request that adds a provider whose checks passed, or close it.
 
-    The pull request comes from the branch admit/<domain>, made afresh from main with only the
-    provider.json added, carries the result, and closes the issue when it is merged. When the
-    checks did not pass, every open pull request of the issue is closed with a line that says
-    why. Returns the address of the pull request, None when there is none.
+    The pull request of an issue comes from its own branch, admit/<domain>-<issue>, made afresh
+    from main with only the provider.json added, and closes the issue when it is merged. It is
+    opened only while the issue is open, labelled and holds the text that was checked. Otherwise,
+    and when the checks did not pass, the open pull request of the issue is closed with a line
+    that says why, and its branch deleted.
 
     :param registry: The registry of main.
-    :param report: The admission checks of the prepare step, None when they could not run.
+    :param report: The admission checks of the prepare step, None when they did not run.
     :param results: The results of the check step, as read_results returns them.
     :param repository: The repository of the registry, as owner/name.
     :param issue: The number of the issue of the submission.
     :param author: The account of the token, which opens the pull requests.
     :param run_url: The address of the workflow run.
-    :param github: A client whose token may push branches and write pull requests.
-    :raises CommandError: The provider cannot be added to main, or its branch holds an open
-        pull request that is not of this submission.
+    :param github: A client whose token may push branches, write pull requests and read issues.
+    :raises CommandError: The provider cannot be added to main.
     :raises GitHubError: GitHub refused a request.
     """
-    passed, result = check_admission(registry, report, results, run_url=run_url)
-    marker = f"<!-- submission: {issue} -->"
-    pulls = github.pull_requests(repository)
-    ours = [
-        pull
-        for pull in pulls
-        if pull.author == author
-        and pull.head_repository == repository
-        and pull.branch.startswith(BRANCH_PREFIX)
-        and pull.body.startswith(f"{marker}\n")
+    found = github.issue(repository, issue)
+    pulls = [
+        pull for pull in github.pull_requests(repository) if pull.head_repository == repository
     ]
-    if not passed or report is None or report.provider is None:
+    ours = [pull for pull in pulls if pull.author == author and _branch_issue(pull.branch) == issue]
+    passed, result = check_admission(registry, report, results, run_url=run_url)
+    unchanged = (
+        report is not None
+        and report.issue_digest == issue_digest(found.body)
+        and SUBMISSION_LABEL in found.labels
+        and not found.pull_request
+    )
+    if not found.open:
+        why = f"Closed: #{issue} is closed."
+    elif report is None:
+        why = f"Closed: the checks of #{issue} could not run in [this run]({run_url})."
+    elif not unchanged:
+        why = f"Closed: #{issue} changed while [this run]({run_url}) checked it."
+    else:
         why = f"Closed: the checks of #{issue} did not pass in [this run]({run_url})."
+    if not (found.open and unchanged and passed) or report is None or report.provider is None:
         for pull in ours:
             _close(github, repository, pull, why)
-        return None
+        return Proposal(url=None, others=[])
     provider = report.provider
-    branch = f"{BRANCH_PREFIX}{provider.domain}"
-    others = [pull for pull in pulls if pull not in ours]
-    _check_proposal(registry, provider, branch, repository, others)
+    _check_proposal(registry, provider)
     if (base := github.branch_commit(repository, BASE_BRANCH)) is None:
         msg = f"{repository} has no branch {BASE_BRANCH}"
         raise GitHubError(msg)
-    title = f"Admit {' '.join((report.name or provider.domain).split())[:MAX_TITLE_NAME]}"
-    github.set_branch(repository, branch, base)
+    # the domain is validated; nothing a submission writes reaches a title or a commit message
+    title = f"Admit {provider.domain}"
+    branch = f"{BRANCH_PREFIX}{provider.domain}-{issue}"
     path = f"{PROVIDERS_FOLDER}/{provider.domain}/{PROVIDER_FILE}"
+    github.set_branch(repository, branch, base)
     github.put_file(repository, branch, path, dumps(provider.to_dict()), title)
-    body = f"{marker}\nCloses #{issue}\n\n{admission_comment(result, run_url)}"
+    name = code_span(report.name or provider.domain)
+    body = (
+        f"Closes #{issue}\n\nAdds {code_span(path)}: {name} from "
+        f"{code_span(provider.repository)}.\n\n{admission_comment(result, run_url)}"
+    )
     current = next((pull for pull in ours if pull.branch == branch), None)
     if current is None:
         url = github.create_pull_request(
@@ -247,7 +287,21 @@ def propose_admission(
     for pull in ours:
         if pull is not current:
             _close(github, repository, pull, f"Closed: #{issue} names another provider, {url}.")
-    return url
+    others = [
+        pull.url
+        for pull in pulls
+        if pull not in ours and _branch_domain(pull.branch) == provider.domain
+    ]
+    return Proposal(url=url, others=others)
+
+
+def issue_digest(body: str) -> str:
+    """
+    Return the digest of the text of an issue, to tell whether it changed.
+
+    :param body: The text of the issue.
+    """
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def _prepare(
@@ -389,39 +443,38 @@ def _locate(
     return info, release, submission, folder
 
 
-def _check_proposal(
-    registry: Registry,
-    provider: ProviderFile,
-    branch: str,
-    pull_repository: str,
-    others: list[PullRequest],
-) -> None:
+def _check_proposal(registry: Registry, provider: ProviderFile) -> None:
     """
-    Refuse to propose a provider main cannot take, or on a branch of another pull request.
+    Refuse to propose a provider main cannot take.
 
     :param registry: The registry of main.
     :param provider: The provider.json to add.
-    :param branch: The branch of the pull request.
-    :param pull_repository: The repository of the registry, which holds the branch.
-    :param others: The open pull requests that are not of this submission.
-    :raises CommandError: The provider cannot be proposed.
+    :raises CommandError: The provider cannot be added.
     """
     problems = check_provider(provider, registry.reserved)
     if provider.domain in registry.providers:
         problems.append(f"domain: {provider.domain} is in the community catalog already")
-    problems += [
-        f"{branch} holds the open pull request #{pull.number} of another submission"
-        for pull in others
-        if pull.branch == branch and pull.head_repository == pull_repository
-    ]
     if problems:
         raise CommandError("; ".join(problems))
 
 
 def _close(github: GitHub, repository: str, pull: PullRequest, why: str) -> None:
-    """Close a pull request with a comment that says why."""
+    """Close a pull request of the bot with a comment that says why, and delete its branch."""
     github.add_comment(repository, pull.number, why)
     github.update_pull_request(repository, pull.number, state="closed")
+    github.delete_branch(repository, pull.branch)
+
+
+def _branch_issue(branch: str) -> int | None:
+    """Return the issue a branch of a pull request of the bot belongs to, None for another."""
+    found = _BRANCH.fullmatch(branch)
+    return int(found[2]) if found else None
+
+
+def _branch_domain(branch: str) -> str | None:
+    """Return the domain a branch of a pull request of the bot proposes, None for another."""
+    found = _BRANCH.fullmatch(branch)
+    return found[1] if found else None
 
 
 def _what(report: AdmissionReport) -> str:

@@ -281,8 +281,10 @@ class FakeGitHub:
         self.pulls: dict[str, list[dict[str, Any]]] = {}
         # the commit of each branch, by (owner/name, branch)
         self.branches: dict[tuple[str, str], str] = {}
-        # the files committed through the contents API, by (owner/name, branch, path)
+        # the files committed through the contents API and their commit messages, by owner/name,
+        # branch and path
         self.files: dict[tuple[str, str, str], bytes] = {}
+        self.messages: dict[tuple[str, str, str], str] = {}
         self.requests: list[urllib.request.Request] = []
         self._ids = itertools.count(1)
 
@@ -432,21 +434,32 @@ class FakeGitHub:
             assert (repository, branch) not in self.branches
             self.branches[repository, branch] = data["sha"]
             return 201, b"{}"
-        if (found := re.fullmatch(r"git/refs/heads/(.+)", path)) and method == "PATCH":
-            data = request_json(request)
-            assert data["force"] is True
-            self.branches[repository, unquote(found[1])] = data["sha"]
-            for key in [key for key in self.files if key[:2] == (repository, unquote(found[1]))]:
-                del self.files[key]
-            return 200, b"{}"
+        if found := re.fullmatch(r"git/refs/heads/(.+)", path):
+            return self._move_branch(request, repository, unquote(found[1]))
         if (found := re.fullmatch(r"contents/(.+)", path)) and method == "PUT":
             data = request_json(request)
             key = (repository, data["branch"], unquote(found[1]))
             assert (repository, data["branch"]) in self.branches
             assert key not in self.files
             self.files[key] = base64.b64decode(data["content"])
+            self.messages[key] = data["message"]
             return 201, b"{}"
         return 404, b"{}"
+
+    def _move_branch(
+        self, request: urllib.request.Request, repository: str, branch: str
+    ) -> tuple[int, bytes]:
+        """Point a branch at another commit, or delete it; either drops its files."""
+        for key in [key for key in self.files if key[:2] == (repository, branch)]:
+            del self.files[key]
+        if request.get_method() == "DELETE":
+            gone = self.branches.pop((repository, branch), None) is None
+            return (422, b'{"message": "Reference does not exist"}') if gone else (204, b"")
+        assert request.get_method() == "PATCH"
+        data = request_json(request)
+        assert data["force"] is True
+        self.branches[repository, branch] = data["sha"]
+        return 200, b"{}"
 
     def _comments(
         self, request: urllib.request.Request, repository: str, number: int
@@ -481,6 +494,9 @@ class FakeGitHub:
             data = request_json(request)
             assert data["base"] == "main"
             assert (repository, data["head"]) in self.branches
+            # GitHub keeps one open pull request per head and base
+            if any(p["head"]["ref"] == data["head"] and p["state"] == "open" for p in pulls):
+                return 422, b'{"message": "A pull request already exists"}'
             pull = self.pull(repository, data["head"], data["body"], title=data["title"])
             return 201, json.dumps(pull).encode()
         query = parse_qs(urlsplit(request.full_url).query)

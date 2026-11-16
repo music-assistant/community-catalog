@@ -60,11 +60,16 @@ class Provider:
         Return the GitHub handles of the maintainers, without @ and each once.
 
         They are the owner of the repository and the code owners in the manifest of the highest
-        version.
+        version that is offered: not blocked, and passed on a server line. Without such a version
+        the owner is the only one.
         """
-        newest = max(
-            self.versions.values(), key=lambda file: version_key(file.version), default=None
-        )
+        offered = [
+            file
+            for file in self.versions.values()
+            if file.version not in self.file.blocked_versions
+            and any(check.passed for check in file.checks.values())
+        ]
+        newest = max(offered, key=lambda file: version_key(file.version), default=None)
         codeowners = newest.manifest.get("codeowners", []) if newest else []
         handles = [self.file.repository.split("/", 1)[0]]
         handles += [owner.removeprefix("@") for owner in codeowners]

@@ -388,6 +388,23 @@ class GitHub:
         url = f"{refs}/heads/{urllib.parse.quote(branch)}"
         self._json(self._request(url, content, method="PATCH"))
 
+    def delete_branch(self, repository: str, branch: str) -> None:
+        """
+        Delete a branch, unless it is gone already.
+
+        :param repository: The repository, as owner/name.
+        :param branch: The name of the branch.
+        :raises GitHubError: GitHub refused the request.
+        """
+        url = f"{API_URL}/repos/{repository}/git/refs/heads/{urllib.parse.quote(branch)}"
+        status, answer = self._transport(self._request(url, method="DELETE"))
+        with answer:
+            body = _read(answer, 1000)
+        # 422 is the answer for a branch that does not exist
+        if status not in {204, 404, 422}:
+            msg = f"{url} answered {status}: {body[:500]!r}"
+            raise GitHubError(msg)
+
     def put_file(
         self, repository: str, branch: str, path: str, content: bytes, message: str
     ) -> None:

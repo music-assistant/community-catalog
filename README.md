@@ -79,7 +79,8 @@ after a new release). When everything passes, the bot opens the pull request tha
 provider, and a registry maintainer decides once, against the
 [rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md), about
 what the provider does. Merging that pull request admits it; its first release reaches the
-servers after the next nightly check.
+servers after the next nightly check. Closing your issue withdraws the submission and closes its
+pull request.
 
 ## Releasing updates
 

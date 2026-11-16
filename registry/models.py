@@ -251,6 +251,8 @@ class AdmissionReport(StrictModel):
     # when the checks ran
     checked: str
     findings: list[Finding]
+    # the digest of the text of the issue that was checked
+    issue_digest: str
     # what was checked, as far as the submission got: the repository as owner/name, the domain
     # of its provider and the latest release
     repository: str | None = None
