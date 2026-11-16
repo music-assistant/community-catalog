@@ -8,10 +8,20 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from registry.admission import COMMENT_MARKER
 from registry.cli import main
 from registry.content import read_folder
+from registry.github import COMMENTS_PER_PAGE, GitHub
 from registry.registry import load_registry
-from tests.conftest import COMMIT, DOMAIN, ICON, build_archive, manifest, write_tree
+from tests.conftest import (
+    COMMIT,
+    DOMAIN,
+    ICON,
+    FakeGitHub,
+    build_archive,
+    manifest,
+    write_tree,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -369,8 +379,80 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
             "results": [{"domain": DOMAIN, "version": "1.0.0", "passed": True}],
         },
     )
-    assert _run(files, "check-admission", results) == 0
-    assert "Every check passed." in capsys.readouterr().out
+    comment = files.root / "comment.md"
+    assert _run(files, "check-admission", results, "--comment", str(comment)) == 0
+    out = capsys.readouterr().out
+    assert "Every check passed." in out
+    assert comment.read_text() == out.removesuffix("\n")
+
+
+def test_check_admission_without_the_prepare_step(
+    files: Files, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without the files of the prepare step the result says the checks could not run."""
+    comment = files.root / "comment.md"
+    run_url = "https://github.com/music-assistant/community-catalog/actions/runs/1"
+
+    code = _run(files, "check-admission", str(files.root / "results"), "--comment",
+                str(comment), "--run-url", run_url)  # fmt: skip
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "warning: the admission checks did not run: " in captured.err
+    assert "The admission checks could not run" in captured.out
+    assert comment.read_text() == captured.out.removesuffix("\n")
+    assert f"[The run of these checks]({run_url})" in comment.read_text()
+
+
+def test_prepare_admission_of_a_pull_request_that_is_no_admission(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused pull request ends the prepare step well, with the refusal in its report."""
+    github = FakeGitHub()
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
+    changed = files.root / "changed.txt"
+    changed.write_text(f"providers/{DOMAIN}/provider.json\n.github/workflows/ci.yml\n")
+
+    code = _run(files, "prepare-admission", "--repository", "music-assistant/community-catalog",
+                "--commit", COMMIT, "--changed", str(changed), "--author", "someone")  # fmt: skip
+
+    assert code == 0
+    assert 'refused: "a pull request for admission adds or changes' in capsys.readouterr().out
+    report = json.loads((files.root / "work" / "admission.json").read_text())
+    assert report["domain"] is None
+    assert "this one changes 2 file(s)" in report["refusal"]
+    assert json.loads((files.root / "work" / "plan.json").read_text()) == {"lines": {}}
+    assert github.requests == []
+
+
+def test_post_admission_comment(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The result is one comment of the workflow on the pull request, updated on every run."""
+    github = FakeGitHub()
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
+    repository = "music-assistant/community-catalog"
+    # the marker in a comment of someone else, and a full first page of other comments
+    others = [
+        {"id": 1000 + number, "user": {"login": "someone"}, "body": f"{COMMENT_MARKER} no"}
+        for number in range(COMMENTS_PER_PAGE)
+    ]
+    github.comments[repository, 11] = list(others)
+    comment = files.root / "comment.md"
+    args = ("post-admission-comment", str(comment), "--repository", repository,
+            "--pull-request", "11")  # fmt: skip
+
+    comment.write_text("## Admission checks\n\nfirst\n")
+    assert _run(files, *args) == 0
+    comment.write_text("## Admission checks\n\nsecond\n")
+    assert _run(files, *args) == 0
+
+    [ours] = github.comments[repository, 11][COMMENTS_PER_PAGE:]
+    assert ours["body"] == f"{COMMENT_MARKER}\n## Admission checks\n\nsecond\n"
+    assert github.comments[repository, 11][:COMMENTS_PER_PAGE] == others
+    assert capsys.readouterr().out.count(ours["html_url"]) == 2
 
 
 def test_a_manifest_beyond_the_limits_is_refused_everywhere(

@@ -1,11 +1,15 @@
 name: Admission
 
-# The automated checks for a pull request that adds or changes a provider.json. The decision
-# stays with a person. The code that runs is the code of the base branch; the pull request only
-# provides its provider.json, and provider code runs in the server images without any token.
+# The automated checks for a pull request that adds or changes a provider.json, reported in one
+# comment on the pull request. The decision stays with a person. This workflow file and the code
+# that runs are those of main, also for a pull request from a fork, so the pull request cannot
+# change them: the pull request only provides its provider.json, which the registry reads through
+# the API as data, and provider code runs in the server images without any token.
 
 on:
-  pull_request:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
     paths: ["providers/*/provider.json"]
 
 permissions: {}
@@ -20,6 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      # to read the provider.json at the head commit of the pull request
       contents: read
       # to list the files the pull request changes
       pull-requests: read
@@ -29,12 +34,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha }}
-          persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
-          ref: ${{ github.event.pull_request.head.sha }}
-          path: pull-request
           persist-credentials: false
       # the files go to the command as data; it refuses anything but one provider.json
       - name: List the files the pull request changes
@@ -52,10 +51,12 @@ jobs:
       - name: Check the repository and fetch the latest release
         env:
           AUTHOR: ${{ github.event.pull_request.user.login }}
+          COMMIT: ${{ github.event.pull_request.head.sha }}
           GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
         run: >-
-          uv run --no-dev python -m registry prepare-admission --pull-request pull-request
-          --changed "$RUNNER_TEMP/changed.txt" --author "$AUTHOR"
+          uv run --no-dev python -m registry prepare-admission --repository "$REPOSITORY"
+          --commit "$COMMIT" --changed "$RUNNER_TEMP/changed.txt" --author "$AUTHOR"
       - name: List the server lines
         id: lines
         run: |
@@ -107,11 +108,14 @@ jobs:
   result:
     name: Admission checks
     needs: [prepare, check]
-    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    # also when the prepare step failed, to say that the checks could not run
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
+      # to write the result as a comment on the pull request
+      pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -121,18 +125,34 @@ jobs:
         with:
           enable-cache: false
       - run: uv sync --locked --no-dev
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      - if: needs.prepare.result == 'success'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: admission
           path: ${{ runner.temp }}/admission
-      - run: cp -R "$RUNNER_TEMP/admission/work" work
+      - if: needs.prepare.result == 'success'
+        run: cp -R "$RUNNER_TEMP/admission/work" work
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: results-*
           merge-multiple: true
           path: results
+      # the results files are data from containers that ran provider code, read only as data
       - name: Print the result
         shell: bash
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: >-
           uv run --no-dev python -m registry check-admission results
+          --comment "$RUNNER_TEMP/comment.md" --run-url "$RUN_URL"
           | tee -a "$GITHUB_STEP_SUMMARY"
+      # also when not every check passed
+      - name: Write the result as a comment on the pull request
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: >-
+          uv run --no-dev python -m registry post-admission-comment "$RUNNER_TEMP/comment.md"
+          --repository "$REPOSITORY" --pull-request "$NUMBER"

@@ -8,7 +8,12 @@ import os
 import sys
 from pathlib import Path
 
-from registry.admission import check_admission, prepare_admission
+from registry.admission import (
+    COMMENT_MARKER,
+    admission_comment,
+    check_admission,
+    prepare_admission,
+)
 from registry.edit import (
     CommandError,
     add_version,
@@ -55,6 +60,8 @@ from registry.reserved import add_server_domains
 
 # the token the commands that talk to GitHub read from the environment
 TOKEN_VARIABLE = "GITHUB_TOKEN"  # noqa: S105 - the name, not a token
+# the account of the token of a workflow, which writes the comment of the admission checks
+ACTIONS_LOGIN = "github-actions[bot]"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -251,8 +258,9 @@ def _prepare_admission(args: argparse.Namespace) -> None:
     changed = args.changed.read_text(encoding="utf-8").splitlines()
     report = prepare_admission(
         args.root,
-        args.pull_request,
         changed,
+        repository=args.repository,
+        commit=args.commit,
         author=args.author,
         github=GitHub(_token()),
         work=args.work,
@@ -260,6 +268,8 @@ def _prepare_admission(args: argparse.Namespace) -> None:
     path = args.work / ADMISSION_REPORT
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(dumps(report.to_dict()))
+    if report.refusal is not None:
+        print(f"refused: {report.refusal!r}")
     for finding in report.findings:
         detail = f": {finding.detail!r}" if finding.detail is not None else ""
         print(f"{'passed' if finding.passed else 'failed'}: {finding.text}{detail}")
@@ -267,11 +277,29 @@ def _prepare_admission(args: argparse.Namespace) -> None:
 
 def _check_admission(args: argparse.Namespace) -> int:
     """Print the result of the admission checks of a provider, with the checks of its release."""
-    report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
-    results = read_results(args.results, read_plan(args.work))
-    passed, text = check_admission(load_registry(args.root), report, results)
+    report: AdmissionReport | None = None
+    results: list[LineResults] = []
+    try:
+        report = _load(args.work / ADMISSION_REPORT, AdmissionReport)
+        results = read_results(args.results, read_plan(args.work))
+    except CommandError as err:
+        print(f"warning: the admission checks did not run: {err}", file=sys.stderr)
+        report = None
+    passed, text = check_admission(load_registry(args.root), report, results, args.run_url)
     print(text)
+    if args.comment is not None:
+        args.comment.write_text(admission_comment(text, args.run_url), encoding="utf-8")
     return 0 if passed else 1
+
+
+def _post_admission_comment(args: argparse.Namespace) -> None:
+    """Write the result of the admission checks as the one comment of them on a pull request."""
+    body = args.comment.read_text(encoding="utf-8")
+    github = GitHub(_token())
+    url = github.set_comment(
+        args.repository, args.pull_request, body, marker=COMMENT_MARKER, author=ACTIONS_LOGIN
+    )
+    print(url)
 
 
 def _set_status(args: argparse.Namespace) -> None:
@@ -414,7 +442,10 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
         "prepare-admission", help=_prepare_admission.__doc__, parents=[work]
     )
     command.add_argument(
-        "--pull-request", type=Path, required=True, help="a checkout of the pull request"
+        "--repository", required=True, help="the repository of the registry, as owner/name"
+    )
+    command.add_argument(
+        "--commit", required=True, help="the full SHA of the head commit of the pull request"
     )
     command.add_argument(
         "--changed",
@@ -427,7 +458,21 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
 
     command = commands.add_parser("check-admission", help=_check_admission.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")
+    command.add_argument(
+        "--comment", type=Path, help="a file to write the result into as a comment"
+    )
+    command.add_argument("--run-url", help="the address of the workflow run, to link to")
     command.set_defaults(run=_check_admission)
+
+    command = commands.add_parser("post-admission-comment", help=_post_admission_comment.__doc__)
+    command.add_argument("comment", type=Path, help="the file check-admission wrote")
+    command.add_argument(
+        "--repository", required=True, help="the repository of the pull request, as owner/name"
+    )
+    command.add_argument(
+        "--pull-request", type=int, required=True, help="the number of the pull request"
+    )
+    command.set_defaults(run=_post_admission_comment)
 
     command = commands.add_parser("set-status", help=_set_status.__doc__)
     command.add_argument("domain")

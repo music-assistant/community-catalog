@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import io
+import itertools
 import json
 import os
 import re
@@ -14,7 +17,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, BinaryIO
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
 
@@ -271,7 +274,12 @@ class FakeGitHub:
         # the issues that exist, as (owner/name, author, key)
         self.issues: set[tuple[str, str, str]] = set()
         self.created: list[tuple[str, dict[str, Any]]] = []
+        # what the contents API answers for a path, by (owner/name, path, commit)
+        self.contents: dict[tuple[str, str, str], Any] = {}
+        # the comments of each issue or pull request, by (owner/name, number)
+        self.comments: dict[tuple[str, int], list[dict[str, Any]]] = {}
         self.requests: list[urllib.request.Request] = []
+        self._ids = itertools.count(1)
 
     def repository(
         self,
@@ -314,6 +322,8 @@ class FakeGitHub:
             owner, name, _, commit = url.removeprefix("https://codeload.github.com/").split("/")
             archive = self.archives.get((f"{owner}/{name}", commit))
             return (200, archive) if archive is not None else (404, b"Not Found")
+        if url.startswith("https://api.github.com/repos/"):
+            return self._repository_api(request)
         if url == "https://api.github.com/user":
             return 200, json.dumps({"login": self.LOGIN}).encode()
         if url.startswith("https://api.github.com/search/issues?"):
@@ -323,13 +333,48 @@ class FakeGitHub:
             key, repository, author = found.groups()
             count = int((repository, author, key) in self.issues)
             return 200, json.dumps({"total_count": count}).encode()
-        if url.startswith("https://api.github.com/repos/") and url.endswith("/issues"):
+        return 404, b"{}"
+
+    def _repository_api(self, request: urllib.request.Request) -> tuple[int, bytes]:
+        """Answer for a file of a repository, open an issue, or list, add or update a comment."""
+        url, method = request.full_url, request.get_method()
+        if url.endswith("/issues"):
             repository = url.removeprefix("https://api.github.com/repos/").removesuffix("/issues")
             self.created.append((repository, request_json(request)))
             return 201, json.dumps(
                 {"html_url": f"https://github.com/{repository}/issues/1"}
             ).encode()
-        return 404, b"{}"
+        if found := re.fullmatch(
+            r"https://api\.github\.com/repos/([\w-]+/[\w-]+)/contents/(.+)", url
+        ):
+            path, _, commit = found[2].partition("?ref=")
+            content = self.contents.get((found[1], unquote(path), commit))
+            return (404, b"{}") if content is None else (200, json.dumps(content).encode())
+        if found := re.fullmatch(r"https://api\.github\.com/repos/.+/issues/comments/(\d+)", url):
+            assert method == "PATCH"
+            [comment] = [
+                c for c in itertools.chain(*self.comments.values()) if c["id"] == int(found[1])
+            ]
+            comment["body"] = request_json(request)["body"]
+            return 200, json.dumps(comment).encode()
+        found = re.fullmatch(
+            r"https://api\.github\.com/repos/([\w-]+/[\w-]+)/issues/(\d+)/comments\b.*", url
+        )
+        assert found is not None, url
+        repository, number = found[1], int(found[2])
+        comments = self.comments.setdefault((repository, number), [])
+        if method == "POST":
+            comment = {
+                "id": next(self._ids),
+                "user": {"login": "github-actions[bot]"},
+                "body": request_json(request)["body"],
+                "html_url": f"https://github.com/{repository}/pull/{number}#c{len(comments)}",
+            }
+            comments.append(comment)
+            return 201, json.dumps(comment).encode()
+        query = parse_qs(urlsplit(url).query)
+        size, page = int(query["per_page"][0]), int(query["page"][0])
+        return 200, json.dumps(comments[(page - 1) * size : page * size]).encode()
 
     def _graphql(self, request: urllib.request.Request) -> dict[str, Any]:
         """Answer a GraphQL query for repositories, by the variables it passes."""
@@ -386,6 +431,27 @@ def release(
         "isPrerelease": prerelease,
         "publishedAt": None if draft else published,
         "tagCommit": {"oid": commit},
+    }
+
+
+def contents(path: str, content: bytes, **changes: Any) -> dict[str, Any]:
+    """
+    Return a regular file as the contents API answers it.
+
+    :param path: The path of the file in the repository.
+    :param content: The content of the file.
+    :param changes: Fields of the answer to set.
+    """
+    blob = f"blob {len(content)}\0".encode() + content
+    return {
+        "type": "file",
+        "path": path,
+        "name": PurePosixPath(path).name,
+        "size": len(content),
+        "sha": hashlib.sha1(blob, usedforsecurity=False).hexdigest(),
+        "encoding": "base64",
+        "content": base64.b64encode(content).decode(),
+        **changes,
     }
 
 

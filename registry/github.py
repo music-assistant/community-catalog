@@ -1,8 +1,11 @@
-"""The requests the registry makes to GitHub: releases, archives and issues."""
+"""The requests the registry makes to GitHub: releases, archives, files, issues and comments."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
+import itertools
 import json
 import urllib.error
 import urllib.parse
@@ -28,6 +31,8 @@ BATCH_SIZE = 50
 RELEASES_PER_REPOSITORY = 30
 # the largest archive of a commit that is downloaded; a larger one is refused
 MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
+# the comments read per request, the most GitHub answers
+COMMENTS_PER_PAGE = 100
 # far more than any answer of the API the registry asks for
 _MAX_ANSWER_SIZE = 10 * 1024 * 1024
 _CHUNK_SIZE = 64 * 1024
@@ -60,6 +65,14 @@ class GitHubError(OSError):
 
 class ArchiveTooLargeError(GitHubError):
     """The archive of a commit is larger than the registry downloads."""
+
+
+class NotFoundError(GitHubError):
+    """GitHub answered that what was asked for does not exist."""
+
+
+class NotAFileError(GitHubError):
+    """A path of a repository is no regular file the registry reads; the message says why."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,6 +205,82 @@ class GitHub:
         finally:
             partial.unlink(missing_ok=True)
 
+    def file(self, repository: str, path: str, commit: str, max_size: int) -> bytes:
+        """
+        Return the content of a regular file of a repository at a commit.
+
+        :param repository: The repository, as owner/name.
+        :param path: The path of the file in the repository.
+        :param commit: The full SHA of the commit.
+        :param max_size: The largest file that is read, in bytes.
+        :raises NotAFileError: The path is no regular file of at most max_size bytes at the
+            commit: it does not exist, or is a folder, a symbolic link or a larger file.
+        :raises GitHubError: GitHub could not answer.
+        """
+        if not is_commit(commit):
+            msg = f"{commit!r} is not a commit"
+            raise GitHubError(msg)
+        quoted = urllib.parse.quote(path)
+        url = f"{API_URL}/repos/{repository}/contents/{quoted}?ref={commit}"
+        try:
+            found = self._answer(self._request(url))
+        except NotFoundError as err:
+            msg = f"{path} does not exist at commit {commit}"
+            raise NotAFileError(msg) from err
+        # a folder is answered as a list of its entries
+        if not isinstance(found, dict) or found.get("type") != "file" or found.get("path") != path:
+            msg = f"{path} is no regular file at commit {commit}"
+            raise NotAFileError(msg)
+        if type(size := found.get("size")) is not int or size > max_size:
+            msg = f"{path} is larger than {max_size} bytes at commit {commit}"
+            raise NotAFileError(msg)
+        try:
+            content = base64.b64decode(found["content"])
+        except (KeyError, TypeError, ValueError) as err:
+            msg = f"{url} answered a file that cannot be read: {err!r}"
+            raise GitHubError(msg) from err
+        # for a symbolic link to a file the API answers the content of that file, with the
+        # object id of the link itself
+        if found.get("sha") != _blob_id(content):
+            msg = f"{path} is a symbolic link at commit {commit}"
+            raise NotAFileError(msg)
+        return content
+
+    def set_comment(
+        self, repository: str, number: int, body: str, *, marker: str, author: str
+    ) -> str:
+        """
+        Update the comment of an account that starts with a marker, or add it; return its address.
+
+        The comment is on an issue or a pull request, and its text is the marker and the body.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue or pull request.
+        :param body: The text of the comment, in Markdown.
+        :param marker: What the comment starts with, such as an HTML comment.
+        :param author: The account of the token, whose comment is updated.
+        :raises GitHubError: GitHub refused a request.
+        """
+        content = json.dumps({"body": f"{marker}\n{body}"}).encode()
+        comments = f"{API_URL}/repos/{repository}/issues/{number}/comments"
+        for page in itertools.count(1):
+            url = f"{comments}?per_page={COMMENTS_PER_PAGE}&page={page}"
+            listed = self._answer(self._request(url))
+            if not isinstance(listed, list):
+                msg = f"{url} answered no list"
+                raise GitHubError(msg)
+            for comment in listed:
+                if _is_comment(comment, author, marker):
+                    request = self._request(
+                        f"{API_URL}/repos/{repository}/issues/comments/{comment['id']}",
+                        content,
+                        method="PATCH",
+                    )
+                    return str(self._json(request).get("html_url"))
+            if len(listed) < COMMENTS_PER_PAGE:
+                break
+        return str(self._json(self._request(comments, content), expected=201).get("html_url"))
+
     def login(self) -> str:
         """
         Return the handle of the account the token belongs to.
@@ -265,43 +354,62 @@ class GitHub:
 
         :param request: The request.
         :param expected: The status of a successful answer.
+        :raises NotFoundError: GitHub answered that it does not exist.
         :raises GitHubError: GitHub answered another status or no JSON object.
+        """
+        data = self._answer(request, expected)
+        if not isinstance(data, dict):
+            msg = f"{request.full_url} answered no JSON object"
+            raise GitHubError(msg)
+        return data
+
+    def _answer(self, request: urllib.request.Request, expected: int = 200) -> Any:
+        """
+        Send a request to the API and return the JSON it answers.
+
+        :param request: The request.
+        :param expected: The status of a successful answer.
+        :raises NotFoundError: GitHub answered that it does not exist.
+        :raises GitHubError: GitHub answered another status or no JSON.
         """
         status, answer = self._transport(request)
         with answer:
             body = _read(answer, _MAX_ANSWER_SIZE + 1)
         if status != expected:
             msg = f"{request.full_url} answered {status}: {body[:500]!r}"
-            raise GitHubError(msg)
+            raise (NotFoundError if status == 404 else GitHubError)(msg)  # noqa: PLR2004
         if len(body) > _MAX_ANSWER_SIZE:
             msg = f"{request.full_url} answered more than {_MAX_ANSWER_SIZE} bytes"
             raise GitHubError(msg)
         try:
-            data = json.loads(body)
+            return json.loads(body)
         except ValueError as err:
             msg = f"{request.full_url} answered no JSON: {err}"
             raise GitHubError(msg) from err
-        if not isinstance(data, dict):
-            msg = f"{request.full_url} answered no JSON object"
-            raise GitHubError(msg)
-        return data
 
     def _request(
-        self, url: str, content: bytes | None = None, *, authenticated: bool = True
+        self,
+        url: str,
+        content: bytes | None = None,
+        *,
+        authenticated: bool = True,
+        method: str | None = None,
     ) -> urllib.request.Request:
         """
-        Return a request to GitHub, a POST when it has content.
+        Return a request to GitHub, a POST when it has content and no other method.
 
         :param url: The address.
         :param content: The JSON body.
         :param authenticated: Whether to send the token.
+        :param method: The HTTP method.
         """
         headers = {"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"}
         if authenticated and self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         if content is not None:
             headers["Content-Type"] = "application/json"
-        return urllib.request.Request(url, content, headers)  # noqa: S310 - https only
+        # https only
+        return urllib.request.Request(url, content, headers, method=method)  # noqa: S310
 
 
 def post_issue(issue: Issue, github: GitHub) -> str | None:
@@ -352,6 +460,26 @@ def _repository(node: dict[str, Any]) -> RepositoryInfo:
     except (KeyError, TypeError, AttributeError) as err:
         msg = f"GitHub answered a repository that cannot be read: {err!r}"
         raise GitHubError(msg) from err
+
+
+def _blob_id(content: bytes) -> str:
+    """Return the object id git gives a file with this content."""
+    header = f"blob {len(content)}\0".encode()
+    return hashlib.sha1(header + content, usedforsecurity=False).hexdigest()
+
+
+def _is_comment(comment: object, author: str, marker: str) -> bool:
+    """Return whether a comment as the API answers it is by an account and starts with a marker."""
+    if not isinstance(comment, dict):
+        return False
+    user, body = comment.get("user"), comment.get("body")
+    return (
+        isinstance(user, dict)
+        and type(comment.get("id")) is int
+        and user.get("login") == author
+        and isinstance(body, str)
+        and body.startswith(marker)
+    )
 
 
 def _id(value: object) -> int:

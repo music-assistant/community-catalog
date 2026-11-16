@@ -227,8 +227,9 @@ The commands of the release pipeline, which the workflows run:
 | `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. |
 | `report <folder>` | Writes an issue for every failed check, every refused release and every repository that is not the admitted one into the work folder. |
 | `post-issues` | Opens those issues, each one unless the same account opened an issue with its key. Needs `GITHUB_TOKEN`. |
-| `prepare-admission --pull-request <checkout> --changed <file> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file and the plan. `--changed` lists the files the pull request changes. Needs `GITHUB_TOKEN`. |
-| `check-admission <folder>` | Prints the result of the admission checks with the check results of the latest release. |
+| `prepare-admission --repository <owner/name> --commit <sha> --changed <file> --author <handle>` | The admission checks that need GitHub, and the latest release as a version file and the plan. `--changed` lists the files the pull request changes; the `provider.json` is read through the API at the head commit of the pull request. A pull request that is no admission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
+| `check-admission <folder> [--comment <file>] [--run-url <url>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the pull request. |
+| `post-admission-comment <file> --repository <owner/name> --pull-request <number>` | Writes that comment on the pull request, or updates the one an earlier run wrote. Needs `GITHUB_TOKEN`. |
 | `check-changes <file>` | Fails when a pull request adds or changes a version file or a refusal; the file lists the changed paths, separated by NUL characters. |
 
 The work folder is `work/` in the root unless `--work` names another. It is never committed.
@@ -365,8 +366,11 @@ CI runs the same checks on the provider's checkout, in one container.
 ## Admission
 
 A provider is admitted by a pull request that adds its `provider.json`. The workflow
-`admission.yml` runs the code of the base branch, takes only the `provider.json` of the pull
-request, and checks:
+`admission.yml` runs on `pull_request_target`: the workflow file and the code that run are
+those of `main`, also for a pull request from a fork, and they run without waiting for an
+approval. Nothing of the pull request is checked out or run; its `provider.json` is read
+through the API, at the head commit of the pull request, as data, and only when the pull
+request changes that one file and it is a regular file of at most 64 KiB. It checks:
 
 - that the pull request changes nothing but that one `provider.json`;
 - that `provider.json` is valid and its domain is free: not reserved, and not taken (a pull
@@ -378,8 +382,11 @@ request, and checks:
   repository or is a code owner in the manifest of its latest release;
 - that the latest release becomes a version and passes the checks on at least one line.
 
-It prints the result in the job summary, for the person who decides and for Bot-MArley, with
-everything the provider controls shown as code. A pull request that changes the status, reason,
+It writes the result in the job summary, for the person who decides and for Bot-MArley, and as
+one comment on the pull request, which every run updates: what was checked and what happens
+next, also when the pull request is no admission or the checks could not run. Everything the
+provider or the pull request controls is shown as code. Only the last job can write, and only
+to pull requests, with the workflow's own token. A pull request that changes the status, reason,
 blocked versions, repository, ids or maintainers of an existing provider is never passed: a
 registry maintainer decides on it. CI refuses a pull request that adds or changes a version file
 or a refusal, which only the pipeline writes.

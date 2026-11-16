@@ -30,19 +30,19 @@ by an owner of the `music-assistant` organisation.
       GitHub Actions to create and approve pull requests" off.
 - [ ] Settings → Actions → General: require actions to be pinned to a full-length commit SHA.
 - [ ] Settings → Actions → General → "Approval for running fork pull request workflows from
-      contributors": **Require approval for all external contributors**.
+      contributors": **Require approval for first-time contributors who are new to GitHub**
+      (`first_time_contributors_new_to_github` in the API).
 - [ ] Settings → Security: enable private vulnerability reporting, Dependabot alerts and
       Dependabot security updates.
 
-A pull request from a fork runs the workflow files of that pull request, not those of `main`.
-Its author can therefore change `admission.yml` or `ci.yml` in the same pull request and make
-the admission checks or CI print whatever they like, a pass included. Those runs get only a
-read-only token and no secrets, so they cannot write anything, but their verdict cannot be
-trusted on its own. What closes it: the approval above, so a registry maintainer sees the
-changed files before any workflow of an outside contributor runs, and the code owner review of
-the ruleset, so nothing is merged without a registry maintainer, who sees a change to
-`.github/` or `registry/` in the pull request. An admission pull request changes one
-`provider.json` and nothing else; anything more is a reason to look closely.
+Admission always runs the workflow file and the code of `main` (`pull_request_target`), so a
+pull request cannot change what checks it and its verdict can be trusted. CI of a pull request
+from a fork still runs the workflow file of that pull request, with a read-only token and no
+secrets: it cannot write anything, but its author can change `ci.yml` in the same pull request
+and make it pass, so its green check proves nothing for a pull request that touches `.github/`
+or `registry/`. The code owner review of the ruleset covers that: nothing is merged without a
+registry maintainer, who sees such a change in the pull request. An admission pull request that
+changes anything besides its one `provider.json` is refused by Admission.
 
 ## Release pipeline
 
@@ -69,9 +69,9 @@ the ruleset, so nothing is merged without a registry maintainer, who sees a chan
 - [ ] Check that the server images of the lines in `server_lines.json` can be pulled without
       logging in (`docker pull ghcr.io/music-assistant/server:nightly`).
 
-The other workflows need nothing beyond their own `GITHUB_TOKEN`: Admission reads the files of
-the pull request and the public data of the provider's repository, and the check jobs have no
-token at all.
+The other workflows need nothing beyond their own `GITHUB_TOKEN`: Admission reads the
+`provider.json` of the pull request and the public data of the provider's repository, and writes
+its comment on the pull request with that token; the check jobs have no token at all.
 
 ## What only a run on GitHub can settle
 

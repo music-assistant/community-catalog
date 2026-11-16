@@ -67,10 +67,7 @@ def read_object(path: Path) -> dict[str, Any]:
         an object.
     :raises OSError: The file cannot be read.
     """
-    data = loads(path.read_bytes())
-    if not isinstance(data, dict):
-        raise ValueError("not a JSON object")
-    return data
+    return _object(path.read_bytes())
 
 
 def load_model[T: StrictModel](path: Path, model: type[T]) -> T:
@@ -82,11 +79,35 @@ def load_model[T: StrictModel](path: Path, model: type[T]) -> T:
     :raises ValueError: The file does not hold exactly this model; the message says where.
     :raises OSError: The file cannot be read.
     """
-    data = read_object(path)
+    return parse_model(path.read_bytes(), model)
+
+
+def parse_model[T: StrictModel](content: bytes, model: type[T]) -> T:
+    """
+    Return the model in the content of a JSON file.
+
+    :param content: The content of the file.
+    :param model: The model the file holds.
+    :raises ValueError: The content is not exactly this model; the message says where.
+    """
+    data = _object(content)
     try:
         return model.from_dict(data)
     except (ValueError, TypeError, LookupError) as err:
         raise ValueError(_describe(err)) from err
+
+
+def _object(content: bytes) -> dict[str, Any]:
+    """
+    Return the JSON object in the content of a file.
+
+    :param content: The content.
+    :raises ValueError: It is not plain JSON (see loads), or holds something else than an object.
+    """
+    data = loads(content)
+    if not isinstance(data, dict):
+        raise ValueError("not a JSON object")
+    return data
 
 
 def _describe(err: BaseException) -> str:

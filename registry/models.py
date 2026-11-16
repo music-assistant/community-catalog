@@ -256,13 +256,16 @@ class Finding(StrictModel):
 class AdmissionReport(StrictModel):
     """`admission.json`: the admission checks of a provider before its versions are checked."""
 
-    domain: str
+    # None for a pull request that is refused
+    domain: str | None
     findings: list[Finding]
     # the version of the latest release, when it became a version file
     version: str | None = None
     # the keys of an existing provider the pull request changes that only a registry maintainer
     # changes, such as its status or repository
     maintainer_keys: list[str] = field(default_factory=list)
+    # why the pull request is no admission, so nothing was checked
+    refusal: str | None = None
 
 
 @dataclass
