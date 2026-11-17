@@ -25,9 +25,7 @@ def test_a_link_to_github_is_percent_encoded(tag: str, path: str) -> None:
     """Every part of the path is percent-encoded, and the text stays code."""
     link = github_link(tag, REPOSITORY, f"releases/tag/{tag}")
 
-    assert link == (
-        f"[{code_span(tag)}](https://github.com/{REPOSITORY}/releases/tag/{path})"
-    )
+    assert link == f"[{code_span(tag)}](https://github.com/{REPOSITORY}/releases/tag/{path})"
 
 
 @pytest.mark.parametrize(
