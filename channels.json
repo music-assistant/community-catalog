@@ -1,5 +1,9 @@
 {
   "channels": {
+    "2.11": {
+      "frozen": false,
+      "image": "ghcr.io/music-assistant/server:beta"
+    },
     "beta": {
       "frozen": false,
       "image": "ghcr.io/music-assistant/server:beta"
