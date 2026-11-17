@@ -1,0 +1,35 @@
+{
+  "channel": "2.11",
+  "generated": "2026-11-17T20:49:02Z",
+  "providers": {
+    "test_tones": {
+      "added": "2026-11-15T11:21:01Z",
+      "blocked_versions": {},
+      "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#00897b\"/><path fill=\"none\" stroke=\"#fff\" stroke-width=\"2\" stroke-linecap=\"round\" d=\"M4 12q2-10 4 0t4 0 4 0 4 0\"/></svg>\n",
+      "latest": null,
+      "maintainers": [
+        "marcelveldt"
+      ],
+      "manifest": {
+        "codeowners": [
+          "@marcelveldt"
+        ],
+        "description": "Test tones to check your speakers: left and right, low and high tones, a sweep and pink noise.",
+        "documentation": "https://github.com/marcelveldt/ma-test-tones#readme",
+        "domain": "test_tones",
+        "multi_instance": false,
+        "name": "Test Tones",
+        "requirements": [],
+        "stage": "beta",
+        "type": "music"
+      },
+      "reason": null,
+      "reason_url": null,
+      "repository": "marcelveldt/ma-test-tones",
+      "status": "listed",
+      "versions": {}
+    }
+  },
+  "schema": 1,
+  "server_line": "2.11"
+}
