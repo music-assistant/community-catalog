@@ -378,7 +378,7 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     out = capsys.readouterr().out
     assert "- ✅ The domain is free: ` sample_music `" in out
     assert "- ❌ Failed on the nightly channel: ` load: x `" in out
-    assert "- ❌ The checks did not run on the beta channel" in out
+    assert "- ⚪ Not checked on the beta channel" in out
     files.write(
         f"results/beta/{DOMAIN}-1.0.0.json",
         {

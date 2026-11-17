@@ -15,9 +15,9 @@ from registry.checks import check_provider, reserved_reason
 from registry.edit import CommandError, now
 from registry.fetch import newest_release, repository_state, take_release
 from registry.files import dumps
-from registry.formats import format_date, release_version
+from registry.formats import format_date, is_commit, release_version
 from registry.github import ArchiveTooLargeError, GitHubError
-from registry.markdown import code_block, code_span
+from registry.markdown import code_block, code_span, github_link
 from registry.models import AdmissionReport, CheckPlan, Finding, ProviderFile
 from registry.pipeline import make_plan, write_plan
 from registry.registry import PROVIDER_FILE, PROVIDERS_FOLDER, InvalidRegistryError, load_registry
@@ -139,7 +139,7 @@ def check_admission(
     The result is for the submitter and for the registry maintainer who decides: what was
     checked, and what happens next. The latest release passes when it passed on at least one
     channel that is tested. Everything the issue, the repository or the release holds is
-    shown as code.
+    shown as code; the repository, the release and the commit link to GitHub.
 
     :param registry: The registry, for its channels.
     :param report: The admission checks of the prepare step, None when they could not run.
@@ -165,7 +165,7 @@ def check_admission(
         )
         refusal = code_block(report.refusal or "")
         return False, f"{_TITLE}\n\n{what}{intro}\n\n{refusal}\n{advice}\n{link}"
-    findings = list(report.findings)
+    rows = [_row(finding) for finding in report.findings]
     passed_on_a_channel = False
     # without every requirement met, the release is not checked on any channel
     if report.version is not None and all(finding.passed for finding in report.findings):
@@ -182,14 +182,13 @@ def check_admission(
                 continue
             name = formats.channel_name(channel)
             if channel not in by_channel:
-                findings.append(Finding(passed=False, text=f"The checks did not run on {name}"))
+                rows.append(f"- ⚪ Not checked on {name}\n")
                 continue
             passed, reason = by_channel[channel]
             text = f"Passed on {name}" if passed else f"Failed on {name}"
-            findings.append(Finding(passed=passed, text=text, detail=reason))
+            rows.append(_row(Finding(passed=passed, text=text, detail=reason)))
             passed_on_a_channel = passed_on_a_channel or passed
     passed = passed_on_a_channel and all(finding.passed for finding in report.findings)
-    rows = "".join(_row(finding) for finding in findings)
     if passed:
         verdict = _proposal_verdict(proposal, proposal_failed=proposal_failed, run_url=run_url)
     else:
@@ -198,7 +197,7 @@ def check_admission(
             "it after you publish a new release; the checks then run again."
         )
     title = f"{_TITLE} for {code_span(report.domain)}"
-    return passed, f"{title}\n\n{what}{rows}\n{verdict}\n{link}"
+    return passed, f"{title}\n\n{what}{''.join(rows)}\n{verdict}\n{link}"
 
 
 def admission_comment(result: str, run_url: str | None = None) -> str:
@@ -315,7 +314,8 @@ def propose_admission(
     )[1]
     body = (
         f"{marker}\nCloses #{issue}\n\nAdds {code_span(path)}: "
-        f"{code_span(report.name or provider.domain)} from {code_span(provider.repository)}."
+        f"{code_span(report.name or provider.domain)} from "
+        f"{github_link(provider.repository, provider.repository)}."
         f"\n\n{admission_comment(result, run_url)}"
     )
     url = github.create_pull_request(
@@ -585,9 +585,18 @@ def _proposal_verdict(
 
 def _what(report: AdmissionReport) -> str:
     """Return a paragraph that says what was checked and when, as far as the checks got."""
-    parts = [f"repository {code_span(report.repository)}"] if report.repository else []
+    repository = report.repository or ""
+    parts = [f"repository {github_link(repository, repository)}"] if repository else []
     if report.tag is not None and report.commit is not None:
-        parts.append(f"release {code_span(report.tag)} (commit {code_span(report.commit)})")
+        release = github_link(report.tag, repository, f"releases/tag/{report.tag}")
+        if not is_commit(report.commit):
+            commit = code_span(report.commit)
+        elif report.provider is not None:
+            page = f"tree/{report.commit}/{report.provider.folder}"
+            commit = github_link(report.commit, repository, page)
+        else:
+            commit = github_link(report.commit, repository, f"commit/{report.commit}")
+        parts.append(f"release {release} (commit {commit})")
     return f"Checked {report.checked}: {', '.join(parts) or 'the issue'}.\n\n"
 
 

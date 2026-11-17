@@ -434,8 +434,9 @@ Its jobs:
    changed issue, a conflict on the branch or a failed propose job says so instead. The job fails
    when the checks did not pass.
 
-Everything the issue, the repository or the release holds is shown as code. A registry
-maintainer reviews the provider against the
+Everything the issue, the repository or the release holds is shown as code; the repository, the
+release and the commit link to GitHub. A channel whose checks could not run shows as not checked,
+which is no failure. A registry maintainer reviews the provider against the
 [rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md) and
 decides by approving and merging the pull request. The next night the release pipeline takes its
 latest release.
