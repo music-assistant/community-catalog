@@ -2,14 +2,14 @@ name: Check a provider
 
 # A reusable workflow for the repository of a community provider: it runs the manifest,
 # dependency and load checks of the community catalog on the provider folder, in the server
-# image of the line you choose. Call it from a workflow on your pull requests:
+# image of the channel you choose. Call it from a workflow on your pull requests:
 #
 #   jobs:
 #     catalog:
 #       uses: music-assistant/community-catalog/.github/workflows/check-provider.yml@main
 #       with:
 #         folder: my_provider
-#         server-line: nightly
+#         channel: nightly
 
 on:
   workflow_call:
@@ -18,17 +18,23 @@ on:
         description: The provider folder in your repository, named after its domain or provider
         required: true
         type: string
-      server-line:
-        description: The server line to check against, as in server_lines.json of the catalog
+      channel:
+        description: The channel to check against (nightly by default), as in channels.json
         required: false
         type: string
-        default: nightly
+        default: ""
+      # the same as channel, for the workflows that pass it under this name
+      server-line:
+        description: The channel to check against, when channel is not given
+        required: false
+        type: string
+        default: ""
 
 permissions: {}
 
 jobs:
   check:
-    name: Community catalog checks on ${{ inputs.server-line }}
+    name: Community catalog checks on ${{ inputs.channel || inputs.server-line || 'nightly' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -47,11 +53,12 @@ jobs:
       - name: Find the server image
         id: image
         env:
-          LINE: ${{ inputs.server-line }}
+          CHANNEL: ${{ inputs.channel || inputs.server-line || 'nightly' }}
         run: |
-          image=$(jq -r --arg line "$LINE" '.lines[$line].image // empty' catalog/server_lines.json)
+          image=$(jq -r --arg channel "$CHANNEL" '.channels[$channel].image // empty' \
+            catalog/channels.json)
           if [ -z "$image" ]; then
-            echo "::error::$LINE is not a server line of the community catalog"
+            echo "::error::$CHANNEL is not a channel of the community catalog"
             exit 1
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"

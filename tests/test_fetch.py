@@ -84,7 +84,7 @@ def test_only_the_newest_release_becomes_a_version(files: Files, github: FakeGit
 
 
 def test_the_most_recently_published_release_counts(files: Files, github: FakeGitHub) -> None:
-    """A release for an older line, published after a higher version, is taken."""
+    """A release for an older channel, published after a higher version, is taken."""
     files.provider()
     files.version("2.0.0")
     github.repository(
@@ -104,7 +104,7 @@ def test_the_most_recently_published_release_counts(files: Files, github: FakeGi
 def test_a_known_newest_release_is_left_alone(files: Files, github: FakeGitHub) -> None:
     """When the newest release has a version file, an older release without one is not taken."""
     files.provider()
-    files.version("1.2.0", commit=COMMIT_2, lines={"nightly": False, "beta": False})
+    files.version("1.2.0", commit=COMMIT_2, channels={"nightly": False, "beta": False})
     github.repository(
         REPOSITORY,
         [
@@ -117,7 +117,7 @@ def test_a_known_newest_release_is_left_alone(files: Files, github: FakeGitHub) 
     _fetch(files, github)
 
     assert set(load_registry(files.root).providers[DOMAIN].versions) == {"1.2.0"}
-    # only to check the known version again, as it passes on no line
+    # only to check the known version again, as it passes on no channel
     assert _downloads(github) == [f"https://codeload.github.com/{REPOSITORY}/tar.gz/{COMMIT_2}"]
 
 
@@ -214,14 +214,14 @@ def test_blocked_and_missing_repositories(
 
 
 def test_archives_of_the_versions_to_check(files: Files, github: FakeGitHub) -> None:
-    """The latest version of each line and versions without a result are downloaded too."""
+    """The latest version of each channel and versions without a result are downloaded too."""
     files.provider()
     # the latest on nightly, without a result for beta
-    files.version("1.2.0", commit=COMMIT_3, lines={"nightly": True})
+    files.version("1.2.0", commit=COMMIT_3, channels={"nightly": True})
     # the latest on beta
-    files.version("1.1.0", commit=COMMIT_2, lines={"nightly": True, "beta": True})
-    # below the latest on both lines
-    files.version("1.0.0", commit=COMMIT_1, lines={"nightly": True, "beta": False})
+    files.version("1.1.0", commit=COMMIT_2, channels={"nightly": True, "beta": True})
+    # below the latest on both channels
+    files.version("1.0.0", commit=COMMIT_1, channels={"nightly": True, "beta": False})
     github.repository(REPOSITORY, [release("v1.2.0", COMMIT_3)])
     for commit in (COMMIT_1, COMMIT_2, COMMIT_3):
         github.archives[REPOSITORY, commit] = provider_archive()
@@ -233,7 +233,9 @@ def test_archives_of_the_versions_to_check(files: Files, github: FakeGitHub) -> 
     assert archive_path(work, DOMAIN, "1.1.0").is_file()
     assert not archive_path(work, DOMAIN, "1.0.0").exists()
     plan = load_model(work / PLAN_FILE, CheckPlan)
-    assert {line: [(e.domain, e.version) for e in v] for line, v in plan.lines.items()} == {
+    assert {
+        channel: [(e.domain, e.version) for e in v] for channel, v in plan.channels.items()
+    } == {
         "beta": [(DOMAIN, "1.1.0"), (DOMAIN, "1.2.0")],
         "nightly": [(DOMAIN, "1.2.0")],
     }
@@ -268,7 +270,7 @@ def test_a_repository_that_is_not_the_admitted_one_is_skipped(
 ) -> None:
     """Whoever holds the name of a repository with other ids releases nothing into the index."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True})
+    files.version("1.0.0", channels={"nightly": True})
     files.provider("other_music", repository="someone/other", folder="other_music")
     github.repository(REPOSITORY, [release("v1.1.0", COMMIT_1)], databaseId=999)
     github.repository("someone/other", [release("v1.0.0", COMMIT_2)])
@@ -286,7 +288,7 @@ def test_a_repository_that_is_not_the_admitted_one_is_skipped(
         capsys.readouterr().err
     )
     plan = load_model(files.root / "work" / PLAN_FILE, CheckPlan)
-    assert all(entry.domain != DOMAIN for entries in plan.lines.values() for entry in entries)
+    assert all(entry.domain != DOMAIN for entries in plan.channels.values() for entry in entries)
 
 
 def test_one_repository_that_cannot_be_read_does_not_stop_the_others(
@@ -341,7 +343,7 @@ def test_a_download_that_breaks_off_does_not_stop_the_others(
     """An archive whose download breaks off is tried again tomorrow; the rest goes on."""
     files.provider()
     files.provider("other_music", repository="someone/other", folder="other_music")
-    files.version("1.0.0", "other_music", commit=COMMIT_3, folder="other_music", lines={})
+    files.version("1.0.0", "other_music", commit=COMMIT_3, folder="other_music", channels={})
     github.repository(REPOSITORY, [release("v1.0.0", COMMIT_1)])
     github.repository("someone/other", [release("v2.0.0", COMMIT_2)])
     github.archives[REPOSITORY, COMMIT_1] = provider_archive()

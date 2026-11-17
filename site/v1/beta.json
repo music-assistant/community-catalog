@@ -1,5 +1,6 @@
 {
-  "generated": "2026-11-15T11:26:00Z",
+  "channel": "beta",
+  "generated": "2026-11-17T17:16:55Z",
   "providers": {
     "test_tones": {
       "added": "2026-11-15T11:21:01Z",

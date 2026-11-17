@@ -165,7 +165,7 @@ def test_record_check_refuses_a_reason_that_is_not_one_line(
 ) -> None:
     """A reason is one line of at most 300 printable characters, and plain JSON."""
     files.provider()
-    path = files.version(lines={})
+    path = files.version(channels={})
     before = path.read_bytes()
 
     assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", reason) == 1
@@ -194,15 +194,15 @@ def test_add_version_leaves_out_an_icon_that_is_not_allowed(
 
 
 def test_record_check(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
-    """The result of a line is recorded and replaced; a line that is not listed is refused."""
+    """The result of a channel is recorded and replaced; a channel that is not listed is refused."""
     files.provider()
-    files.version(lines={})
+    files.version(channels={})
 
     assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--failed", "no import") == 0
     assert _run(files, "record-check", DOMAIN, "1.0.0", "beta", "--passed",
                 "--checked", "2026-11-02T03:00:00Z") == 0  # fmt: skip
     assert _run(files, "record-check", DOMAIN, "1.0.0", "2.10", "--passed") == 1
-    assert "checks: '2.10' is not a line in server_lines.json" in capsys.readouterr().err
+    assert "checks: '2.10' is not a channel in channels.json" in capsys.readouterr().err
 
     checks = load_registry(files.root).providers[DOMAIN].versions["1.0.0"].checks
     assert (checks["nightly"].passed, checks["nightly"].reason) == (False, "no import")
@@ -275,7 +275,7 @@ def test_a_symbolic_link_in_the_registry_is_refused(
         {"providers/new_one/__init__.py": b"", "controllers/new_core/__init__.py": b""},
     )
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     assert _run(files, "build") == 0
     # a change every command would write
     files.version("1.1.0")
@@ -356,7 +356,7 @@ def test_block_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None
 def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
     """The result of the admission is printed, and the exit code says whether it passed."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     report = {
         "checked": "2026-11-15T02:00:00Z",
         "issue_digest": "",
@@ -366,23 +366,23 @@ def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> No
     }
     files.write("work/admission.json", report)
     entry = [{"domain": DOMAIN, "version": "1.0.0"}]
-    files.write("work/plan.json", {"lines": {"nightly": entry, "beta": entry}})
+    files.write("work/plan.json", {"channels": {"nightly": entry, "beta": entry}})
     failed = {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": "load: x"}
     files.write(
         f"results/nightly/{DOMAIN}-1.0.0.json",
-        {"line": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [failed]},
+        {"channel": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [failed]},
     )
     results = str(files.root / "results")
 
     assert _run(files, "check-admission", results) == 1
     out = capsys.readouterr().out
     assert "- ✅ The domain is free: ` sample_music `" in out
-    assert "- ❌ nightly: failed: ` load: x `" in out
-    assert "- ❌ beta: the checks did not run" in out
+    assert "- ❌ Failed on the nightly channel: ` load: x `" in out
+    assert "- ❌ The checks did not run on the beta channel" in out
     files.write(
         f"results/beta/{DOMAIN}-1.0.0.json",
         {
-            "line": "beta",
+            "channel": "beta",
             "checked": "2026-11-15T03:00:00Z",
             "results": [{"domain": DOMAIN, "version": "1.0.0", "passed": True}],
         },
@@ -443,7 +443,7 @@ def test_prepare_admission_of_an_issue_that_is_no_submission(
     assert "refused: '#7 is no issue with the label submission'" in capsys.readouterr().out
     report = json.loads((files.root / "work" / "admission.json").read_text())
     assert report["domain"] is None
-    assert json.loads((files.root / "work" / "plan.json").read_text()) == {"lines": {}}
+    assert json.loads((files.root / "work" / "plan.json").read_text()) == {"channels": {}}
     assert [request.full_url for request in github.requests] == [
         f"https://api.github.com/repos/{REGISTRY}/issues/7"
     ]
@@ -505,20 +505,20 @@ def test_an_index_beyond_the_limit_is_refused(
     monkeypatch.setattr("registry.index.MAX_INDEX_SIZE", 1000)
 
     assert _run(files, "build") == 1
-    assert "site/v1/nightly.json: 1199 bytes, more than" in capsys.readouterr().err
+    assert "site/v1/nightly.json: 1223 bytes, more than" in capsys.readouterr().err
     assert _run(files, "validate") == 1
     assert "more than the 1000 bytes a server is sure to download" in capsys.readouterr().err
 
 
-def test_blocks_and_withdrawals_reach_a_frozen_line(files: Files) -> None:
-    """A frozen line is no longer checked, while a block or a withdrawal still reach its index."""
+def test_blocks_and_withdrawals_reach_a_frozen_channel(files: Files) -> None:
+    """A frozen channel is not checked, while a block or a withdrawal still reach its index."""
     files.write(
-        "server_lines.json",
-        {"lines": {"2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True}}},
+        "channels.json",
+        {"channels": {"2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True}}},
     )
     files.provider()
-    files.version("1.0.0", lines={"2.11": True})
-    files.version("1.1.0", lines={"2.11": True})
+    files.version("1.0.0", channels={"2.11": True})
+    files.version("1.1.0", channels={"2.11": True})
     index = files.root / "site" / "v1" / "2.11.json"
 
     assert _run(files, "block-version", DOMAIN, "1.1.0", "--reason", "Sends data elsewhere") == 0

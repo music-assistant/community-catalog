@@ -15,7 +15,7 @@ def add_server_domains(reserved: ReservedDomains, server: Path) -> ReservedDomai
     """
     Return the reserved domains with the built-in providers and core controllers of a server added.
 
-    Domains are only added, so running it against every supported server line reserves what
+    Domains are only added, so running it against every supported channel reserves what
     any of them ships.
 
     :param reserved: The current reserved domains.

@@ -1,4 +1,4 @@
-"""The index of each server line, built from the files of the registry."""
+"""The index of each channel, built from the files of the registry."""
 
 from __future__ import annotations
 
@@ -16,29 +16,30 @@ if TYPE_CHECKING:
     from registry.models import VersionFile
     from registry.registry import Provider, Registry
 
-# how many versions of a provider the index of a line lists
+# how many versions of a provider the index of a channel lists
 LISTED_VERSIONS = 5
 # a server gives up on an index it cannot download within 10 seconds, and keeps its old copy
 MAX_INDEX_SIZE = 4 * 1024 * 1024
 
 
-def build_index(registry: Registry, line: str, generated: str) -> CatalogIndex:
+def build_index(registry: Registry, channel: str, generated: str) -> CatalogIndex:
     """
-    Return the index of a server line.
+    Return the index of a channel.
 
     Every provider with a version file is in it, also a blocked or withdrawn one, so a server
     still recognises what it has installed.
 
     :param registry: The registry.
-    :param line: The server line.
+    :param channel: The channel.
     :param generated: When the index was generated.
     """
     return CatalogIndex(
         schema=INDEX_SCHEMA,
-        server_line=line,
+        channel=channel,
+        server_line=channel,
         generated=generated,
         providers={
-            domain: _index_provider(provider, line)
+            domain: _index_provider(provider, channel)
             for domain, provider in sorted(registry.providers.items())
             if provider.versions
         },
@@ -47,7 +48,7 @@ def build_index(registry: Registry, line: str, generated: str) -> CatalogIndex:
 
 def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
     """
-    Return the content of the index file of every server line.
+    Return the content of the index file of every channel.
 
     An index whose providers are as in its current file keeps that file's generated date, so
     an unchanged registry gives the same bytes.
@@ -58,20 +59,20 @@ def render_indexes(registry: Registry, now: datetime) -> dict[Path, bytes]:
         than a server downloads in time.
     """
     result: dict[Path, bytes] = {}
-    for line in sorted(registry.server_lines):
-        path = registry.root / INDEX_FOLDER / f"{line}.json"
-        index = build_index(registry, line, format_date(now)).to_dict()
+    for channel in sorted(registry.channels):
+        path = registry.root / INDEX_FOLDER / f"{channel}.json"
+        index = build_index(registry, channel, format_date(now)).to_dict()
         current = _read_current(path)
         if current is not None and _without_generated(current) == _without_generated(index):
             index["generated"] = current["generated"]
         try:
             result[path] = dumps(index)
         except ValueError as err:
-            raise InvalidRegistryError([f"{INDEX_FOLDER}/{line}.json: {err}"]) from err
+            raise InvalidRegistryError([f"{INDEX_FOLDER}/{channel}.json: {err}"]) from err
         if (size := len(result[path])) > MAX_INDEX_SIZE:
             msg = (
-                f"{INDEX_FOLDER}/{line}.json: {size} bytes, more than the {MAX_INDEX_SIZE} bytes "
-                "a server is sure to download within its 10 seconds"
+                f"{INDEX_FOLDER}/{channel}.json: {size} bytes, more than the {MAX_INDEX_SIZE} "
+                "bytes a server is sure to download within its 10 seconds"
             )
             raise InvalidRegistryError([msg])
     return result
@@ -95,19 +96,19 @@ def stale_index_files(registry: Registry, rendered: dict[Path, bytes]) -> list[s
     site = registry.root / SITE_FOLDER
     index_folder = registry.root / INDEX_FOLDER
     problems += [
-        f"{path.relative_to(registry.root).as_posix()}: is no index of a line in server_lines.json"
+        f"{path.relative_to(registry.root).as_posix()}: is no index of a channel in channels.json"
         for path in sorted(site.rglob("*") if site.is_dir() else [])
         if path != index_folder and not (path in rendered and path.is_file())
     ]
     return problems
 
 
-def _index_provider(provider: Provider, line: str) -> IndexProvider:
+def _index_provider(provider: Provider, channel: str) -> IndexProvider:
     """
-    Return a provider as the index of a line lists it.
+    Return a provider as the index of a channel lists it.
 
     :param provider: The provider, with at least one version.
-    :param line: The server line.
+    :param channel: The channel.
     """
     file = provider.file
     newest_first = sorted(
@@ -117,10 +118,10 @@ def _index_provider(provider: Provider, line: str) -> IndexProvider:
     passed = [
         version
         for version in allowed
-        if (result := version.checks.get(line)) is not None and result.passed
+        if (result := version.checks.get(channel)) is not None and result.passed
     ]
     latest = passed[0] if passed else None
-    # without a version for this line the app still shows the provider, by its newest version
+    # without a version for this channel the app still shows the provider, by its newest version
     # that is not blocked; a provider with only blocked versions stays in the index all the same
     shown = latest or (allowed or newest_first)[0]
     return IndexProvider(

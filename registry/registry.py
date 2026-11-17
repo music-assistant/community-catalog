@@ -5,29 +5,29 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from registry.checks import check_provider, check_refused, check_server_lines, check_version
+from registry.checks import check_channels, check_provider, check_refused, check_version
 from registry.files import load_model
 from registry.formats import is_github_handle, version_key
 from registry.models import (
+    Channels,
     ProviderFile,
     RefusedRelease,
     ReservedDomains,
-    ServerLines,
     VersionFile,
 )
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from registry.models import ServerLine, StrictModel
+    from registry.models import Channel, StrictModel
 
 PROVIDERS_FOLDER = "providers"
 PROVIDER_FILE = "provider.json"
 VERSIONS_FOLDER = "versions"
 REFUSED_FOLDER = "refused"
-SERVER_LINES_FILE = "server_lines.json"
+CHANNELS_FILE = "channels.json"
 RESERVED_DOMAINS_FILE = "reserved_domains.json"
-# the folder that is published; a server reads <published address>/v1/<line>.json
+# the folder that is published; a server reads <published address>/v1/<channel>.json
 SITE_FOLDER = "site"
 INDEX_FOLDER = "site/v1"
 
@@ -60,7 +60,7 @@ class Provider:
         Return the GitHub handles of the maintainers, without @ and each once.
 
         They are the owner of the repository and the code owners in the manifest of the highest
-        version that is offered: not blocked, and passed on a server line. Without such a version
+        version that is offered: not blocked, and passed on a channel. Without such a version
         the owner is the only one.
         """
         offered = [
@@ -87,7 +87,7 @@ class Registry:
     """The content of the registry, every file of it valid."""
 
     root: Path
-    server_lines: dict[str, ServerLine]
+    channels: dict[str, Channel]
     reserved: ReservedDomains
     # by domain
     providers: dict[str, Provider]
@@ -119,30 +119,30 @@ def load_registry(root: Path) -> Registry:
     :raises InvalidRegistryError: A file is missing or not exactly as expected.
     """
     problems: list[str] = []
-    lines = _load(root, root / SERVER_LINES_FILE, ServerLines, problems)
-    if lines is not None:
-        problems += [f"{SERVER_LINES_FILE}: {problem}" for problem in check_server_lines(lines)]
+    channels = _load(root, root / CHANNELS_FILE, Channels, problems)
+    if channels is not None:
+        problems += [f"{CHANNELS_FILE}: {problem}" for problem in check_channels(channels)]
     reserved = _load(root, root / RESERVED_DOMAINS_FILE, ReservedDomains, problems)
-    if lines is None or reserved is None:
+    if channels is None or reserved is None:
         raise InvalidRegistryError(problems)
     # the commands write below these paths, which a link would lead out of the registry
     written = [PROVIDERS_FOLDER, SITE_FOLDER, INDEX_FOLDER]
-    written += [f"{INDEX_FOLDER}/{line}.json" for line in sorted(lines.lines)]
+    written += [f"{INDEX_FOLDER}/{channel}.json" for channel in sorted(channels.channels)]
     problems += [f"{path}: is a symbolic link" for path in written if (root / path).is_symlink()]
     providers: dict[str, Provider] = {}
     folder = root / PROVIDERS_FOLDER
     for path in _entries(folder):
-        if provider := _load_provider(root, path, lines.lines, reserved, problems):
+        if provider := _load_provider(root, path, channels.channels, reserved, problems):
             providers[provider.file.domain] = provider
     if problems:
         raise InvalidRegistryError(problems)
-    return Registry(root, lines.lines, reserved, providers)
+    return Registry(root, channels.channels, reserved, providers)
 
 
 def _load_provider(
     root: Path,
     folder: Path,
-    lines: dict[str, ServerLine],
+    channels: dict[str, Channel],
     reserved: ReservedDomains,
     problems: list[str],
 ) -> Provider | None:
@@ -151,7 +151,7 @@ def _load_provider(
 
     :param root: The root folder of the registry.
     :param folder: The folder of the provider.
-    :param lines: The server lines an index is built for.
+    :param channels: The channels an index is built for.
     :param reserved: The domains the server ships or reserves.
     :param problems: The list to add problems to.
     """
@@ -177,7 +177,7 @@ def _load_provider(
         file = path.relative_to(root).as_posix()
         if version.version != path.stem:
             problems.append(f"{file}: version: {version.version} is not {path.stem}")
-        problems += [f"{file}: {p}" for p in check_version(version, provider, lines)]
+        problems += [f"{file}: {p}" for p in check_version(version, provider, channels)]
         versions[path.stem] = version
     refused: dict[str, RefusedRelease] = {}
     for path, release in _load_folder(

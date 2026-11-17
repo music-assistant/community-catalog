@@ -1,4 +1,4 @@
-"""Tests for the index of each server line."""
+"""Tests for the index of each channel."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 11, 14, 8, 0, tzinfo=UTC)
 # the fields of CatalogIndex, IndexProvider and IndexVersion in
 # music_assistant/controllers/community_catalog/models.py of the server
-SERVER_INDEX_FIELDS = {"schema", "server_line", "generated", "providers"}
+SERVER_INDEX_FIELDS = {"schema", "channel", "server_line", "generated", "providers"}
 SERVER_PROVIDER_FIELDS = {
     "status",
     "repository",
@@ -36,9 +36,9 @@ SERVER_PROVIDER_FIELDS = {
 SERVER_VERSION_FIELDS = {"commit", "folder", "content_hash", "requirements", "released"}
 
 
-def _index(files: Files, line: str = "nightly") -> dict[str, Any]:
-    """Return the index of a line as a server reads it."""
-    return build_index(load_registry(files.root), line, "2026-11-14T08:00:00Z").to_dict()
+def _index(files: Files, channel: str = "nightly") -> dict[str, Any]:
+    """Return the index of a channel as a server reads it."""
+    return build_index(load_registry(files.root), channel, "2026-11-14T08:00:00Z").to_dict()
 
 
 def test_index_has_the_shape_the_server_reads(files: Files) -> None:
@@ -50,7 +50,7 @@ def test_index_has_the_shape_the_server_reads(files: Files) -> None:
 
     assert set(index) == SERVER_INDEX_FIELDS
     assert index["schema"] == 1
-    assert index["server_line"] == "nightly"
+    assert index["channel"] == index["server_line"] == "nightly"
     provider = index["providers"][DOMAIN]
     assert set(provider) == SERVER_PROVIDER_FIELDS
     assert set(provider["versions"]["1.0.0"]) == SERVER_VERSION_FIELDS
@@ -78,13 +78,13 @@ def test_index_has_the_shape_the_server_reads(files: Files) -> None:
 
 
 def test_maintainers_are_the_owner_and_the_code_owners(files: Files) -> None:
-    """The owner and the code owners of the highest version, each once, on every line."""
+    """The owner and the code owners of the highest version, each once, on every channel."""
     requirements = ["some-package==1.0"]
     files.provider(repository="Someone/ma-sample")
     files.version("1.0.0", manifest={**manifest(DOMAIN, requirements), "codeowners": ["@old"]})
     codeowners = ["@someone", "@another", "@Another", "@music-assistant/core", "@third"]
     newest = {**manifest(DOMAIN, requirements), "codeowners": codeowners}
-    files.version("1.10.0", lines={"beta": True}, manifest=newest)
+    files.version("1.10.0", channels={"beta": True}, manifest=newest)
 
     expected = ["Someone", "another", "third"]
     assert _index(files)["providers"][DOMAIN]["maintainers"] == expected
@@ -99,12 +99,12 @@ def test_code_owners_come_from_a_version_that_is_offered(files: Files) -> None:
         return {**manifest(DOMAIN, requirements), "codeowners": list(handles)}
 
     files.provider(blocked_versions={"9.0.0": "Sends the library elsewhere"})
-    files.version("9.0.0", lines={"nightly": True}, manifest=owners("@victim"))
-    files.version("8.0.0", lines={"nightly": False, "beta": False}, manifest=owners("@another"))
-    files.version("1.0.0", lines={"beta": True}, manifest=owners("@first"))
+    files.version("9.0.0", channels={"nightly": True}, manifest=owners("@victim"))
+    files.version("8.0.0", channels={"nightly": False, "beta": False}, manifest=owners("@another"))
+    files.version("1.0.0", channels={"beta": True}, manifest=owners("@first"))
 
     assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone", "first"]
-    files.version("1.0.0", lines={}, manifest=owners("@first"))
+    files.version("1.0.0", channels={}, manifest=owners("@first"))
     assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone"]
 
 
@@ -117,12 +117,12 @@ def test_latest_is_the_highest_version_not_the_newest_text_or_date(files: Files)
     assert _index(files)["providers"][DOMAIN]["latest"] == "1.10.0"
 
 
-def test_only_versions_that_passed_for_the_line(files: Files) -> None:
-    """A line lists the versions that passed for it; the manifest and icon are of its latest."""
+def test_only_versions_that_passed_for_the_channel(files: Files) -> None:
+    """A channel lists the versions that passed for it; the manifest and icon are of its latest."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True, "beta": True})
-    files.version("2.0.0", lines={"nightly": True, "beta": False}, icon_svg=None)
-    files.version("3.0.0", lines={})
+    files.version("1.0.0", channels={"nightly": True, "beta": True})
+    files.version("2.0.0", channels={"nightly": True, "beta": False}, icon_svg=None)
+    files.version("3.0.0", channels={})
 
     nightly = _index(files, "nightly")["providers"][DOMAIN]
     beta = _index(files, "beta")["providers"][DOMAIN]
@@ -134,7 +134,7 @@ def test_only_versions_that_passed_for_the_line(files: Files) -> None:
 
 
 def test_the_five_highest_versions(files: Files) -> None:
-    """A line lists the five highest versions that passed for it."""
+    """A channel lists the five highest versions that passed for it."""
     files.provider()
     for minor in range(12):
         files.version(f"1.{minor}.0")
@@ -176,11 +176,11 @@ def test_blocked_and_withdrawn_providers_keep_their_versions(files: Files) -> No
     assert providers["other_music"]["latest"] == "1.0.0"
 
 
-def test_a_provider_without_a_version_for_the_line(files: Files) -> None:
-    """A provider without a version for a line is shown by its newest version, with no latest."""
+def test_a_provider_without_a_version_for_the_channel(files: Files) -> None:
+    """A provider without a version for a channel is shown by its newest version, with no latest."""
     files.provider()
-    files.version("1.0.0", lines={"beta": True})
-    files.version("2.0.0", lines={"beta": False}, manifest=manifest(), requirements=[])
+    files.version("1.0.0", channels={"beta": True})
+    files.version("2.0.0", channels={"beta": False}, manifest=manifest(), requirements=[])
 
     provider = _index(files)["providers"][DOMAIN]
 
@@ -189,13 +189,13 @@ def test_a_provider_without_a_version_for_the_line(files: Files) -> None:
     assert provider["manifest"] == manifest()
 
 
-def test_a_provider_without_a_version_for_the_line_is_not_shown_by_a_blocked_one(
+def test_a_provider_without_a_version_for_the_channel_is_not_shown_by_a_blocked_one(
     files: Files,
 ) -> None:
     """The newest version that is not blocked shows the provider; the newest when all are."""
     files.provider(blocked_versions={"2.0.0": "Sends the library elsewhere"})
-    files.version("1.0.0", lines={"beta": True})
-    files.version("2.0.0", lines={"nightly": False}, manifest=manifest(), requirements=[])
+    files.version("1.0.0", channels={"beta": True})
+    files.version("2.0.0", channels={"nightly": False}, manifest=manifest(), requirements=[])
 
     provider = _index(files)["providers"][DOMAIN]
 
@@ -232,13 +232,13 @@ def test_indexes_are_deterministic(files: Files) -> None:
 
 
 def test_a_changed_index_gets_a_new_date(files: Files) -> None:
-    """An index whose providers change is generated anew; the index of another line is not."""
+    """An index whose providers change is generated anew; the index of another channel is not."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True, "beta": True})
+    files.version("1.0.0", channels={"nightly": True, "beta": True})
     for path, content in render_indexes(load_registry(files.root), NOW).items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    files.version("1.1.0", lines={"nightly": True})
+    files.version("1.1.0", channels={"nightly": True})
     registry = load_registry(files.root)
 
     later = render_indexes(registry, NOW + timedelta(days=1))
@@ -252,7 +252,7 @@ def test_a_changed_index_gets_a_new_date(files: Files) -> None:
 
 
 def test_missing_and_unexpected_index_files(files: Files) -> None:
-    """Every line has its index file, and the published folder holds nothing else."""
+    """Every channel has its index file, and the published folder holds nothing else."""
     files.write("site/v1/2.10.json", "{}")
     files.write("site/v1/.hidden", "x")
     files.write("site/index.html", "x")
@@ -263,12 +263,12 @@ def test_missing_and_unexpected_index_files(files: Files) -> None:
     assert stale_index_files(registry, render_indexes(registry, NOW)) == [
         "site/v1/beta.json: is missing",
         "site/v1/nightly.json: is missing",
-        "site/index.html: is no index of a line in server_lines.json",
-        "site/linked: is no index of a line in server_lines.json",
-        "site/v1/.hidden: is no index of a line in server_lines.json",
-        "site/v1/2.10.json: is no index of a line in server_lines.json",
-        "site/v2: is no index of a line in server_lines.json",
-        "site/v2/nightly.json: is no index of a line in server_lines.json",
+        "site/index.html: is no index of a channel in channels.json",
+        "site/linked: is no index of a channel in channels.json",
+        "site/v1/.hidden: is no index of a channel in channels.json",
+        "site/v1/2.10.json: is no index of a channel in channels.json",
+        "site/v2: is no index of a channel in channels.json",
+        "site/v2/nightly.json: is no index of a channel in channels.json",
     ]
 
 
@@ -276,14 +276,14 @@ def test_every_index_is_read_by_the_server_parser(files: Files) -> None:
     """Each index the registry can generate reads the same with orjson, the server's parser."""
     text = 'Ünïcødé 🎵 \u2028 \x00 \\ " </script>'
     files.provider(blocked_versions={"1.2.0": text})
-    for version, lines in {
+    for version, channels in {
         "1.0.0": {"nightly": True, "beta": True},
         "1.1.0": {"beta": False},
         "1.2.0": {"nightly": True},
         "1.3.0": {},
     }.items():
         data = {**manifest(), "name": text, "nested": [{"a": 1.5, "b": None, "c": 2**63}]}
-        files.version(version, lines=lines, manifest=data, requirements=[])
+        files.version(version, channels=channels, manifest=data, requirements=[])
     files.provider("withdrawn_one", status="withdrawn", reason=text)
     files.version(domain="withdrawn_one", icon_svg=None)
     files.provider(
@@ -293,7 +293,7 @@ def test_every_index_is_read_by_the_server_parser(files: Files) -> None:
         reason_url="https://x.org/1",
         blocked_versions={"1.0.0": "x"},
     )
-    files.version(domain="blocked_one", lines={"beta": False})
+    files.version(domain="blocked_one", channels={"beta": False})
 
     for path, content in render_indexes(load_registry(files.root), NOW).items():
         assert orjson.loads(content) == json.loads(content), path.name

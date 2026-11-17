@@ -38,7 +38,7 @@ jobs:
       # to read the issue
       issues: read
     outputs:
-      lines: ${{ steps.lines.outputs.lines }}
+      channels: ${{ steps.channels.outputs.channels }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -55,14 +55,14 @@ jobs:
         run: >-
           uv run --no-dev python -m registry prepare-admission --repository "$REPOSITORY"
           --issue "$ISSUE"
-      # only the lines the plan checks a version on; a submission that failed has an empty plan
-      - name: List the server lines
-        id: lines
+      # only the channels the plan checks a version on; a submission that failed has an empty plan
+      - name: List the channels
+        id: channels
         run: |
-          lines=$(jq -c --slurpfile plan work/plan.json '[.lines | to_entries[]
-            | select(.value.frozen != true and (($plan[0].lines[.key] // []) | length) > 0)
-            | {line: .key, image: .value.image}]' server_lines.json)
-          echo "lines=$lines" >> "$GITHUB_OUTPUT"
+          channels=$(jq -c --slurpfile plan work/plan.json '[.channels | to_entries[]
+            | select(.value.frozen != true and (($plan[0].channels[.key] // []) | length) > 0)
+            | {channel: .key, image: .value.image}]' channels.json)
+          echo "channels=$channels" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: admission
@@ -70,23 +70,23 @@ jobs:
             registry/
             scripts/
             providers/
-            server_lines.json
+            channels.json
             reserved_domains.json
             work/
           if-no-files-found: error
           retention-days: 7
 
   check:
-    name: Check on ${{ matrix.line }}
+    name: Check on ${{ matrix.channel }}
     needs: prepare
-    if: needs.prepare.outputs.lines != '[]'
+    if: needs.prepare.outputs.channels != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions: {}
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(needs.prepare.outputs.lines) }}
+        include: ${{ fromJSON(needs.prepare.outputs.channels) }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -96,11 +96,11 @@ jobs:
       - name: Run the checks in the server image
         env:
           IMAGE: ${{ matrix.image }}
-          LINE: ${{ matrix.line }}
-        run: bash catalog/scripts/check-line.sh catalog "$LINE" "$IMAGE" results
+          CHANNEL: ${{ matrix.channel }}
+        run: bash catalog/scripts/check-channel.sh catalog "$CHANNEL" "$IMAGE" results
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: results-${{ matrix.line }}
+          name: results-${{ matrix.channel }}
           path: results/
           if-no-files-found: ignore
           retention-days: 7

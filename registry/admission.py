@@ -31,7 +31,7 @@ from registry.submission import (
 
 if TYPE_CHECKING:
     from registry.github import GitHub, IssueInfo, PullRequest, Release, RepositoryInfo
-    from registry.models import LineResults
+    from registry.models import ChannelResults
     from registry.registry import Registry
 
 
@@ -120,14 +120,14 @@ def prepare_admission(
         report.refusal = str(err)
     # the release of a submission that failed a requirement is not checked: its code never runs
     admitted = report.version is not None and all(finding.passed for finding in report.findings)
-    write_plan(make_plan(load_registry(root), work) if admitted else CheckPlan(lines={}), work)
+    write_plan(make_plan(load_registry(root), work) if admitted else CheckPlan(channels={}), work)
     return report
 
 
 def check_admission(
     registry: Registry,
     report: AdmissionReport | None,
-    results: list[LineResults],
+    results: list[ChannelResults],
     *,
     run_url: str | None = None,
     proposal: Proposal | None = None,
@@ -138,10 +138,10 @@ def check_admission(
 
     The result is for the submitter and for the registry maintainer who decides: what was
     checked, and what happens next. The latest release passes when it passed on at least one
-    server line that is tested. Everything the issue, the repository or the release holds is
+    channel that is tested. Everything the issue, the repository or the release holds is
     shown as code.
 
-    :param registry: The registry, for its server lines.
+    :param registry: The registry, for its channels.
     :param report: The admission checks of the prepare step, None when they could not run.
     :param results: The results of the check step, as read_results returns them.
     :param run_url: The address of the workflow run, to link to.
@@ -166,28 +166,29 @@ def check_admission(
         refusal = code_block(report.refusal or "")
         return False, f"{_TITLE}\n\n{what}{intro}\n\n{refusal}\n{advice}\n{link}"
     findings = list(report.findings)
-    passed_on_a_line = False
-    # without every requirement met, the release is not checked on any line
+    passed_on_a_channel = False
+    # without every requirement met, the release is not checked on any channel
     if report.version is not None and all(finding.passed for finding in report.findings):
-        by_line = {
-            file.line: (result.passed, result.reason)
+        by_channel = {
+            file.channel: (result.passed, result.reason)
             for file in results
             for result in file.results
             # a check that could not run in the server image is no verdict on the release
             if (result.domain, result.version) == (report.domain, report.version)
             and not result.unavailable
         }
-        for line, config in sorted(registry.server_lines.items()):
+        for channel, config in sorted(registry.channels.items()):
             if config.frozen:
                 continue
-            if line not in by_line:
-                findings.append(Finding(passed=False, text=f"{line}: the checks did not run"))
+            name = formats.channel_name(channel)
+            if channel not in by_channel:
+                findings.append(Finding(passed=False, text=f"The checks did not run on {name}"))
                 continue
-            passed, reason = by_line[line]
-            text = f"{line}: passed" if passed else f"{line}: failed"
+            passed, reason = by_channel[channel]
+            text = f"Passed on {name}" if passed else f"Failed on {name}"
             findings.append(Finding(passed=passed, text=text, detail=reason))
-            passed_on_a_line = passed_on_a_line or passed
-    passed = passed_on_a_line and all(finding.passed for finding in report.findings)
+            passed_on_a_channel = passed_on_a_channel or passed
+    passed = passed_on_a_channel and all(finding.passed for finding in report.findings)
     rows = "".join(_row(finding) for finding in findings)
     if passed:
         verdict = _proposal_verdict(proposal, proposal_failed=proposal_failed, run_url=run_url)
@@ -218,7 +219,7 @@ def admission_comment(result: str, run_url: str | None = None) -> str:
 def propose_admission(
     registry: Registry,
     report: AdmissionReport | None,
-    results: list[LineResults],
+    results: list[ChannelResults],
     *,
     repository: str,
     issue: int,

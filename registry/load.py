@@ -41,7 +41,7 @@ async def _load(location: str, domain: str, cache: str) -> int:
     :param cache: The cache folder the requirements were installed in.
     """
     # what MusicAssistant.add_provider_location and the start of the catalog do, but in front:
-    # the image of a line still ships a provider that moves out of the server, and the code
+    # the image of a channel still ships a provider that moves out of the server, and the code
     # checked is the release's
     providers_package.__path__.insert(0, location)
     CommunityDependencies(SimpleNamespace(cache_path=cache)).activate()

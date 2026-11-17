@@ -1,7 +1,7 @@
 """
 The report step: one issue on the registry for each provider whose releases need attention.
 
-Also one issue for each server line whose checks cannot run, for the maintainers of the registry.
+Also one issue for each channel whose checks cannot run, for the maintainers of the registry.
 """
 
 from __future__ import annotations
@@ -10,16 +10,16 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from registry.formats import version_key
+from registry.formats import channel_name, version_key
 from registry.github import ACTIONS_LOGIN
 from registry.markdown import code_block, code_span
-from registry.models import Failure, LineReport, ProviderReport
+from registry.models import ChannelReport, Failure, ProviderReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
     from registry.github import GitHub, IssueInfo
-    from registry.models import FetchReport, LineResults, VersionResult
+    from registry.models import ChannelResults, FetchReport, VersionResult
     from registry.registry import Provider, Registry
 
 # the label of the issues of the release pipeline
@@ -36,8 +36,9 @@ _MAX_TEXT = 65_536
 _MAX_OUTPUT = 40_000
 # the first line of an issue or comment of the pipeline: the domain and the keys of its failures
 _MARKER = re.compile(r"<!-- release-check: ([a-z][a-z0-9_]*)((?:; [a-z0-9. ]+)*) -->")
-# the first line of an issue of the pipeline about a server line whose checks cannot run
-_LINE_MARKER = re.compile(r"<!-- release-check line: ([a-z0-9.]+) -->")
+# the first line of an issue of the pipeline about a channel whose checks cannot run; an open
+# issue may still name it with "line", which its next update replaces
+_CHANNEL_MARKER = re.compile(r"<!-- release-check (?:channel|line): ([a-z0-9.]+) -->")
 # a manifest name a title shows; any other name is left out of the title
 _TITLE_NAME = re.compile(r"[\w .,()&'+-]{1,60}")
 
@@ -52,13 +53,13 @@ class OpenIssue:
 
 
 def build_reports(
-    registry: Registry, fetched: FetchReport, results: list[LineResults]
+    registry: Registry, fetched: FetchReport, results: list[ChannelResults]
 ) -> list[ProviderReport]:
     """
     Return the report of every provider: its failures in this run not settled, and its state.
 
     The failures are the releases refused in this run, the versions that failed a check and a
-    repository that is not the admitted one. A failure is settled when is_settled says so. A line
+    repository that is not the admitted one. A failure is settled when is_settled says so. A channel
     whose checks could not run in this run counts as not tested.
 
     :param registry: The registry, with the refused releases of the fetch step.
@@ -66,18 +67,20 @@ def build_reports(
     :param results: The results of the check step, as read_results returns them.
     """
     unavailable = {
-        line.line for line in build_line_reports(registry, results) if line.reason is not None
+        channel.channel
+        for channel in build_channel_reports(registry, results)
+        if channel.reason is not None
     }
     tested = sorted(
-        line
-        for line, config in registry.server_lines.items()
-        if not config.frozen and line not in unavailable
+        channel
+        for channel, config in registry.channels.items()
+        if not config.frozen and channel not in unavailable
     )
     passed: dict[tuple[str, str, str], bool] = {
-        (domain, version, line): check.passed
+        (domain, version, channel): check.passed
         for domain, provider in registry.providers.items()
         for version, file in provider.versions.items()
-        for line, check in file.checks.items()
+        for channel, check in file.checks.items()
     }
     failures: dict[str, list[Failure]] = {}
     for refused in fetched.refused:
@@ -85,13 +88,13 @@ def build_reports(
             provider = registry.providers[refused.domain]
             failures.setdefault(refused.domain, []).append(_refusal(provider, refused.version))
     for file in results:
-        if file.line not in tested:
+        if file.channel not in tested:
             continue
         for result in file.results:
-            passed[result.domain, result.version, file.line] = result.passed
+            passed[result.domain, result.version, file.channel] = result.passed
             if not result.passed and result.domain in registry.providers:
                 provider = registry.providers[result.domain]
-                failure = _check_failure(provider, file.line, result)
+                failure = _check_failure(provider, file.channel, result)
                 failures.setdefault(result.domain, []).append(failure)
     reports: list[ProviderReport] = []
     for domain, provider in sorted(registry.providers.items()):
@@ -105,7 +108,7 @@ def build_reports(
             failures=[],
             newest=newest,
             tested=tested,
-            passed=[line for line in tested if passed.get((domain, newest or "", line))],
+            passed=[channel for channel in tested if passed.get((domain, newest or "", channel))],
             admitted=state is not None and (state.repository_id, state.owner_id) == ids,
         )
         found = failures.get(domain, [])
@@ -120,8 +123,8 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     """
     Return whether a failure of a provider no longer needs its maintainers.
 
-    That is when the newest version passed on a tested line, and also on the line of a failed
-    check, unless that line is not tested in this run; for a repository that was not the admitted
+    That is when the newest version passed on a tested channel, and also on the channel of a failed
+    check, unless that channel is not tested in this run; for a repository that was not the admitted
     one, GitHub must give the admitted one again.
 
     :param report: The report of the provider.
@@ -131,8 +134,8 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     if not report.passed:
         return False
     match kind, rest:
-        case "check", [_, line]:
-            return line in report.passed or line not in report.tested
+        case "check", [_, channel]:
+            return channel in report.passed or channel not in report.tested
         case "refused", [_]:
             return True
         case "repository", [_, _]:
@@ -140,22 +143,22 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     return False
 
 
-def build_line_reports(registry: Registry, results: list[LineResults]) -> list[LineReport]:
+def build_channel_reports(registry: Registry, results: list[ChannelResults]) -> list[ChannelReport]:
     """
-    Return whether the checks could run, for every tested server line with results in this run.
+    Return whether the checks could run, for every tested channel with results in this run.
 
     :param registry: The registry.
     :param results: The results of the check step, as read_results returns them.
     """
-    reports: dict[str, LineReport] = {}
+    reports: dict[str, ChannelReport] = {}
     for file in results:
-        if (config := registry.server_lines.get(file.line)) is None or config.frozen:
+        if (config := registry.channels.get(file.channel)) is None or config.frozen:
             continue
-        report = reports.setdefault(file.line, LineReport(line=file.line))
+        report = reports.setdefault(file.channel, ChannelReport(channel=file.channel))
         for result in file.results:
             if result.unavailable and report.reason is None:
                 report.reason, report.output = result.reason, result.output
-    return [reports[line] for line in sorted(reports)]
+    return [reports[channel] for channel in sorted(reports)]
 
 
 def open_issues(github: GitHub, repository: str) -> dict[str, OpenIssue | OSError]:
@@ -238,9 +241,9 @@ def post_report(
     return None
 
 
-def open_line_issues(github: GitHub, repository: str) -> dict[str, IssueInfo]:
+def open_channel_issues(github: GitHub, repository: str) -> dict[str, IssueInfo]:
     """
-    Return the open issue of the pipeline about each server line whose checks cannot run, by line.
+    Return the open issue of the pipeline about each channel whose checks cannot run, by channel.
 
     Only what the pipeline's own account wrote counts.
 
@@ -250,60 +253,62 @@ def open_line_issues(github: GitHub, repository: str) -> dict[str, IssueInfo]:
     """
     result: dict[str, IssueInfo] = {}
     for issue in sorted(github.issues(repository, LABEL), key=lambda issue: issue.number):
-        found = _LINE_MARKER.fullmatch(issue.body.split("\n", 1)[0])
+        found = _CHANNEL_MARKER.fullmatch(issue.body.split("\n", 1)[0])
         if issue.author == ACTIONS_LOGIN and found is not None:
             result.setdefault(found[1], issue)
     return result
 
 
-def post_line_report(
-    report: LineReport, issue: IssueInfo | None, github: GitHub, repository: str
+def post_channel_report(
+    report: ChannelReport, issue: IssueInfo | None, github: GitHub, repository: str
 ) -> str | None:
     """
-    Tell the maintainers of the registry that the checks cannot run on a server line.
+    Tell the maintainers of the registry that the checks cannot run on a channel.
 
-    A line whose checks cannot run gets an issue, whose text is kept up to date while they cannot;
-    once they run again, the issue is closed. Returns what was done, or None when nothing was.
+    A channel whose checks cannot run gets an issue, whose text is kept up to date while they
+    cannot; once they run again, the issue is closed. Returns what was done, or None when
+    nothing was.
 
-    :param report: The report of the line.
-    :param issue: The open issue of the pipeline about the line.
+    :param report: The report of the channel.
+    :param issue: The open issue of the pipeline about the channel.
     :param github: A client whose token may write issues on the registry.
     :param repository: The repository of the registry, as owner/name.
     :raises GitHubError: GitHub refused a request.
     """
-    line = report.line
+    channel = report.channel
+    name = channel_name(channel)
     if report.reason is None:
         if issue is None:
             return None
-        text = f"The checks run on the `{line}` line again, so this issue is closed."
+        text = f"The checks run on {name} again, so this issue is closed."
         github.add_comment(repository, issue.number, text)
         github.close_issue(repository, issue.number)
         return f"#{issue.number}: closed"
     failure = Failure(
-        key=f"line {line}",
-        heading=f"The checks cannot run in the server image of {line}",
+        key=f"channel {channel}",
+        heading=f"The checks cannot run in the server image of {name}",
         text=(
-            f"The checks of every version stopped in the server image of the `{line}` line, "
-            f"before any provider code ran:\n\n{code_block(report.reason)}\n"
-            f"Until this is fixed, no version gets a new result on this line: servers of the "
-            f"`{line}` line are offered only the versions that passed there before. The "
-            "maintainers of the providers are not told about this."
+            f"The checks of every version stopped in the server image of {name}, before any "
+            f"provider code ran:\n\n{code_block(report.reason)}\n"
+            f"Until this is fixed, no version gets a new result on {name}: servers on {name} are "
+            "offered only the versions that passed there before. The maintainers of the "
+            "providers are not told about this."
         ),
         output=report.output if report.output != report.reason else None,
     )
     body = _fit(
         lambda room: (
-            f"<!-- release-check line: {line} -->\n"
-            f"The Music Assistant community catalog cannot check releases on the `{line}` line. "
+            f"<!-- release-check channel: {channel} -->\n"
+            f"The Music Assistant community catalog cannot check releases on {name}. "
             f"This needs the attention of the maintainers of the catalog:\n\n"
             f"{_failures([failure], room)}### What to do\n\n"
-            "Make the checks of the catalog run in the server image of this line again. This "
+            "Make the checks of the catalog run in the server image of this channel again. This "
             "issue is kept up to date while the checks cannot run, and closes by itself once "
-            f"they run on the `{line}` line again.\n"
+            f"they run on {name} again.\n"
         )
     )
     if issue is None:
-        title = f"The release checks cannot run on the {line} line"
+        title = f"The release checks cannot run on {name}"
         return github.create_issue(repository, title, body, [LABEL])
     if issue.body == body:
         return None
@@ -311,26 +316,27 @@ def post_line_report(
     return f"#{issue.number}: updated"
 
 
-def _check_failure(provider: Provider, line: str, result: VersionResult) -> Failure:
-    """Return the failure of a version that failed the checks on a server line."""
+def _check_failure(provider: Provider, channel: str, result: VersionResult) -> Failure:
+    """Return the failure of a version that failed the checks on a channel."""
     version = result.version
     commit = provider.versions[version].commit
+    name = channel_name(channel)
     if result.passed_before:
-        heading = f"Version {version} no longer passes the checks on {line}"
+        heading = f"Version {version} no longer passes the checks on {name}"
         effect = (
-            f"It passed before. Servers of the `{line}` line get the newest version that still "
-            "passes there, if there is one."
+            f"It passed before. Servers on {name} get the newest version that still passes "
+            "there, if there is one."
         )
     else:
-        heading = f"Version {version} does not pass the checks on {line}"
-        effect = f"Servers of the `{line}` line are not offered this version."
+        heading = f"Version {version} does not pass the checks on {name}"
+        effect = f"Servers on {name} are not offered this version."
     text = (
-        f"Version {version} (commit `{commit}`) was checked in the server image of the `{line}` "
-        f"line, and did not pass:\n\n{code_block(result.reason or '')}\n{effect}"
+        f"Version {version} (commit `{commit}`) was checked in the server image of {name}, and "
+        f"did not pass:\n\n{code_block(result.reason or '')}\n{effect}"
     )
     output = result.output if result.output and result.output != result.reason else None
     return Failure(
-        key=f"check {version} {line}",
+        key=f"check {version} {channel}",
         heading=heading,
         text=text,
         output=output,

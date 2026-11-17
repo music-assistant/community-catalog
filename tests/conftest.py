@@ -91,7 +91,7 @@ def provider_file(domain: str = DOMAIN, **changes: Any) -> dict[str, Any]:
 def version_file(
     version: str = "1.0.0",
     domain: str = DOMAIN,
-    lines: Mapping[str, bool] | None = None,
+    channels: Mapping[str, bool] | None = None,
     **changes: Any,
 ) -> dict[str, Any]:
     """
@@ -99,10 +99,10 @@ def version_file(
 
     :param version: The version.
     :param domain: The domain of the provider.
-    :param lines: Whether the version passed, by server line; nightly passed when omitted.
+    :param channels: Whether the version passed, by channel; nightly passed when omitted.
     :param changes: Keys to set; a value of None removes the key.
     """
-    lines = {"nightly": True} if lines is None else lines
+    channels = {"nightly": True} if channels is None else channels
     data: dict[str, Any] = {
         "version": version,
         "tag": f"v{version}",
@@ -114,10 +114,10 @@ def version_file(
         "released": RELEASED,
         "icon_svg": ICON,
         "checks": {
-            line: {"passed": True, "checked": CHECKED}
+            channel: {"passed": True, "checked": CHECKED}
             if passed
             else {"passed": False, "checked": CHECKED, "reason": "it does not load"}
-            for line, passed in lines.items()
+            for channel, passed in channels.items()
         },
     }
     data.update(changes)
@@ -155,7 +155,7 @@ class Files:
         self,
         version: str = "1.0.0",
         domain: str = DOMAIN,
-        lines: Mapping[str, bool] | None = None,
+        channels: Mapping[str, bool] | None = None,
         **changes: Any,
     ) -> Path:
         """
@@ -163,21 +163,21 @@ class Files:
 
         :param version: The version, also the name of the file.
         :param domain: The domain of the provider.
-        :param lines: Whether the version passed, by server line; nightly passed when omitted.
+        :param channels: Whether the version passed, by channel; nightly passed when omitted.
         :param changes: Keys to set in the file.
         """
-        data = version_file(version, domain, lines, **changes)
+        data = version_file(version, domain, channels, **changes)
         return self.write(f"providers/{domain}/versions/{version}.json", data)
 
 
 @pytest.fixture
 def files(tmp_path: Path) -> Files:
-    """Return a registry without providers, for the lines nightly and beta."""
+    """Return a registry without providers, for the channels nightly and beta."""
     registry = Files(tmp_path)
     registry.write(
-        "server_lines.json",
+        "channels.json",
         {
-            "lines": {
+            "channels": {
                 "nightly": {"image": NIGHTLY_IMAGE},
                 "beta": {"image": BETA_IMAGE, "frozen": False},
             }
@@ -596,7 +596,7 @@ def request_json(request: urllib.request.Request) -> dict[str, Any]:
     return data
 
 
-# stands in for docker in the tests of scripts/check-line.sh: it records every call, and runs the
+# stands in for docker in the tests of scripts/check-channel.sh: it records every call, and runs the
 # command of a container on this machine, with its paths mapped to the folders mounted there
 _FAKE_DOCKER = """#!{python}
 import json, os, subprocess, sys
@@ -634,22 +634,22 @@ run = json.loads(os.environ["FAKE_DOCKER_COMMAND"]) + command[2:]
 code = subprocess.run(run, cwd=mapped(options["--workdir"]), stdin=subprocess.DEVNULL).returncode
 sys.exit(code)
 """
-CHECK_LINE = ROOT / "scripts" / "check-line.sh"
+CHECK_CHANNEL = ROOT / "scripts" / "check-channel.sh"
 
 
-def can_run_check_line() -> bool:
-    """Return whether this machine has what scripts/check-line.sh needs besides docker."""
+def can_run_check_channel() -> bool:
+    """Return whether this machine has what scripts/check-channel.sh needs besides docker."""
     return all(shutil.which(tool) for tool in ("bash", "jq", "timeout", "find"))
 
 
-def run_check_line(
-    catalog: Path, line: str, command: Sequence[str], log: Path
+def run_check_channel(
+    catalog: Path, channel: str, command: Sequence[str], log: Path
 ) -> subprocess.CompletedProcess[str]:
     """
-    Run scripts/check-line.sh with a docker that runs each container's command on this machine.
+    Run scripts/check-channel.sh with a docker that runs each container's command on this machine.
 
     :param catalog: The folder the script mounts as /catalog, with work/plan.json.
-    :param line: The server line.
+    :param channel: The channel.
     :param command: What runs in place of `python -m registry` in each container.
     :param log: The file the fake docker writes each of its calls to, as a JSON list.
     """
@@ -668,7 +668,7 @@ def run_check_line(
     bash = shutil.which("bash")
     assert bash is not None
     return subprocess.run(
-        [bash, str(CHECK_LINE), str(catalog), line, "ghcr.io/music-assistant/server:nightly",
+        [bash, str(CHECK_CHANNEL), str(catalog), channel, "ghcr.io/music-assistant/server:nightly",
          str(catalog / "results")],
         env=environment,
         capture_output=True,

@@ -63,9 +63,9 @@ def test_versions_are_ordered_as_versions() -> None:
     ("value", "valid"),
     [("nightly", True), ("beta", True), ("2.11", True), ("stable", False), ("2.11.0", False)],
 )
-def test_server_line(value: str, valid: bool) -> None:
-    """A server line is nightly, beta or MAJOR.MINOR."""
-    assert formats.is_server_line(value) is valid
+def test_channel(value: str, valid: bool) -> None:
+    """A channel is nightly, beta or MAJOR.MINOR."""
+    assert formats.is_channel(value) is valid
 
 
 @pytest.mark.parametrize(

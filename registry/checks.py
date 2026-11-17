@@ -13,12 +13,12 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from registry.models import (
+        Channel,
+        Channels,
         CheckResult,
         ProviderFile,
         RefusedRelease,
         ReservedDomains,
-        ServerLine,
-        ServerLines,
         VersionFile,
     )
 
@@ -33,24 +33,24 @@ MAX_CODEOWNERS = 10
 MAX_REFUSAL = 2000
 
 
-def check_server_lines(lines: ServerLines) -> list[str]:
+def check_channels(channels: Channels) -> list[str]:
     """
-    Return what is wrong in the list of server lines.
+    Return what is wrong in the list of channels.
 
-    :param lines: The content of server_lines.json.
+    :param channels: The content of channels.json.
     """
     problems = [
-        f"lines: {line!r} is not a server line: nightly, beta or MAJOR.MINOR"
-        for line in lines.lines
-        if not formats.is_server_line(line)
+        f"channels: {channel!r} is not a channel: nightly, beta or MAJOR.MINOR"
+        for channel in channels.channels
+        if not formats.is_channel(channel)
     ]
     problems += [
-        f"lines.{line}.image: {config.image!r} is not a container image with a tag"
-        for line, config in lines.lines.items()
+        f"channels.{channel}.image: {config.image!r} is not a container image with a tag"
+        for channel, config in channels.channels.items()
         if not formats.is_image(config.image)
     ]
-    if not lines.lines:
-        problems.append("lines: there is no server line")
+    if not channels.channels:
+        problems.append("channels: there is no channel")
     return problems
 
 
@@ -111,14 +111,14 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
 
 
 def check_version(
-    version: VersionFile, provider: ProviderFile, lines: Mapping[str, ServerLine]
+    version: VersionFile, provider: ProviderFile, channels: Mapping[str, Channel]
 ) -> list[str]:
     """
     Return what is wrong in a version file.
 
     :param version: The content of the file.
     :param provider: The provider the version belongs to.
-    :param lines: The server lines an index is built for.
+    :param channels: The channels an index is built for.
     """
     problems: list[str] = []
     domain = provider.domain
@@ -147,8 +147,8 @@ def check_version(
             check_icon(version.icon_svg)
         except ValueError as err:
             problems.append(f"icon_svg: {err}")
-    for line, result in version.checks.items():
-        problems += _check_result_problems(line, result, lines)
+    for channel, result in version.checks.items():
+        problems += _check_result_problems(channel, result, channels)
     return problems
 
 
@@ -217,22 +217,22 @@ def check_manifest(manifest: Mapping[str, Any], domain: str) -> list[str]:
 
 
 def _check_result_problems(
-    line: str, result: CheckResult, lines: Mapping[str, ServerLine]
+    channel: str, result: CheckResult, channels: Mapping[str, Channel]
 ) -> list[str]:
-    """Return what is wrong in the result of the checks of a version on a server line."""
+    """Return what is wrong in the result of the checks of a version on a channel."""
     problems: list[str] = []
-    if line not in lines:
-        problems.append(f"checks: {line!r} is not a line in server_lines.json")
+    if channel not in channels:
+        problems.append(f"checks: {channel!r} is not a channel in channels.json")
     if result.passed and result.reason is not None:
-        problems.append(f"checks.{line}: a version that passed has no reason")
+        problems.append(f"checks.{channel}: a version that passed has no reason")
     if not result.passed and not (result.reason or "").strip():
-        problems.append(f"checks.{line}: a version that did not pass needs a reason")
+        problems.append(f"checks.{channel}: a version that did not pass needs a reason")
     elif result.reason is not None and not formats.is_reason(result.reason):
         problems.append(
-            f"checks.{line}.reason: is not one line of at most {formats.MAX_REASON} printable "
+            f"checks.{channel}.reason: is not one line of at most {formats.MAX_REASON} printable "
             "characters"
         )
-    problems += _date_problems(f"checks.{line}.checked", result.checked)
+    problems += _date_problems(f"checks.{channel}.checked", result.checked)
     return problems
 
 

@@ -6,10 +6,11 @@ provider maintainer needs is in the [README](README.md).
 
 ## How a server uses it
 
-- A server reads one file, once a day: the index of its own server line, at
-  `https://catalog.music-assistant.io/v1/<line>.json`. The line is `nightly`,
-  `beta`, or the stable minor line such as `2.11`. A server that has not enabled the community
-  catalog and has no community provider installed makes no request at all.
+- A server reads one file, once a day: the index of its own channel, at
+  `https://catalog.music-assistant.io/v1/<channel>.json`. The channel is `nightly`, `beta`, or
+  the stable minor version such as `2.11`, which the issues of the catalog call stable 2.11. A
+  server that has not enabled the community catalog and has no community provider installed
+  makes no request at all.
 - It installs only a version its index lists: it downloads the GitHub archive of the pinned
   commit, takes the provider folder from it and compares its content hash with the index.
 - It stops loading a provider, or a version, the index blocks.
@@ -39,11 +40,11 @@ The exact rules a provider and its releases meet; the checks name the one that f
 | Path | What it is |
 |---|---|
 | `providers/<domain>/provider.json` | A provider: where it lives and its status. Written by the bot at admission. |
-| `providers/<domain>/versions/<version>.json` | A released version: the pinned commit, its content hash, its manifest and the result of the checks per server line. Generated. |
+| `providers/<domain>/versions/<version>.json` | A released version: the pinned commit, its content hash, its manifest and the result of the checks per channel. Generated. |
 | `providers/<domain>/refused/<version>.json` | A release that could not become a version, and why. Generated, so the release is not tried again. |
-| `server_lines.json` | The server lines an index is built for, each with its server image. |
+| `channels.json` | The channels an index is built for, each with its server image. |
 | `reserved_domains.json` | The domains a community provider cannot take. |
-| `site/v1/<line>.json` | The index of each server line, generated from the files above. `site/` is what is published, so it holds nothing else. |
+| `site/v1/<channel>.json` | The index of each channel, generated from the files above. `site/` is what is published, so it holds nothing else. |
 | `registry/` | The code that checks the files and builds the index. |
 
 No file or folder the commands read or write may be a symbolic link.
@@ -65,7 +66,7 @@ The bot writes it from the submission (see [Admission](#admission)): the ids fro
 domain from the manifest of the latest release. A key that has its default value is left out.
 Who decided on the admission, and when, is in the history of its pull request. The maintainers
 of a provider are the owner of its repository and the code owners in the manifest of its highest
-version that is offered (not blocked, and passed on a server line); without such a version, the
+version that is offered (not blocked, and passed on a channel); without such a version, the
 owner alone.
 
 | Key | Rule |
@@ -111,7 +112,7 @@ owner alone.
 | `requirements` | The requirements of the manifest: at most 50 package names with version specifiers only, no URLs, markers or options, each one line of at most 100 printable characters. |
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
-| `checks` | The result per server line in `server_lines.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
+| `checks` | The result per channel in `channels.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
 
 ### refused/\<version\>.json
 
@@ -139,17 +140,19 @@ block.
 
 ### The index
 
-Each `site/v1/<line>.json` holds, for every provider with at least one version file:
+Each `site/v1/<channel>.json` holds, for every provider with at least one version file:
 
 - its status, reason and reason link, repository, maintainers (see
   [provider.json](#providerjson), as handles without `@`), the date it entered the catalog, and
   its blocked versions;
-- `latest`: the highest version that passed the checks for this line and is not blocked.
+- `latest`: the highest version that passed the checks for this channel and is not blocked.
   Versions are compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
 - `versions`: the five highest of those, each with its commit, folder, content hash,
   requirements and release date;
-- the manifest and icon of `latest`; when no version passed for this line, those of the highest
-  version that is not blocked, or of the highest version when all are blocked.
+- the manifest and icon of `latest`; when no version passed for this channel, those of the
+  highest version that is not blocked, or of the highest version when all are blocked.
+
+It names its channel twice, as `channel` and as `server_line`: some servers read only the second.
 
 Blocked and withdrawn providers stay in the index with their versions, so a server recognises
 what it has installed. The output is deterministic: an unchanged registry gives byte-identical
@@ -197,9 +200,9 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | Command | What it does |
 |---|---|
 | `uv run python -m registry validate` | Checks every file, and that the index files are up to date. CI runs it on every change. |
-| `uv run python -m registry build` | Writes the index file of every server line. |
+| `uv run python -m registry build` | Writes the index file of every channel. |
 | `uv run python -m registry add-version <domain> <version> <source> --tag <tag> --commit <sha> [--released <date>]` | Writes the version file of a release. The source is the downloaded GitHub archive of the commit, or a local provider folder. |
-| `uv run python -m registry record-check <domain> <version> <line> (--passed \| --failed <reason>) [--checked <date>]` | Records the result of the checks of a version on a server line. |
+| `uv run python -m registry record-check <domain> <version> <channel> (--passed \| --failed <reason>) [--checked <date>]` | Records the result of the checks of a version on a channel. |
 | `uv run python -m registry content-hash <source> [--folder <folder>]` | Prints the content hash of a provider folder, or of a folder in an archive. |
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
@@ -217,12 +220,12 @@ The commands of the release pipeline, which the workflows run:
 
 | Command | What it does |
 |---|---|
-| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `plan.json` (what to check on each line) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
-| `check --line <line> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the line. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
+| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `plan.json` (what to check on each channel) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
+| `check --channel <channel> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the channel. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
-| `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. A check that could not run in the server image removes a failed result of its version on that line. |
-| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. Also the report of every line with results: whether its checks could run. |
-| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider and of each line whose checks cannot run on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
+| `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. A check that could not run in the server image removes a failed result of its version on that channel. |
+| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. Also the report of every channel with results: whether its checks could run. |
+| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider and of each channel whose checks cannot run on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
 | `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | Opens the pull request of a submission whose checks passed, leaves standing the open one that holds the same, or closes it (see [Admission](#admission)). Adds its outcome (`opened`, `stands`, `not-passed`, `closed`, `changed` or `conflict`), the address of its pull request and those of other submissions of the domain to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
@@ -231,7 +234,7 @@ The commands of the release pipeline, which the workflows run:
 
 The work folder is `work/` in the root unless `--work` names another. It is never committed.
 
-A version file starts without check results, so it is in no index until a line records a pass.
+A version file starts without check results, so it is in no index until a channel records a pass.
 The whole flow for one release:
 
 ```sh
@@ -242,26 +245,27 @@ uv run python -m registry build
 uv run python -m registry validate
 ```
 
-## Server lines
+## Channels
 
-`server_lines.json` lists the lines an index is built for:
+`channels.json` lists the channels an index is built for:
 
 ```json
-{"lines": {"beta": {"frozen": false, "image": "ghcr.io/music-assistant/server:beta"}, "nightly": {"frozen": false, "image": "ghcr.io/music-assistant/server:nightly"}}}
+{"channels": {"beta": {"frozen": false, "image": "ghcr.io/music-assistant/server:beta"}, "nightly": {"frozen": false, "image": "ghcr.io/music-assistant/server:nightly"}}}
 ```
 
-`image` is the official server image the checks of the line run in. The server's release
+`image` is the official server image the checks of the channel run in. The server's release
 workflow tags every image with its channel (`nightly`, `beta`) and every stable release also with
-its minor line, so the image of a stable line is `ghcr.io/music-assistant/server:2.11`.
+its minor version, so the image of stable 2.11 is `ghcr.io/music-assistant/server:2.11`.
 
-A stable line is added as `"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:2.11"}`,
-followed by `build`. A line that needs its index before its first release, because a provider
-moves out of the server in it, is added during its beta with the beta image,
+Every stable minor version is a channel of its own, added as
+`"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:2.11"}`, followed by `build`.
+A channel that needs its index before its first release, because a provider moves out of the
+server in it, is added during its beta with the beta image,
 `"2.11": {"frozen": false, "image": "ghcr.io/music-assistant/server:beta"}`, and its image is
-set to `ghcr.io/music-assistant/server:2.11` once that release is out. A line stays in the
-file for as long as servers of that line exist. When the next stable line appears, the previous
-one is marked `frozen`: its versions are no longer tested, while blocks and withdrawals still
-reach its index.
+set to `ghcr.io/music-assistant/server:2.11` once that release is out. A channel stays in the
+file for as long as servers on that channel exist. When the next stable version appears, the
+previous channel is marked `frozen`: its versions are no longer tested, while blocks and
+withdrawals still reach its index.
 
 ## Reserved domains
 
@@ -280,7 +284,7 @@ reach its index.
   those pins until the server no longer ships the provider.
 
 `refresh-reserved` only adds domains. Run it against the `dev` branch and every supported stable
-branch of the server; a domain leaves the list by hand, once no supported server line ships it.
+branch of the server; a domain leaves the list by hand, once no supported channel ships it.
 
 ## The release pipeline
 
@@ -298,17 +302,17 @@ reports anything. Its jobs share only files:
    (also a larger archive, or a provider folder of more than 100 MiB) becomes a refused file with
    the reason, and the release is not tried again. An archive that cannot be downloaded is tried
    again the next night. It then downloads the archives of every version the check step needs,
-   and writes the plan: per line that is tested, the versions to check whose archive it has.
-   Those are the versions without a result for the line, the current `latest` of each provider
-   on the line, and the three newest versions above it that are not blocked, so a version that
+   and writes the plan: per channel that is tested, the versions to check whose archive it has.
+   Those are the versions without a result for the channel, the current `latest` of each provider
+   on the channel, and the three newest versions above it that are not blocked, so a version that
    failed once (on a night the server image was broken, say) can pass again.
-2. **Check** runs once per line that is not frozen, inside the official server image of that
-   line. For each version of the plan, `scripts/check-line.sh` runs two containers:
+2. **Check** runs once per channel that is not frozen, inside the official server image of that
+   channel. For each version of the plan, `scripts/check-channel.sh` runs two containers:
    * **install**, with network, runs no provider code: the provider folder is unpacked from the
      archive and its content hash compared with the version file, then the requirements are
      resolved against the packages of that server by the server's own code
      (`CommunityDependencies` of the community catalog controller, wheels only) and installed
-     into a scratch folder, so the verdict is what a server of that line decides. The
+     into a scratch folder, so the verdict is what a server on that channel decides. The
      requirements are also resolved, without installing, for linux arm64 with the C library of
      the image: the arm64 image has the same packages, and a server installs wheels only, so
      this tells whether an arm64 server can install them. A clash with the server, a requirement
@@ -325,16 +329,16 @@ reports anything. Its jobs share only files:
    time) gives no result; the version is checked again the next night. When the registry's own
    load script cannot start in the server image (it imports from the server what that server
    lacks), the load stage runs no provider code and gives a result that says so: no version
-   fails because of it, and the line gets an issue for the registry maintainers instead (see
+   fails because of it, and the channel gets an issue for the registry maintainers instead (see
    [Release issues](#release-issues)). The provider's own tests are not run.
 3. **Apply** records the results with the rules of `record-check`, writes the index files,
    validates and pushes to `main` with the token of the Music Assistant Bot app. A version that
-   stops passing on a line leaves that line's index: the newest version that still passes there
-   becomes `latest`. A check that could not run removes a failed result of its version on that
-   line and keeps a passed one, so the version is not offered there until it passes. The push
+   stops passing on a channel leaves that channel's index: the newest version that still passes
+   there becomes `latest`. A check that could not run removes a failed result of its version on that
+   channel and keeps a passed one, so the version is not offered there until it passes. The push
    starts the Publish workflow.
 4. **Report** tells the maintainers of a provider about every version that failed a check on a
-   line (first checks and versions that stopped passing), every release refused in this run and
+   channel (first checks and versions that stopped passing), every release refused in this run and
    a repository that is not the admitted one, in one issue per provider on this repository (see
    [Release issues](#release-issues)). It writes the issues with the workflow's own token, which
    may write issues and nothing else.
@@ -351,10 +355,10 @@ The check executes provider code, so it runs in a job of its own:
   without privileges, with at most 512 processes, 4 GiB of memory and a time limit;
 - after each container has ended, the script copies only the results file the container was
   asked for, when it is a regular file below 200 kB, to the name the plan gives that version
-  (`<line>/<domain>-<version>.json`); links, folders and anything else a container wrote are
+  (`<channel>/<domain>-<version>.json`); links, folders and anything else a container wrote are
   left behind, and only those copies are uploaded;
 - the apply job, which can push, runs only its own checked out code and reads a result only at
-  the name the plan gives it, when it holds exactly one result of that line, provider and
+  the name the plan gives it, when it holds exactly one result of that channel, provider and
   version, with a reason of one line. Anything else is ignored with a warning, and a result that
   cannot be recorded skips that version only.
 
@@ -389,14 +393,14 @@ It checks:
 - that the `provider.json` it leads to is valid; its ids come from GitHub;
 - that the author of the issue owns the repository or is a code owner in the manifest of the
   latest release;
-- that the latest release becomes a version and passes the checks on at least one line.
+- that the latest release becomes a version and passes the checks on at least one channel.
 
 Its jobs:
 
 1. **prepare** reads the issue and GitHub with a read-only token, and plans the check only when
    every requirement above the release checks passed;
-2. **check** runs once per line the plan holds a version for, exactly as the check of the
-   release pipeline: no token, provider code only in the containers of `scripts/check-line.sh`.
+2. **check** runs once per channel the plan holds a version for, exactly as the check of the
+   release pipeline: no token, provider code only in the containers of `scripts/check-channel.sh`.
    A submission that failed a requirement starts no check job, so its code never runs;
 3. **propose** runs only on `main`, in the environment `releases`, with a token of the Music
    Assistant Bot app limited to the contents and pull requests of this repository, and to
@@ -465,7 +469,7 @@ a registry maintainer reads it and makes the change in an ordinary pull request:
 - **its maintainer wants it removed**: after the same check,
   `set-status <domain> withdrawn --reason "Withdrawn by its maintainer" --reason-url <issue>`;
 - **its maintainer asks for it to be listed again**: after the same check, and once the reason of
-  the withdrawal is gone and its newest release passes the checks on a line,
+  the withdrawal is gone and its newest release passes the checks on a channel,
   `set-status <domain> listed`.
 
 ### Release issues
@@ -480,10 +484,10 @@ issue and of each comment of the pipeline names the failures it tells, and only 
 shown as code; the title shows the name of the manifest only when it is plain text.
 
 A failure is settled when the newest version of the provider (the highest with a version file or
-a refusal) passed on a line that is tested, and:
+a refusal) passed on a channel that is tested, and:
 
-- for a failed check, also on the line of the check, unless that line is not tested in this run
-  (no longer tested, or its checks could not run);
+- for a failed check, also on the channel of the check, unless that channel is not tested in this
+  run (no longer tested, or its checks could not run);
 - for a repository that was not the admitted one, GitHub gives the admitted one again.
 
 A failure that is settled when it happens is not told. Once every failure an issue tells is
@@ -494,11 +498,11 @@ An issue that stays open without a reaction of the provider's maintainer is a re
 the provider: `set-status <domain> withdrawn --reason <text> --reason-url <issue>`. Nothing does
 this automatically.
 
-A line whose checks cannot run in its server image gets one issue for the registry maintainers,
-with the same label, titled "The release checks cannot run on the <line> line" and without
-mentions; its first line `<!-- release-check line: <line> -->` names the line. Its text shows the
-newest output and is kept up to date while the checks cannot run, and the pipeline closes it once
-they run on that line again.
+A channel whose checks cannot run in its server image gets one issue for the registry
+maintainers, with the same label, titled "The release checks cannot run on the beta channel" (or
+"on stable 2.11") and without mentions; its first line `<!-- release-check channel: <channel> -->`
+names the channel. Its text shows the newest output and is kept up to date while the checks
+cannot run, and the pipeline closes it once they run on that channel again.
 
 ## Still open
 
