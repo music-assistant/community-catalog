@@ -225,7 +225,9 @@ def test_a_submission_that_passes(files: Files, github: FakeGitHub) -> None:
     assert passed
     assert text.startswith(
         f"## Admission checks for ` {DOMAIN} `\n\nChecked {report.checked}: repository "
-        f"` {REPOSITORY} `, release ` v1.0.0 ` (commit ` {COMMIT} `).\n\n"
+        f"[` {REPOSITORY} `](https://github.com/{REPOSITORY}), release "
+        f"[` v1.0.0 `](https://github.com/{REPOSITORY}/releases/tag/v1.0.0) (commit "
+        f"[` {COMMIT} `](https://github.com/{REPOSITORY}/tree/{COMMIT}/{DOMAIN})).\n\n"
     )
     assert "- ✅ Passed on the nightly channel" in text
     assert (
@@ -272,7 +274,7 @@ def test_the_release_must_pass_on_a_channel(files: Files, github: FakeGitHub) ->
 
     assert not failed
     assert not other
-    assert "- ❌ The checks did not run on the beta channel" in failed_text
+    assert "- ⚪ Not checked on the beta channel" in failed_text
     assert "- ❌ Failed on the nightly channel:" in failed_text
     assert "Not every check passed. Fix what failed, then edit this issue" in failed_text
     assert "close and reopen it after you publish a new release" in failed_text
@@ -300,7 +302,8 @@ def test_a_channel_whose_checks_could_not_run_is_no_failure(
     )
 
     assert passed
-    assert "- ❌ The checks did not run on the beta channel\n" in text
+    assert "- ⚪ Not checked on the beta channel\n" in text
+    assert "❌" not in text
     assert "- ✅ Passed on the nightly channel" in text
     assert "cannot import name" not in text
 
@@ -391,6 +394,46 @@ def test_a_submission_that_cannot_be_checked(
     assert text.startswith("## Admission checks\n\nChecked ")
     assert "This issue is not a valid submission, so nothing was checked:" in text
     assert f"The [form]({FORM_URL}) says what each field holds." in text
+
+
+@pytest.mark.parametrize(
+    ("tag", "commit", "release", "linked_commit"),
+    [
+        (
+            "v1.0.0",
+            COMMIT,
+            f"[` v1.0.0 `](https://github.com/{REPOSITORY}/releases/tag/v1.0.0)",
+            f"[` {COMMIT} `](https://github.com/{REPOSITORY}/commit/{COMMIT})",
+        ),
+        (
+            "v1 ..//x @someone",
+            "main",
+            "` v1 ..//x @someone `",
+            "` main `",
+        ),
+    ],
+)
+def test_what_was_checked_links_to_github(
+    files: Files, tag: str, commit: str, release: str, linked_commit: str
+) -> None:
+    """The repository, release and commit link to GitHub, as far as their values are safe."""
+    report = AdmissionReport(
+        checked=CHECKED,
+        findings=[],
+        issue_digest="",
+        repository=REPOSITORY,
+        tag=tag,
+        commit=commit,
+        refusal="no provider folder",
+    )
+
+    _, text = check_admission(load_registry(files.root), report, [])
+
+    assert text.startswith(
+        f"## Admission checks\n\nChecked {CHECKED}: repository "
+        f"[` {REPOSITORY} `](https://github.com/{REPOSITORY}), release {release} "
+        f"(commit {linked_commit}).\n\n"
+    )
 
 
 def test_the_submitter_must_own_the_provider(files: Files, github: FakeGitHub) -> None:
@@ -612,7 +655,9 @@ def _consistent(github: FakeGitHub, pull: dict[str, Any]) -> bool:
     branch = pull["head"]["ref"]
     domain = branch.removeprefix("admit/").rsplit("-", 1)[0]
     content = github.files.get((REGISTRY, branch, f"providers/{domain}/provider.json"))
-    release = re.search(r"release ` (\S+) ` \(commit ` ([0-9a-f]{40}) `\)", pull["body"])
+    release = re.search(
+        r"release \[` (\S+) `\]\(\S+\) \(commit \[` ([0-9a-f]{40}) `\]", pull["body"]
+    )
     marker = re.search(r"<!-- proposal: ([0-9a-f]{64}) -->", pull["body"])
     if content is None or release is None or marker is None:
         return False
@@ -622,7 +667,8 @@ def _consistent(github: FakeGitHub, pull: dict[str, Any]) -> bool:
     )
     return (
         marker[1] == proposal_fingerprint(provider, checked)
-        and f"from ` {provider.repository} `" in pull["body"]
+        and f"from [` {provider.repository} `](https://github.com/{provider.repository})."
+        in pull["body"]
     )
 
 
@@ -648,7 +694,7 @@ def test_propose_opens_a_pull_request(files: Files, github: FakeGitHub) -> None:
     assert re.match(
         rf"<!-- proposal: [0-9a-f]{{64}} -->\nCloses #{ISSUE}\n\nAdds "
         rf"` providers/{DOMAIN}/provider.json `: `` Sample `music` @a-maintainer `` from "
-        rf"` {REPOSITORY} `\.\n\n",
+        rf"\[` {REPOSITORY} `\]\(https://github\.com/{REPOSITORY}\)\.\n\n",
         pull["body"],
     )
     assert "decides by merging this pull request;" in pull["body"]
