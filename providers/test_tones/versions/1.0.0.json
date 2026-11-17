@@ -1,12 +1,12 @@
 {
   "checks": {
     "beta": {
-      "checked": "2026-11-16T03:27:08Z",
+      "checked": "2026-11-17T03:23:31Z",
       "passed": false,
       "reason": "load: the import ended with exit code 1"
     },
     "nightly": {
-      "checked": "2026-11-16T03:27:27Z",
+      "checked": "2026-11-17T03:23:33Z",
       "passed": true,
       "reason": null
     }
