@@ -125,6 +125,26 @@ def record_check(
     write_version(registry, domain, file)
 
 
+def clear_failed_check(registry: Registry, domain: str, version: str, line: str) -> None:
+    """
+    Remove a failed result of the checks of a version on a server line; a passed one stays.
+
+    :param registry: The registry.
+    :param domain: The domain of the provider.
+    :param version: The version.
+    :param line: The server line.
+    :raises CommandError: There is no such provider or version.
+    :raises InvalidRegistryError: The version file would not be valid.
+    """
+    provider = get_provider(registry, domain)
+    if (file := provider.versions.get(version)) is None:
+        msg = f"{domain} has no version {version}"
+        raise CommandError(msg)
+    if (check := file.checks.get(line)) is not None and not check.passed:
+        del file.checks[line]
+        write_version(registry, domain, file)
+
+
 def set_status(
     registry: Registry,
     domain: str,

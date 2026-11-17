@@ -466,6 +466,19 @@ class GitHub:
         request = self._request(f"{API_URL}/repos/{repository}/issues", content)
         return str(self._json(request, expected=201).get("html_url"))
 
+    def update_issue(self, repository: str, number: int, body: str) -> None:
+        """
+        Replace the text of an issue.
+
+        :param repository: The repository, as owner/name.
+        :param number: The number of the issue.
+        :param body: The new text of the issue, in Markdown.
+        :raises GitHubError: GitHub refused the request.
+        """
+        content = json.dumps({"body": body}).encode()
+        url = f"{API_URL}/repos/{repository}/issues/{number}"
+        self._json(self._request(url, content, method="PATCH"))
+
     def close_issue(self, repository: str, number: int) -> None:
         """
         Close an issue as completed.

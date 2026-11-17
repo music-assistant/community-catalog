@@ -22,7 +22,16 @@ from registry.models import (
 )
 from registry.pipeline import versions_to_check
 from registry.registry import load_registry
-from registry.report import LABEL, build_reports, is_settled, open_issues, post_report
+from registry.report import (
+    LABEL,
+    build_line_reports,
+    build_reports,
+    is_settled,
+    open_issues,
+    open_line_issues,
+    post_line_report,
+    post_report,
+)
 from tests.conftest import (
     CHECKED,
     COMMIT,
@@ -41,6 +50,8 @@ if TYPE_CHECKING:
 
 REPOSITORY = "someone/ma-sample"
 REGISTRY = "music-assistant/community-catalog"
+# the reason of a check that could not run in the server image
+UNAVAILABLE = "load: the load script cannot start in this server image: cannot import name 'x'"
 
 
 def _results(line: str, *results: dict[str, Any]) -> dict[str, Any]:
@@ -52,6 +63,12 @@ def _result(version: str, reason: str | None = None, **changes: Any) -> dict[str
     """Return the result of a version of the sample provider; passed without a reason."""
     return {"domain": DOMAIN, "version": version, "passed": reason is None, "reason": reason,
             **changes}  # fmt: skip
+
+
+def _unavailable(version: str) -> dict[str, Any]:
+    """Return the result of a version of the sample provider whose check could not run."""
+    output = "Traceback\nImportError: cannot import name 'x'"
+    return _result(version, UNAVAILABLE, output=output, unavailable=True)
 
 
 def _run(files: Files, *args: str) -> int:
@@ -314,6 +331,29 @@ def test_a_missing_result_and_a_frozen_line(
     assert f"{DOMAIN} 1.0.0 on nightly: no result" in err
     assert "'2.11': skipped, not a server line that is tested" in err
     assert load_registry(files.root).providers[DOMAIN].versions["1.0.0"].checks == {}
+
+
+def test_a_check_that_could_not_run_removes_a_failure(files: Files) -> None:
+    """A check that could not run removes a failed result of its version on the line, not a pass."""
+    files.provider()
+    files.version("1.0.0", lines={"beta": True, "nightly": True})
+    files.version("1.1.0", lines={"beta": False, "nightly": True})
+    assert _run(files, "build") == 0
+    _plan(files, {"beta": ["1.0.0", "1.1.0"]})
+    _write_result(files, "beta", _unavailable("1.0.0"))
+    _write_result(files, "beta", _unavailable("1.1.0"))
+
+    assert _apply(files) == 0
+
+    versions = load_registry(files.root).providers[DOMAIN].versions
+    assert (versions["1.0.0"].checks["beta"].passed, versions["1.0.0"].checks["beta"].checked) == (
+        True,
+        CHECKED,
+    )
+    assert set(versions["1.1.0"].checks) == {"nightly"}
+    beta = _index(files, "beta")["providers"][DOMAIN]
+    assert (beta["latest"], set(beta["versions"])) == ("1.0.0", {"1.0.0"})
+    assert _run(files, "validate") == 0
 
 
 def _fetched(*, refused: bool = False, owner_id: int = OWNER_ID) -> FetchReport:
@@ -767,7 +807,7 @@ def test_report_writes_the_reports(files: Files) -> None:
 
     assert _run(files, "report", str(files.root / "results")) == 0
 
-    [path] = (files.root / "work" / "issues").iterdir()
+    [path] = (files.root / "work" / "issues").glob("*.json")
     report = load_model(path, ProviderReport)
     assert path.name == f"{DOMAIN}.json"
     assert [failure.text.count("load: x") for failure in report.failures] == [1]
@@ -810,3 +850,96 @@ def test_post_issues_goes_on_after_a_refusal(
     ]
     assert "warning: other_music: no" in capsys.readouterr().err
     assert all(r.get_header("Authorization") == "Bearer a-token" for r in github.requests)
+
+
+def _line_night(
+    files: Files, github: FakeGitHub, *results: tuple[str, dict[str, Any]]
+) -> str | None:
+    """Run the report and the posting of one night for the one line of the results."""
+    files_results = [LineResults.from_dict(_results(line, result)) for line, result in results]
+    [report] = build_line_reports(load_registry(files.root), files_results)
+    client = GitHub("a-token", github)
+    issue = open_line_issues(client, REGISTRY).get(report.line)
+    return post_line_report(report, issue, client, REGISTRY)
+
+
+def test_a_check_that_could_not_run_fails_no_provider(files: Files) -> None:
+    """The issue of a provider about a line whose checks could not run closes, and none opens."""
+    files.provider()
+    files.version("1.0.0", lines={"nightly": True, "beta": False})
+    github = FakeGitHub()
+    github.issue(
+        REGISTRY,
+        1,
+        "<!-- release-check: sample_music; check 1.0.0 beta -->\n",
+        labels=[{"name": LABEL}],
+        user={"login": "github-actions[bot]"},
+    )
+    results = (("beta", _unavailable("1.0.0")), ("nightly", _result("1.0.0")))
+
+    report = _report(files, *results)
+    done = _night(files, github, *results)
+
+    assert (report.failures, report.tested, report.passed) == ([], ["nightly"], ["nightly"])
+    assert done == "#1: closed"
+    assert github.created == []
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"] == "Version 1.0.0 passed the checks, so this issue is closed."
+
+
+def test_a_line_whose_checks_cannot_run_has_one_issue(files: Files) -> None:
+    """The registry maintainers get one issue per line, kept up to date, closed once checks run."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    github = FakeGitHub()
+    # an issue of a stranger with the label and the first line of the pipeline does not count
+    github.issue(REGISTRY, 1, "<!-- release-check line: beta -->\n", labels=[{"name": LABEL}])
+
+    opened = _line_night(files, github, ("beta", _unavailable("1.0.0")))
+    again = _line_night(files, github, ("beta", _unavailable("1.0.0")))
+
+    assert (opened, again) == (f"https://github.com/{REGISTRY}/issues/2", None)
+    [(_, created)] = github.created
+    assert created["title"] == "The release checks cannot run on the beta line"
+    assert created["labels"] == [LABEL]
+    body = created["body"]
+    assert body.startswith("<!-- release-check line: beta -->\n")
+    assert f"```\n{UNAVAILABLE}\n```" in body
+    assert "ImportError: cannot import name 'x'" in body
+    assert "closes by itself" in body
+    assert _mentions(body) == []
+    # another reason replaces the text of the issue
+    other = _result("1.0.0", "load: other", unavailable=True)
+    assert _line_night(files, github, ("beta", other)) == "#2: updated"
+    assert "```\nload: other\n```" in _issues(github)[1]["body"]
+    # once the checks run, failed or not, the issue is closed, once
+    assert _line_night(files, github, ("beta", _result("1.0.0", "load: x"))) == "#2: closed"
+    assert _line_night(files, github, ("beta", _result("1.0.0", "load: x"))) is None
+    assert [issue["state"] for issue in _issues(github)] == ["open", "closed"]
+    [comment] = github.comments[REGISTRY, 2]
+    assert comment["body"] == "The checks run on the `beta` line again, so this issue is closed."
+    assert len(github.created) == 1
+
+
+def test_report_and_post_issues_for_a_line_whose_checks_cannot_run(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report of each line with results is written, and only the maintainers get an issue."""
+    files.provider()
+    files.version("1.0.0", lines={})
+    _plan(files, {"beta": ["1.0.0"], "nightly": ["1.0.0"]})
+    _write_result(files, "beta", _unavailable("1.0.0"))
+    _write_result(files, "nightly", _result("1.0.0"))
+    files.write("work/fetch.json", _fetched().to_dict())
+    github = FakeGitHub()
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
+
+    assert _run(files, "report", str(files.root / "results")) == 0
+    assert _run(files, "post-issues", "--repository", REGISTRY) == 0
+
+    lines = files.root / "work" / "issues" / "lines"
+    assert sorted(path.name for path in lines.iterdir()) == ["beta.json", "nightly.json"]
+    assert [data["title"] for _, data in github.created] == [
+        "The release checks cannot run on the beta line"
+    ]

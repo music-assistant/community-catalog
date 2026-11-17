@@ -37,6 +37,7 @@ from registry.index import render_indexes, stale_index_files
 from registry.models import (
     AdmissionReport,
     FetchReport,
+    LineReport,
     LineResults,
     ProviderReport,
     ProviderStatus,
@@ -47,6 +48,7 @@ from registry.pipeline import (
     ADMISSION_REPORT,
     FETCH_REPORT,
     ISSUES_FOLDER,
+    LINES_FOLDER,
     apply_results,
     archive_path,
     read_plan,
@@ -59,7 +61,14 @@ from registry.registry import (
     InvalidRegistryError,
     load_registry,
 )
-from registry.report import build_reports, open_issues, post_report
+from registry.report import (
+    build_line_reports,
+    build_reports,
+    open_issues,
+    open_line_issues,
+    post_line_report,
+    post_report,
+)
 from registry.reserved import add_server_domains
 
 # the token the commands that talk to GitHub read from the environment
@@ -187,6 +196,7 @@ def _check(args: argparse.Namespace) -> None:
         reason=outcome.reason,
         output=outcome.output,
         passed_before=previous is not None and previous.passed,
+        unavailable=outcome.unavailable,
     )
     results = LineResults(line=args.line, checked=format_date(now()), results=[result])
     args.output.write_bytes(dumps(results.to_dict()))
@@ -213,21 +223,30 @@ def _apply_results(args: argparse.Namespace) -> None:
 
 
 def _report(args: argparse.Namespace) -> None:
-    """Write the report of every provider: its failures in this run and what settles them."""
+    """
+    Write the report of every provider: its failures in this run and what settles them.
+
+    Also the report of every server line with results: whether its checks could run.
+    """
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
     results = read_results(args.results, read_plan(args.work))
-    reports = build_reports(load_registry(args.root), fetched, results)
+    registry = load_registry(args.root)
+    reports = build_reports(registry, fetched, results)
     folder = args.work / ISSUES_FOLDER
-    folder.mkdir(parents=True, exist_ok=True)
+    (folder / LINES_FOLDER).mkdir(parents=True, exist_ok=True)
     for report in reports:
         (folder / f"{report.domain}.json").write_bytes(dumps(report.to_dict()))
         for failure in report.failures:
             print(f"{report.domain}: {failure.heading}")
+    for line in build_line_reports(registry, results):
+        (folder / LINES_FOLDER / f"{line.line}.json").write_bytes(dumps(line.to_dict()))
+        if line.reason is not None:
+            print(f"{line.line}: the checks cannot run: {line.reason}")
     print(f"{len(reports)} report(s) written to {folder}")
 
 
 def _post_issues(args: argparse.Namespace) -> int:
-    """Open, add to or close the issue of each provider on the registry, after its report."""
+    """Open, add to or close the issue of each provider and server line, after its report."""
     github = GitHub(_token())
     issues = open_issues(github, args.repository)
     failed = 0
@@ -250,6 +269,17 @@ def _post_issues(args: argparse.Namespace) -> int:
             continue
         if done is not None:
             print(f"{report.domain}: {done}")
+    line_issues = open_line_issues(github, args.repository)
+    for path in sorted((args.work / ISSUES_FOLDER / LINES_FOLDER).glob("*.json")):
+        line = _load(path, LineReport)
+        try:
+            done = post_line_report(line, line_issues.get(line.line), github, args.repository)
+        except OSError as err:
+            failed += 1
+            print(f"warning: {line.line}: {err}", file=sys.stderr)
+            continue
+        if done is not None:
+            print(f"{line.line}: {done}")
     return 1 if failed else 0
 
 
@@ -392,7 +422,9 @@ def _token() -> str:
     return token
 
 
-def _load[T: (FetchReport, ProviderReport, AdmissionReport)](path: Path, model: type[T]) -> T:
+def _load[T: (FetchReport, ProviderReport, LineReport, AdmissionReport)](
+    path: Path, model: type[T]
+) -> T:
     """
     Return a file of the work folder.
 

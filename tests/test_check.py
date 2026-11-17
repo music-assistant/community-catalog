@@ -105,7 +105,11 @@ def _server_platform() -> str:
 
 
 def _run(
-    wheels: Path, *args: str, timeout: int | None = None, drop: str | None = None
+    wheels: Path,
+    *args: str,
+    timeout: int | None = None,
+    drop: str | None = None,
+    python_path: Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a command of the registry with the interpreter of the server checkout."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("UV_")}
@@ -115,6 +119,8 @@ def _run(
     if drop is not None:
         # a server without this name in its community catalog
         environment["DROP_SERVER_NAME"] = drop
+    if python_path is not None:
+        environment["PYTHONPATH"] = str(python_path)
     return subprocess.run(
         [SERVER_PYTHON, "-c", RUN_OFFLINE, str(wheels), *args],
         cwd=ROOT,
@@ -246,6 +252,37 @@ def test_a_check_that_cannot_run_gives_no_result(files: Files, tmp_path: Path) -
     assert run.returncode == 1
     assert "good_music 1.0.0: the check could not run on nightly: " in run.stderr
     assert not (files.root / "scratch" / "good_music" / "install.json").exists()
+
+
+def test_a_load_script_that_cannot_start_is_no_failure_of_the_provider(
+    files: Files, wheels: Path, tmp_path: Path
+) -> None:
+    """A server without a helper the load script imports gives a check that could not run."""
+    ran = tmp_path / "ran"
+    _release(files, "good_music", "1.0.0", f"open({str(ran)!r}, 'w').close()\n")
+    # in every process of the check, a server without a helper the load script imports
+    older = tmp_path / "older"
+    older.mkdir()
+    (older / "sitecustomize.py").write_text(
+        "import music_assistant.controllers.community_catalog\n"
+        "from music_assistant.helpers import util\n"
+        "del util.set_provider_tier\n"
+    )
+
+    assert _check(files, wheels, "good_music", "install").returncode == 0
+    run = _check(files, wheels, "good_music", "load", python_path=older)
+
+    assert run.returncode == 0, run.stderr
+    [result] = load_model(files.root / "scratch" / "good_music" / "load.json", LineResults).results
+    assert (result.passed, result.unavailable) == (False, True)
+    assert result.reason is not None
+    assert result.reason.startswith(
+        "load: the load script cannot start in this server image: "
+        "cannot import name 'set_provider_tier'"
+    )
+    assert result.output is not None
+    assert "ImportError" in result.output
+    assert not ran.exists()
 
 
 def test_the_load_timeout_ends_every_process_of_the_import(
