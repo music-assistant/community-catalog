@@ -173,7 +173,9 @@ def check_admission(
             file.line: (result.passed, result.reason)
             for file in results
             for result in file.results
+            # a check that could not run in the server image is no verdict on the release
             if (result.domain, result.version) == (report.domain, report.version)
+            and not result.unavailable
         }
         for line, config in sorted(registry.server_lines.items()):
             if config.frozen:

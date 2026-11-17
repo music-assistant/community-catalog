@@ -271,6 +271,31 @@ def test_the_release_must_pass_on_a_line(files: Files, github: FakeGitHub) -> No
     assert "close and reopen it after you publish a new release" in failed_text
 
 
+def test_a_line_whose_checks_could_not_run_is_no_failure(files: Files, github: FakeGitHub) -> None:
+    """A check that could not run in the server image shows as not run, without its error."""
+    report = _prepare(files, github)
+    error = "load: the load script cannot start in this server image: cannot import name 'x'"
+    unavailable = LineResults.from_dict(
+        {
+            "line": "beta",
+            "checked": "2026-11-15T03:00:00Z",
+            "results": [
+                {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": error,
+                 "output": f"Traceback\nImportError: {error}", "unavailable": True}
+            ],
+        }
+    )  # fmt: skip
+
+    passed, text = check_admission(
+        load_registry(files.root), report, [_results("nightly", passed=True), unavailable]
+    )
+
+    assert passed
+    assert "- ❌ beta: the checks did not run\n" in text
+    assert "- ✅ nightly: passed" in text
+    assert "cannot import name" not in text
+
+
 @pytest.mark.parametrize(
     ("node", "problem"),
     [
