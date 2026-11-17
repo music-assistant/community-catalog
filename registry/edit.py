@@ -98,18 +98,18 @@ def record_check(
     registry: Registry,
     domain: str,
     version: str,
-    line: str,
+    channel: str,
     *,
     reason: str | None,
     checked: str | None = None,
 ) -> None:
     """
-    Record the result of the checks of a version on a server line.
+    Record the result of the checks of a version on a channel.
 
     :param registry: The registry.
     :param domain: The domain of the provider.
     :param version: The version.
-    :param line: The server line.
+    :param channel: The channel.
     :param reason: Why the version did not pass; None when it passed.
     :param checked: When it was checked; now when omitted.
     :raises CommandError: There is no such provider or version.
@@ -119,20 +119,20 @@ def record_check(
     if (file := provider.versions.get(version)) is None:
         msg = f"{domain} has no version {version}"
         raise CommandError(msg)
-    file.checks[line] = CheckResult(
+    file.checks[channel] = CheckResult(
         passed=reason is None, checked=checked or format_date(now()), reason=reason
     )
     write_version(registry, domain, file)
 
 
-def clear_failed_check(registry: Registry, domain: str, version: str, line: str) -> None:
+def clear_failed_check(registry: Registry, domain: str, version: str, channel: str) -> None:
     """
-    Remove a failed result of the checks of a version on a server line; a passed one stays.
+    Remove a failed result of the checks of a version on a channel; a passed one stays.
 
     :param registry: The registry.
     :param domain: The domain of the provider.
     :param version: The version.
-    :param line: The server line.
+    :param channel: The channel.
     :raises CommandError: There is no such provider or version.
     :raises InvalidRegistryError: The version file would not be valid.
     """
@@ -140,8 +140,8 @@ def clear_failed_check(registry: Registry, domain: str, version: str, line: str)
     if (file := provider.versions.get(version)) is None:
         msg = f"{domain} has no version {version}"
         raise CommandError(msg)
-    if (check := file.checks.get(line)) is not None and not check.passed:
-        del file.checks[line]
+    if (check := file.checks.get(channel)) is not None and not check.passed:
+        del file.checks[channel]
         write_version(registry, domain, file)
 
 
@@ -195,7 +195,7 @@ def block_version(registry: Registry, domain: str, version: str, reason: str | N
 
 def write_indexes(root: Path) -> None:
     """
-    Check every file of the registry and write the index file of every server line that changed.
+    Check every file of the registry and write the index file of every channel that changed.
 
     :param root: The root folder of the registry.
     :raises InvalidRegistryError: A file of the registry is not valid.
@@ -219,7 +219,7 @@ def write_version(registry: Registry, domain: str, version: VersionFile) -> None
     :raises InvalidRegistryError: The version is not valid.
     """
     provider = registry.providers[domain]
-    problems = check_version(version, provider.file, registry.server_lines)
+    problems = check_version(version, provider.file, registry.channels)
     _write(registry, registry.version_path(domain, version.version), version.to_dict(), problems)
     provider.versions[version.version] = version
 

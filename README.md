@@ -60,7 +60,7 @@ Report a risk to users privately: "Report a vulnerability" on the
        uses: music-assistant/community-catalog/.github/workflows/check-provider.yml@main
        with:
          folder: my_provider
-         server-line: nightly
+         channel: nightly
    ```
 
 5. **Submit the provider** with the form
@@ -75,10 +75,10 @@ the issue withdraws the submission.
 
 After admission, you release whenever you want: publish a GitHub release, and nothing else is
 needed. The registry looks for new releases once a night and checks the newest one on each
-server line (nightly, beta and the stable lines). A release that passes reaches the servers of
-that line without review. A release that is refused or fails gets an issue on this repository
-that mentions you, with the reason; it closes by itself when a later release passes. A refused
-release is not tried again; publish a new version.
+channel (nightly, beta, and one per stable version such as stable 2.11). A release that passes
+reaches the servers on that channel without review. A release that is refused or fails gets an
+issue on this repository that mentions you, with the reason; it closes by itself when a later
+release passes. A refused release is not tried again; publish a new version.
 
 ## Changing or leaving
 

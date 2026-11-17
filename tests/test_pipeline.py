@@ -14,8 +14,8 @@ from registry.files import load_model
 from registry.github import COMMENTS_PER_PAGE, GitHub
 from registry.markdown import code_block
 from registry.models import (
+    ChannelResults,
     FetchReport,
-    LineResults,
     ProviderReport,
     RefusedRelease,
     RepositoryState,
@@ -24,12 +24,12 @@ from registry.pipeline import versions_to_check
 from registry.registry import load_registry
 from registry.report import (
     LABEL,
-    build_line_reports,
+    build_channel_reports,
     build_reports,
     is_settled,
+    open_channel_issues,
     open_issues,
-    open_line_issues,
-    post_line_report,
+    post_channel_report,
     post_report,
 )
 from tests.conftest import (
@@ -54,9 +54,9 @@ REGISTRY = "music-assistant/community-catalog"
 UNAVAILABLE = "load: the load script cannot start in this server image: cannot import name 'x'"
 
 
-def _results(line: str, *results: dict[str, Any]) -> dict[str, Any]:
+def _results(channel: str, *results: dict[str, Any]) -> dict[str, Any]:
     """Return the content of a results file."""
-    return {"line": line, "checked": "2026-11-15T03:00:00Z", "results": list(results)}
+    return {"channel": channel, "checked": "2026-11-15T03:00:00Z", "results": list(results)}
 
 
 def _result(version: str, reason: str | None = None, **changes: Any) -> dict[str, Any]:
@@ -76,19 +76,19 @@ def _run(files: Files, *args: str) -> int:
     return main(["--root", str(files.root), *args])
 
 
-def _plan(files: Files, lines: dict[str, list[str]], domain: str = DOMAIN) -> None:
-    """Write the plan of the check step: the versions of a provider to check, by line."""
+def _plan(files: Files, channels: dict[str, list[str]], domain: str = DOMAIN) -> None:
+    """Write the plan of the check step: the versions of a provider to check, by channel."""
     plan = {
-        line: [{"domain": domain, "version": version} for version in versions]
-        for line, versions in lines.items()
+        channel: [{"domain": domain, "version": version} for version in versions]
+        for channel, versions in channels.items()
     }
-    files.write("work/plan.json", {"lines": plan})
+    files.write("work/plan.json", {"channels": plan})
 
 
-def _write_result(files: Files, line: str, result: dict[str, Any], name: str = "") -> Path:
+def _write_result(files: Files, channel: str, result: dict[str, Any], name: str = "") -> Path:
     """Write the results file of one version where the check step puts it, or at a name."""
     name = name or f"{result['domain']}-{result['version']}.json"
-    return files.write(f"results/{line}/{name}", _results(line, result))
+    return files.write(f"results/{channel}/{name}", _results(channel, result))
 
 
 def _apply(files: Files) -> int:
@@ -96,31 +96,31 @@ def _apply(files: Files) -> int:
     return _run(files, "apply-results", str(files.root / "results"))
 
 
-def _index(files: Files, line: str) -> dict[str, Any]:
-    """Return the index file of a line."""
-    index: dict[str, Any] = json.loads((files.root / f"site/v1/{line}.json").read_text())
+def _index(files: Files, channel: str) -> dict[str, Any]:
+    """Return the index file of a channel."""
+    index: dict[str, Any] = json.loads((files.root / f"site/v1/{channel}.json").read_text())
     return index
 
 
 def test_versions_to_check(files: Files) -> None:
     """Versions without a result and each latest are checked; nothing blocked or frozen."""
     files.write(
-        "server_lines.json",
+        "channels.json",
         {
-            "lines": {
+            "channels": {
                 "nightly": {"image": "ghcr.io/music-assistant/server:nightly"},
                 "2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True},
             }
         },
     )
     files.provider(blocked_versions={"1.3.0": "Sends the library elsewhere"})
-    files.version("1.0.0", lines={"nightly": True})
-    files.version("1.1.0", lines={"nightly": True})
-    files.version("1.2.0", lines={"nightly": False})
-    files.version("1.3.0", lines={})
-    files.version("1.4.0", lines={})
+    files.version("1.0.0", channels={"nightly": True})
+    files.version("1.1.0", channels={"nightly": True})
+    files.version("1.2.0", channels={"nightly": False})
+    files.version("1.3.0", channels={})
+    files.version("1.4.0", channels={})
     files.provider("blocked_music", status="blocked", reason="Sends the library elsewhere")
-    files.version("1.0.0", domain="blocked_music", lines={})
+    files.version("1.0.0", domain="blocked_music", channels={})
     registry = load_registry(files.root)
 
     assert versions_to_check(registry, "nightly") == [
@@ -134,8 +134,8 @@ def test_versions_to_check(files: Files) -> None:
 def test_a_version_that_failed_once_gets_another_chance(files: Files) -> None:
     """A latest version that failed on a broken night is checked again, and comes back."""
     files.provider()
-    files.version("1.4.0", lines={"nightly": True})
-    files.version("1.5.0", lines={"nightly": True})
+    files.version("1.4.0", channels={"nightly": True})
+    files.version("1.5.0", channels={"nightly": True})
     _plan(files, {"nightly": ["1.4.0", "1.5.0"]})
     _write_result(files, "nightly", _result("1.5.0", "load: ImportError in the server"))
     assert _apply(files) == 0
@@ -153,9 +153,9 @@ def test_a_version_that_failed_once_gets_another_chance(files: Files) -> None:
 def test_only_the_newest_versions_above_the_latest_are_checked_again(files: Files) -> None:
     """Of the versions above the latest that failed, the three newest are checked again."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True})
+    files.version("1.0.0", channels={"nightly": True})
     for version in ("1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"):
-        files.version(version, lines={"nightly": False})
+        files.version(version, channels={"nightly": False})
 
     assert versions_to_check(load_registry(files.root), "nightly") == [
         (DOMAIN, "1.0.0"),
@@ -166,9 +166,9 @@ def test_only_the_newest_versions_above_the_latest_are_checked_again(files: File
 
 
 def test_apply_results(files: Files) -> None:
-    """The results of every line are recorded and the index files written."""
+    """The results of every channel are recorded and the index files written."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     _plan(files, {"nightly": ["1.0.0"], "beta": ["1.0.0"]})
     _write_result(files, "nightly", _result("1.0.0"))
     _write_result(files, "beta", _result("1.0.0", "load: no module"))
@@ -187,9 +187,9 @@ def test_apply_results(files: Files) -> None:
 def test_a_version_that_stops_passing_falls_back(files: Files) -> None:
     """When the latest version stops passing, the newest version that still passes is latest."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True})
-    files.version("1.1.0", lines={"nightly": False})
-    files.version("1.2.0", lines={"nightly": True})
+    files.version("1.0.0", channels={"nightly": True})
+    files.version("1.1.0", channels={"nightly": False})
+    files.version("1.2.0", channels={"nightly": True})
     assert _run(files, "build") == 0
     assert _index(files, "nightly")["providers"][DOMAIN]["latest"] == "1.2.0"
     _plan(files, {"nightly": ["1.2.0"]})
@@ -227,7 +227,7 @@ def test_a_version_that_stops_passing_falls_back(files: Files) -> None:
             "checks.nightly.checked: 'today' is not a date",
         ),
         ({**_results("nightly"), "extra": 1}, "unknown key extra"),
-        ({"line": "nightly", "checked": CHECKED, "results": "all"}, '"results" must be a list'),
+        ({"channel": "nightly", "checked": CHECKED, "results": "all"}, '"results" must be a list'),
     ],
 )
 def test_a_result_that_is_not_valid_is_skipped(
@@ -235,9 +235,9 @@ def test_a_result_that_is_not_valid_is_skipped(
 ) -> None:
     """Results come from containers that ran provider code; one that is not valid is skipped."""
     files.provider()
-    path = files.version("1.0.0", lines={})
+    path = files.version("1.0.0", channels={})
     before = path.read_bytes()
-    files.version("1.1.0", lines={})
+    files.version("1.1.0", channels={})
     _plan(files, {"nightly": ["1.0.0", "1.1.0"]})
     files.write(f"results/nightly/{DOMAIN}-1.0.0.json", content)
     _write_result(files, "nightly", _result("1.1.0"))
@@ -256,10 +256,10 @@ def test_a_result_counts_only_for_its_own_version(
 ) -> None:
     """A result is read only at the name the plan gives it, for exactly that version."""
     files.provider("aaa_evil", repository="someone/aaa-evil", folder="aaa_evil")
-    files.version("1.0.0", "aaa_evil", folder="aaa_evil", lines={"nightly": True})
+    files.version("1.0.0", "aaa_evil", folder="aaa_evil", channels={"nightly": True})
     files.provider()
-    victim = files.version("1.0.0", lines={"nightly": True})
-    files.version("1.1.0", lines={"nightly": True})
+    victim = files.version("1.0.0", channels={"nightly": True})
+    files.version("1.1.0", channels={"nightly": True})
     before = victim.read_bytes()
     assert _run(files, "build") == 0
     _plan(files, {"nightly": ["1.0.0"], "beta": ["1.0.0"]}, domain="aaa_evil")
@@ -291,8 +291,8 @@ def test_a_results_file_behind_a_link_or_too_large_is_ignored(
 ) -> None:
     """Only a regular file of at most 200 kB at the name of the plan is read."""
     files.provider()
-    files.version("1.0.0", lines={})
-    files.version("1.1.0", lines={})
+    files.version("1.0.0", channels={})
+    files.version("1.1.0", channels={})
     _plan(files, {"nightly": ["1.0.0", "1.1.0"]})
     outside = tmp_path / "outside.json"
     outside.write_text(json.dumps(_results("nightly", _result("1.0.0"))))
@@ -307,21 +307,21 @@ def test_a_results_file_behind_a_link_or_too_large_is_ignored(
     assert all(not v.checks for v in load_registry(files.root).providers[DOMAIN].versions.values())
 
 
-def test_a_missing_result_and_a_frozen_line(
+def test_a_missing_result_and_a_frozen_channel(
     files: Files, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A version without a result keeps its results; a frozen line takes none."""
+    """A version without a result keeps its results; a frozen channel takes none."""
     files.write(
-        "server_lines.json",
+        "channels.json",
         {
-            "lines": {
+            "channels": {
                 "nightly": {"image": "ghcr.io/music-assistant/server:nightly"},
                 "2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True},
             }
         },
     )
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     _plan(files, {"nightly": ["1.0.0"], "2.11": ["1.0.0"]})
     _write_result(files, "2.11", _result("1.0.0"))
 
@@ -329,15 +329,15 @@ def test_a_missing_result_and_a_frozen_line(
 
     err = capsys.readouterr().err
     assert f"{DOMAIN} 1.0.0 on nightly: no result" in err
-    assert "'2.11': skipped, not a server line that is tested" in err
+    assert "'2.11': skipped, not a channel that is tested" in err
     assert load_registry(files.root).providers[DOMAIN].versions["1.0.0"].checks == {}
 
 
 def test_a_check_that_could_not_run_removes_a_failure(files: Files) -> None:
-    """A check that could not run removes a failed result of its version on the line, not a pass."""
+    """A check that could not run removes a failed result of its version there, not a pass."""
     files.provider()
-    files.version("1.0.0", lines={"beta": True, "nightly": True})
-    files.version("1.1.0", lines={"beta": False, "nightly": True})
+    files.version("1.0.0", channels={"beta": True, "nightly": True})
+    files.version("1.1.0", channels={"beta": False, "nightly": True})
     assert _run(files, "build") == 0
     _plan(files, {"beta": ["1.0.0", "1.1.0"]})
     _write_result(files, "beta", _unavailable("1.0.0"))
@@ -378,8 +378,10 @@ def _fetched(*, refused: bool = False, owner_id: int = OWNER_ID) -> FetchReport:
 def _report(
     files: Files, *results: tuple[str, dict[str, Any]], fetched: FetchReport | None = None
 ) -> ProviderReport:
-    """Return the report of the sample provider after one result per (line, result)."""
-    files_results = [LineResults.from_dict(_results(line, result)) for line, result in results]
+    """Return the report of the sample provider after one result per (channel, result)."""
+    files_results = [
+        ChannelResults.from_dict(_results(channel, result)) for channel, result in results
+    ]
     [report] = build_reports(load_registry(files.root), fetched or _fetched(), files_results)
     return report
 
@@ -426,8 +428,8 @@ def _issues(github: FakeGitHub) -> list[dict[str, Any]]:
 def test_reports_for_failures_and_refusals(files: Files) -> None:
     """A refused release and each failed check are failures, their text of the provider fenced."""
     files.provider()
-    files.version("1.0.0", lines={})
-    files.version("1.1.0", lines={})
+    files.version("1.0.0", channels={})
+    files.version("1.1.0", channels={})
     _refuse(files, "2.0.0", "unknown key 'x'\n```\ninjected")
 
     report = _report(
@@ -460,7 +462,7 @@ def test_reports_for_failures_and_refusals(files: Files) -> None:
 def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
     """Another repository under the name of a provider is a failure until GitHub gives it again."""
     files.provider()
-    files.version("1.0.0", lines={"beta": True})
+    files.version("1.0.0", channels={"beta": True})
 
     report = _report(files, fetched=_fetched(owner_id=999))
 
@@ -474,14 +476,14 @@ def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
 @pytest.mark.parametrize(
     ("checks", "refused", "key", "settled"),
     [
-        # the newest version passed on the line of the failure
+        # the newest version passed on the channel of the failure
         (
             {"1.0.0": {"nightly": False}, "1.1.0": {"nightly": True}},
             None,
             "check 1.0.0 nightly",
             True,
         ),
-        # it passed on another line only
+        # it passed on another channel only
         (
             {"1.0.0": {"nightly": False}, "1.1.0": {"beta": True}},
             None,
@@ -490,10 +492,10 @@ def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
         ),
         # a version that failed and passed again
         ({"1.0.0": {"nightly": True}}, None, "check 1.0.0 nightly", True),
-        # a line that is no longer tested, while the newest version passes on another one
+        # a channel that is no longer tested, while the newest version passes on another one
         ({"1.0.0": {"beta": True}}, None, "check 1.0.0 2.11", True),
         ({"1.0.0": {}}, None, "check 1.0.0 2.11", False),
-        # a refused release, settled by a higher version that passed on a line
+        # a refused release, settled by a higher version that passed on a channel
         ({"2.1.0": {"beta": True}}, "2.0.0", "refused 2.0.0", True),
         ({"2.1.0": {"beta": False}}, "2.0.0", "refused 2.0.0", False),
         # a newest release that was refused settles nothing
@@ -511,8 +513,8 @@ def test_when_a_failure_is_settled(
 ) -> None:
     """A failure is settled once the newest version passed where it failed, or anywhere at all."""
     files.provider()
-    for version, lines in checks.items():
-        files.version(version, lines=lines)
+    for version, channels in checks.items():
+        files.version(version, channels=channels)
     if refused is not None:
         _refuse(files, refused, "refused")
 
@@ -520,10 +522,10 @@ def test_when_a_failure_is_settled(
 
 
 def test_the_report_leaves_out_what_is_settled(files: Files) -> None:
-    """A failure of an older version on a line where the newest passes needs nobody."""
+    """A failure of an older version on a channel where the newest passes needs nobody."""
     files.provider()
-    files.version("1.0.0", lines={})
-    files.version("1.1.0", lines={"nightly": True})
+    files.version("1.0.0", channels={})
+    files.version("1.1.0", channels={"nightly": True})
 
     report = _report(files, ("nightly", _result("1.0.0", "load: x")))
 
@@ -533,7 +535,7 @@ def test_the_report_leaves_out_what_is_settled(files: Files) -> None:
 def test_a_first_failure_opens_one_issue(files: Files) -> None:
     """The first failure opens one labelled issue on the registry that mentions the maintainers."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
 
     done = _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
@@ -544,7 +546,7 @@ def test_a_first_failure_opens_one_issue(files: Files) -> None:
     assert created["labels"] == [LABEL]
     body = created["body"]
     assert body.startswith("<!-- release-check: sample_music; check 1.0.0 nightly -->\n")
-    assert "### Version 1.0.0 does not pass the checks on nightly" in body
+    assert "### Version 1.0.0 does not pass the checks on the nightly channel" in body
     assert "```\nload: broken\n```" in body
     assert "#releasing-updates" in body
     assert "closes by itself" in body
@@ -561,7 +563,7 @@ def test_a_new_issue_mentions_at_most_ten(files: Files) -> None:
     files.provider()
     files.version(
         "1.0.0",
-        lines={"beta": True},
+        channels={"beta": True},
         manifest={**manifest(requirements=["some-package==1.0"]), "codeowners": owners},
     )
     github = FakeGitHub()
@@ -575,11 +577,11 @@ def test_a_new_issue_mentions_at_most_ten(files: Files) -> None:
 def test_a_new_failure_while_open_is_a_comment(files: Files) -> None:
     """Another failure while the issue is open is one comment, without mentions, told once."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
-    files.version("1.0.0", lines={"nightly": False})
-    files.version("1.1.0", lines={})
+    files.version("1.0.0", channels={"nightly": False})
+    files.version("1.1.0", channels={})
 
     done = _night(files, github, ("beta", _result("1.1.0", "load: other")))
     again = _night(files, github, ("beta", _result("1.1.0", "load: other")))
@@ -588,18 +590,18 @@ def test_a_new_failure_while_open_is_a_comment(files: Files) -> None:
     assert len(github.created) == 1
     [comment] = github.comments[REGISTRY, 1]
     assert comment["body"].startswith("<!-- release-check: sample_music; check 1.1.0 beta -->\n")
-    assert "### Version 1.1.0 does not pass the checks on beta" in comment["body"]
+    assert "### Version 1.1.0 does not pass the checks on the beta channel" in comment["body"]
     assert _mentions(comment["body"]) == []
 
 
 def test_a_passing_release_closes_the_issue(files: Files) -> None:
     """When the newest version passed where the issue says it failed, it is closed, once."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     _night(files, github, ("nightly", _result("1.0.0", "load: broken")))
-    files.version("1.0.0", lines={"nightly": False})
-    files.version("1.1.0", lines={})
+    files.version("1.0.0", channels={"nightly": False})
+    files.version("1.1.0", channels={})
 
     done = _night(files, github, ("nightly", _result("1.1.0")))
 
@@ -609,25 +611,25 @@ def test_a_passing_release_closes_the_issue(files: Files) -> None:
     [comment] = github.comments[REGISTRY, 1]
     assert comment["body"] == "Version 1.1.0 passed the checks, so this issue is closed."
     # a failure after that opens a new issue
-    files.version("1.1.0", lines={"nightly": True})
-    files.version("1.2.0", lines={})
+    files.version("1.1.0", channels={"nightly": True})
+    files.version("1.2.0", channels={})
     assert _night(files, github, ("nightly", _result("1.2.0", "load: again"))) == (
         f"https://github.com/{REGISTRY}/issues/2"
     )
     assert [issue["state"] for issue in _issues(github)] == ["closed", "open"]
 
 
-def test_an_issue_stays_open_until_every_line_passes(files: Files) -> None:
-    """A newest version that passes on one line of the issue only leaves it open."""
+def test_an_issue_stays_open_until_every_channel_passes(files: Files) -> None:
+    """A newest version that passes on one channel of the issue only leaves it open."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     _night(files, github, ("nightly", _result("1.0.0", "load: x")), ("beta", _result("1.0.0", "y")))
-    files.version("1.0.0", lines={"nightly": False, "beta": False})
-    files.version("1.1.0", lines={"nightly": True})
+    files.version("1.0.0", channels={"nightly": False, "beta": False})
+    files.version("1.1.0", channels={"nightly": True})
 
     assert _night(files, github, ("beta", _result("1.1.0", "y"))) == "#1: 1 new failure(s)"
-    files.version("1.1.0", lines={"nightly": True, "beta": False})
+    files.version("1.1.0", channels={"nightly": True, "beta": False})
     assert _night(files, github) is None
     assert _issues(github)[0]["state"] == "open"
 
@@ -635,7 +637,7 @@ def test_an_issue_stays_open_until_every_line_passes(files: Files) -> None:
 def test_a_key_written_by_someone_else_does_not_count(files: Files) -> None:
     """Only the issue and comments of the pipeline's account count, and only their first line."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     marker = "<!-- release-check: sample_music; check 1.0.0 nightly; check 1.0.0 beta -->"
     # an issue of a stranger with the label, and one of the pipeline that quotes a marker
@@ -660,7 +662,7 @@ def test_text_of_a_provider_mentions_nobody(files: Files) -> None:
     evil = {**manifest(DOMAIN, ["some-package==1.0"]), "name": "@evil `` @evil", "codeowners": [
         "@someone", "@another"]}  # fmt: skip
     files.provider()
-    files.version("1.0.0", lines={}, manifest=evil)
+    files.version("1.0.0", channels={}, manifest=evil)
     _refuse(files, "2.0.0", "@evil ```` @evil\n@evil")
     github = FakeGitHub()
 
@@ -682,7 +684,7 @@ def test_text_of_a_provider_mentions_nobody(files: Files) -> None:
 def test_the_output_in_a_post_fits_github(files: Files) -> None:
     """GitHub takes 65536 characters in an issue: the failures share the end of their output."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     output = "start" + "x" * 60_000 + "load: the end"
     github = FakeGitHub()
 
@@ -712,7 +714,7 @@ def test_a_post_fits_github_whatever_the_output(
 ) -> None:
     """The whole text of an issue or comment stays within 65536 characters, fences and all."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     if open_issue:
         github.issue(
@@ -761,9 +763,9 @@ def test_a_provider_whose_issue_cannot_be_read_is_skipped(
     github = FakeGitHub()
     for domain in ("other_music", DOMAIN, "third_music"):
         files.provider(domain)
-        files.version("1.0.0", domain=domain, lines={})
+        files.version("1.0.0", domain=domain, channels={})
     results = [
-        LineResults.from_dict(
+        ChannelResults.from_dict(
             _results(
                 "nightly",
                 *({**_result("1.0.0", "x"), "domain": d} for d in ("other_music", "third_music")),
@@ -798,7 +800,7 @@ def test_a_provider_whose_issue_cannot_be_read_is_skipped(
 def test_report_writes_the_reports(files: Files) -> None:
     """The report command writes the report of each provider, only from results of the plan."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     _plan(files, {"nightly": ["1.0.0"]})
     _write_result(files, "nightly", _result("1.0.0", "load: x"))
     # a result the plan does not name is not reported
@@ -820,10 +822,10 @@ def test_post_issues_goes_on_after_a_refusal(
     github = FakeGitHub()
     files.provider()
     files.provider("other_music")
-    files.version("1.0.0", lines={})
-    files.version("1.0.0", domain="other_music", lines={})
+    files.version("1.0.0", channels={})
+    files.version("1.0.0", domain="other_music", channels={})
     results = [
-        LineResults.from_dict(
+        ChannelResults.from_dict(
             _results(
                 "nightly", _result("1.0.0", "x"), {**_result("1.0.0", "x"), "domain": "other_music"}
             )
@@ -852,21 +854,23 @@ def test_post_issues_goes_on_after_a_refusal(
     assert all(r.get_header("Authorization") == "Bearer a-token" for r in github.requests)
 
 
-def _line_night(
+def _channel_night(
     files: Files, github: FakeGitHub, *results: tuple[str, dict[str, Any]]
 ) -> str | None:
-    """Run the report and the posting of one night for the one line of the results."""
-    files_results = [LineResults.from_dict(_results(line, result)) for line, result in results]
-    [report] = build_line_reports(load_registry(files.root), files_results)
+    """Run the report and the posting of one night for the one channel of the results."""
+    files_results = [
+        ChannelResults.from_dict(_results(channel, result)) for channel, result in results
+    ]
+    [report] = build_channel_reports(load_registry(files.root), files_results)
     client = GitHub("a-token", github)
-    issue = open_line_issues(client, REGISTRY).get(report.line)
-    return post_line_report(report, issue, client, REGISTRY)
+    issue = open_channel_issues(client, REGISTRY).get(report.channel)
+    return post_channel_report(report, issue, client, REGISTRY)
 
 
 def test_a_check_that_could_not_run_fails_no_provider(files: Files) -> None:
-    """The issue of a provider about a line whose checks could not run closes, and none opens."""
+    """The issue of a provider about a channel whose checks could not run closes, and none opens."""
     files.provider()
-    files.version("1.0.0", lines={"nightly": True, "beta": False})
+    files.version("1.0.0", channels={"nightly": True, "beta": False})
     github = FakeGitHub()
     github.issue(
         REGISTRY,
@@ -887,46 +891,68 @@ def test_a_check_that_could_not_run_fails_no_provider(files: Files) -> None:
     assert comment["body"] == "Version 1.0.0 passed the checks, so this issue is closed."
 
 
-def test_a_line_whose_checks_cannot_run_has_one_issue(files: Files) -> None:
-    """The registry maintainers get one issue per line, kept up to date, closed once checks run."""
+def test_a_channel_whose_checks_cannot_run_has_one_issue(files: Files) -> None:
+    """The maintainers get one issue per channel, kept up to date, closed once the checks run."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     github = FakeGitHub()
     # an issue of a stranger with the label and the first line of the pipeline does not count
-    github.issue(REGISTRY, 1, "<!-- release-check line: beta -->\n", labels=[{"name": LABEL}])
+    github.issue(REGISTRY, 1, "<!-- release-check channel: beta -->\n", labels=[{"name": LABEL}])
 
-    opened = _line_night(files, github, ("beta", _unavailable("1.0.0")))
-    again = _line_night(files, github, ("beta", _unavailable("1.0.0")))
+    opened = _channel_night(files, github, ("beta", _unavailable("1.0.0")))
+    again = _channel_night(files, github, ("beta", _unavailable("1.0.0")))
 
     assert (opened, again) == (f"https://github.com/{REGISTRY}/issues/2", None)
     [(_, created)] = github.created
-    assert created["title"] == "The release checks cannot run on the beta line"
+    assert created["title"] == "The release checks cannot run on the beta channel"
     assert created["labels"] == [LABEL]
     body = created["body"]
-    assert body.startswith("<!-- release-check line: beta -->\n")
+    assert body.startswith("<!-- release-check channel: beta -->\n")
     assert f"```\n{UNAVAILABLE}\n```" in body
     assert "ImportError: cannot import name 'x'" in body
     assert "closes by itself" in body
     assert _mentions(body) == []
     # another reason replaces the text of the issue
     other = _result("1.0.0", "load: other", unavailable=True)
-    assert _line_night(files, github, ("beta", other)) == "#2: updated"
+    assert _channel_night(files, github, ("beta", other)) == "#2: updated"
     assert "```\nload: other\n```" in _issues(github)[1]["body"]
     # once the checks run, failed or not, the issue is closed, once
-    assert _line_night(files, github, ("beta", _result("1.0.0", "load: x"))) == "#2: closed"
-    assert _line_night(files, github, ("beta", _result("1.0.0", "load: x"))) is None
+    assert _channel_night(files, github, ("beta", _result("1.0.0", "load: x"))) == "#2: closed"
+    assert _channel_night(files, github, ("beta", _result("1.0.0", "load: x"))) is None
     assert [issue["state"] for issue in _issues(github)] == ["open", "closed"]
     [comment] = github.comments[REGISTRY, 2]
-    assert comment["body"] == "The checks run on the `beta` line again, so this issue is closed."
+    assert comment["body"] == "The checks run on the beta channel again, so this issue is closed."
     assert len(github.created) == 1
 
 
-def test_report_and_post_issues_for_a_line_whose_checks_cannot_run(
+def test_an_open_channel_issue_with_the_line_marker_is_updated(files: Files) -> None:
+    """An open issue whose first line names the channel with "line" gets the new text, once."""
+    files.provider()
+    files.version("1.0.0", channels={})
+    github = FakeGitHub()
+    github.issue(
+        REGISTRY,
+        1,
+        "<!-- release-check line: beta -->\nThe checks cannot run on the `beta` line.\n",
+        user={"login": "github-actions[bot]"},
+        labels=[{"name": LABEL}],
+    )
+
+    assert _channel_night(files, github, ("beta", _unavailable("1.0.0"))) == "#1: updated"
+    assert _channel_night(files, github, ("beta", _unavailable("1.0.0"))) is None
+
+    assert github.created == []
+    [issue] = _issues(github)
+    assert issue["body"].startswith("<!-- release-check channel: beta -->\n")
+    assert "cannot check releases on the beta channel." in issue["body"]
+
+
+def test_report_and_post_issues_for_a_channel_whose_checks_cannot_run(
     files: Files, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The report of each line with results is written, and only the maintainers get an issue."""
+    """The report of each channel with results is written, and only the maintainers get an issue."""
     files.provider()
-    files.version("1.0.0", lines={})
+    files.version("1.0.0", channels={})
     _plan(files, {"beta": ["1.0.0"], "nightly": ["1.0.0"]})
     _write_result(files, "beta", _unavailable("1.0.0"))
     _write_result(files, "nightly", _result("1.0.0"))
@@ -938,8 +964,8 @@ def test_report_and_post_issues_for_a_line_whose_checks_cannot_run(
     assert _run(files, "report", str(files.root / "results")) == 0
     assert _run(files, "post-issues", "--repository", REGISTRY) == 0
 
-    lines = files.root / "work" / "issues" / "lines"
-    assert sorted(path.name for path in lines.iterdir()) == ["beta.json", "nightly.json"]
+    channels = files.root / "work" / "issues" / "channels"
+    assert sorted(path.name for path in channels.iterdir()) == ["beta.json", "nightly.json"]
     assert [data["title"] for _, data in github.created] == [
-        "The release checks cannot run on the beta line"
+        "The release checks cannot run on the beta channel"
     ]

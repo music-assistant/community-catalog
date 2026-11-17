@@ -185,8 +185,8 @@ def download_archives(
     """
     needed = {
         (domain, version)
-        for line in registry.server_lines
-        for domain, version in versions_to_check(registry, line)
+        for channel in registry.channels
+        for domain, version in versions_to_check(registry, channel)
         if domain in domains
     }
     for domain, version in sorted(needed):

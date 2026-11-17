@@ -1,5 +1,5 @@
 {
-  "lines": {
+  "channels": {
     "beta": {
       "frozen": false,
       "image": "ghcr.io/music-assistant/server:beta"

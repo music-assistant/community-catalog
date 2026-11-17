@@ -19,7 +19,7 @@ import pytest
 from registry.cli import main
 from registry.edit import add_version, record_check
 from registry.files import load_model
-from registry.models import LineResults
+from registry.models import ChannelResults
 from registry.pipeline import archive_path, make_plan, read_results, write_plan
 from registry.registry import load_registry
 from tests.conftest import (
@@ -27,10 +27,10 @@ from tests.conftest import (
     RESERVED,
     ROOT,
     build_archive,
-    can_run_check_line,
+    can_run_check_channel,
     docker_runs,
     manifest,
-    run_check_line,
+    run_check_channel,
     write_tree,
 )
 
@@ -161,14 +161,14 @@ def _check(
     """Run a stage of the checks of version 1.0.0 of a provider on nightly, as a container does."""
     scratch = files.root / "scratch" / domain
     scratch.mkdir(parents=True, exist_ok=True)
-    return _run(wheels, "--root", str(files.root), "check", "--line", "nightly",
+    return _run(wheels, "--root", str(files.root), "check", "--channel", "nightly",
                 "--domain", domain, "--version", "1.0.0", "--stage", stage,
                 "--scratch", str(scratch), "--output", str(scratch / f"{stage}.json"),
                 **run)  # fmt: skip
 
 
-@pytest.mark.skipif(not can_run_check_line(), reason="needs bash, jq and timeout")
-def test_check_a_line(files: Files, wheels: Path, tmp_path: Path) -> None:
+@pytest.mark.skipif(not can_run_check_channel(), reason="needs bash, jq and timeout")
+def test_check_a_channel(files: Files, wheels: Path, tmp_path: Path) -> None:
     """Each version of the plan gets the verdict of the server's own code, in containers."""
     _release(files, "good_music", "1.0.0", "import helper_lib\n", ["helper-lib==1.0"])
     _release(files, "clash_music", "1.0.0", "", ["needs-old-orjson==1.0"])
@@ -196,12 +196,12 @@ def test_check_a_line(files: Files, wheels: Path, tmp_path: Path) -> None:
     write_plan(plan, files.root / "work")
     log = tmp_path / "docker.log"
 
-    run = run_check_line(
+    run = run_check_channel(
         files.root, "nightly", [str(SERVER_PYTHON), "-c", RUN_OFFLINE, str(wheels)], log
     )
 
     assert run.returncode == 0, run.stderr
-    assert [(e.domain, e.version) for e in plan.lines["nightly"]] == [
+    assert [(e.domain, e.version) for e in plan.channels["nightly"]] == [
         ("broken_music", "1.0.0"),
         ("changed_music", "1.0.0"),
         ("clash_music", "1.0.0"),
@@ -212,7 +212,7 @@ def test_check_a_line(files: Files, wheels: Path, tmp_path: Path) -> None:
     ]
     results = read_results(files.root / "results", plan)
     found = {(r.domain, r.version): r for file in results for r in file.results}
-    assert set(found) == {(e.domain, e.version) for e in plan.lines["nightly"]}
+    assert set(found) == {(e.domain, e.version) for e in plan.channels["nightly"]}
     assert found["good_music", "1.0.0"].passed
     clash = found["clash_music", "1.0.0"]
     assert not clash.passed
@@ -273,7 +273,9 @@ def test_a_load_script_that_cannot_start_is_no_failure_of_the_provider(
     run = _check(files, wheels, "good_music", "load", python_path=older)
 
     assert run.returncode == 0, run.stderr
-    [result] = load_model(files.root / "scratch" / "good_music" / "load.json", LineResults).results
+    [result] = load_model(
+        files.root / "scratch" / "good_music" / "load.json", ChannelResults
+    ).results
     assert (result.passed, result.unavailable) == (False, True)
     assert result.reason is not None
     assert result.reason.startswith(
@@ -302,7 +304,7 @@ def test_the_load_timeout_ends_every_process_of_the_import(
     run = _check(files, wheels, "hanging_music", "load", timeout=3)
 
     assert run.returncode == 0, run.stderr
-    result = load_model(files.root / "scratch" / "hanging_music" / "load.json", LineResults)
+    result = load_model(files.root / "scratch" / "hanging_music" / "load.json", ChannelResults)
     assert result.results[0].reason == "load: the import did not finish within 3 seconds"
     pid = int(pid_file.read_text())
     with pytest.raises(ProcessLookupError):
@@ -317,7 +319,9 @@ def test_the_output_of_a_load_keeps_its_end(files: Files, wheels: Path) -> None:
     assert _check(files, wheels, "noisy_music", "install").returncode == 0
     assert _check(files, wheels, "noisy_music", "load").returncode == 0
 
-    [result] = load_model(files.root / "scratch" / "noisy_music" / "load.json", LineResults).results
+    [result] = load_model(
+        files.root / "scratch" / "noisy_music" / "load.json", ChannelResults
+    ).results
     assert result.reason == "load: RuntimeError: boom"
     assert result.output is not None
     assert len(result.output) <= 50_000
@@ -346,7 +350,7 @@ def test_a_moving_domain_is_checked_with_the_code_of_its_release(
         assert _check(files, wheels, domain, "load").returncode == 0
 
     results = {
-        domain: load_model(files.root / "scratch" / domain / "load.json", LineResults).results[0]
+        domain: load_model(files.root / "scratch" / domain / "load.json", ChannelResults).results[0]
         for domain in SHIPPED
     }
     assert results["musicbrainz"].reason == "load: RuntimeError: the release ran"
@@ -365,7 +369,7 @@ def test_requirements_need_wheels_for_linux_arm64(files: Files, wheels: Path) ->
     assert _check(files, wheels, "host_music", "install").returncode == 0
 
     install = files.root / "scratch" / "host_music" / "install.json"
-    [result] = load_model(install, LineResults).results
+    [result] = load_model(install, ChannelResults).results
     assert result.reason == (
         "dependencies: Requirements of host_music have no wheels for linux arm64"
     )

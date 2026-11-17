@@ -36,4 +36,4 @@ repos:
         entry: uv run python -m registry validate
         language: system
         pass_filenames: false
-        files: ^(providers/|site/|registry/|server_lines\.json|reserved_domains\.json)
+        files: ^(providers/|site/|registry/|channels\.json|reserved_domains\.json)

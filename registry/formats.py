@@ -16,7 +16,7 @@ PROVIDER_FOLDER_NAME = "provider"
 
 _DOMAIN = re.compile(r"[a-z][a-z0-9_]*")
 _VERSION = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
-_SERVER_LINE = re.compile(r"nightly|beta|[0-9]+\.[0-9]+")
+_CHANNEL = re.compile(r"nightly|beta|[0-9]+\.[0-9]+")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _CONTENT_HASH = re.compile(r"[0-9a-f]{64}")
@@ -65,13 +65,22 @@ def version_key(version: str) -> tuple[int, ...]:
     return tuple(int(part) for part in version.split("."))
 
 
-def is_server_line(value: str) -> bool:
+def is_channel(value: str) -> bool:
     """
-    Return whether a value names a server line: nightly, beta or MAJOR.MINOR.
+    Return whether a value names a channel: nightly, beta or MAJOR.MINOR.
 
     :param value: The value to check.
     """
-    return bool(_SERVER_LINE.fullmatch(value))
+    return bool(_CHANNEL.fullmatch(value))
+
+
+def channel_name(channel: str) -> str:
+    """
+    Return the name of a channel in a text for people: "the beta channel", "stable 2.11".
+
+    :param channel: The channel: nightly, beta or MAJOR.MINOR.
+    """
+    return f"the {channel} channel" if channel in {"nightly", "beta"} else f"stable {channel}"
 
 
 def is_date(value: str) -> bool:

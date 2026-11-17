@@ -138,7 +138,7 @@ def test_provider_code_runs_in_a_job_without_permissions(
 ) -> None:
     """The job that runs provider code has no token, no checkout and no secret."""
     definition = workflow["jobs"][job]
-    if "scripts/check-line.sh" in json.dumps(definition):
+    if "scripts/check-channel.sh" in json.dumps(definition):
         assert definition["permissions"] == {}, job
         assert not any(
             step.get("uses", "").startswith("actions/checkout@") for step in _steps(definition)
@@ -310,25 +310,25 @@ def test_admission_reports_also_after_a_failure() -> None:
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
 @pytest.mark.parametrize(
-    ("plan", "lines"),
+    ("plan", "channels"),
     [
-        ({"lines": {}}, []),
-        ({"lines": {"nightly": [], "beta": []}}, []),
+        ({"channels": {}}, []),
+        ({"channels": {"nightly": [], "beta": []}}, []),
         (
-            {"lines": {"nightly": [{"domain": "x", "version": "1.0.0"}], "beta": []}},
-            [{"line": "nightly", "image": "ghcr.io/music-assistant/server:nightly"}],
+            {"channels": {"nightly": [{"domain": "x", "version": "1.0.0"}], "beta": []}},
+            [{"channel": "nightly", "image": "ghcr.io/music-assistant/server:nightly"}],
         ),
     ],
-    ids=["no plan", "nothing planned", "one line"],
+    ids=["no plan", "nothing planned", "one channel"],
 )
-def test_admission_checks_only_the_lines_of_its_plan(
-    tmp_path: Path, plan: dict[str, Any], lines: list[dict[str, str]]
+def test_admission_checks_only_the_channels_of_its_plan(
+    tmp_path: Path, plan: dict[str, Any], channels: list[dict[str, str]]
 ) -> None:
     """A submission with nothing to check starts no check job, so its code never runs."""
-    [step] = [step for step in _steps(ADMISSION["jobs"]["prepare"]) if step.get("id") == "lines"]
+    [step] = [step for step in _steps(ADMISSION["jobs"]["prepare"]) if step.get("id") == "channels"]
     (tmp_path / "work").mkdir()
     (tmp_path / "work" / "plan.json").write_text(json.dumps(plan))
-    shutil.copy(ROOT / "server_lines.json", tmp_path)
+    shutil.copy(ROOT / "channels.json", tmp_path)
     output = tmp_path / "output"
     bash = shutil.which("bash")
     assert bash is not None
@@ -340,8 +340,8 @@ def test_admission_checks_only_the_lines_of_its_plan(
         check=True,
     )
 
-    assert json.loads(output.read_text().removeprefix("lines=")) == lines
-    assert ADMISSION["jobs"]["check"]["if"] == "needs.prepare.outputs.lines != '[]'"
+    assert json.loads(output.read_text().removeprefix("channels=")) == channels
+    assert ADMISSION["jobs"]["check"]["if"] == "needs.prepare.outputs.channels != '[]'"
 
 
 def _on(workflow: dict[Any, Any]) -> dict[str, Any]:

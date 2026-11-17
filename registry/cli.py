@@ -36,9 +36,9 @@ from registry.github import ACTIONS_LOGIN, GitHub
 from registry.index import render_indexes, stale_index_files
 from registry.models import (
     AdmissionReport,
+    ChannelReport,
+    ChannelResults,
     FetchReport,
-    LineReport,
-    LineResults,
     ProviderReport,
     ProviderStatus,
     ReservedDomains,
@@ -46,9 +46,9 @@ from registry.models import (
 )
 from registry.pipeline import (
     ADMISSION_REPORT,
+    CHANNELS_FOLDER,
     FETCH_REPORT,
     ISSUES_FOLDER,
-    LINES_FOLDER,
     apply_results,
     archive_path,
     read_plan,
@@ -62,11 +62,11 @@ from registry.registry import (
     load_registry,
 )
 from registry.report import (
-    build_line_reports,
+    build_channel_reports,
     build_reports,
+    open_channel_issues,
     open_issues,
-    open_line_issues,
-    post_line_report,
+    post_channel_report,
     post_report,
 )
 from registry.reserved import add_server_domains
@@ -108,7 +108,7 @@ def _validate(args: argparse.Namespace) -> None:
 
 
 def _build(args: argparse.Namespace) -> None:
-    """Write the index file of every server line."""
+    """Write the index file of every channel."""
     write_indexes(args.root)
 
 
@@ -127,10 +127,10 @@ def _add_version(args: argparse.Namespace) -> None:
 
 
 def _record_check(args: argparse.Namespace) -> None:
-    """Record the result of the checks of a version on a server line."""
+    """Record the result of the checks of a version on a channel."""
     registry = load_registry(args.root)
     record_check(
-        registry, args.domain, args.version, args.line, reason=args.failed, checked=args.checked
+        registry, args.domain, args.version, args.channel, reason=args.failed, checked=args.checked
     )
 
 
@@ -162,13 +162,13 @@ def _fetch(args: argparse.Namespace) -> None:
 
 
 def _check(args: argparse.Namespace) -> None:
-    """Run a stage of the checks of a version, inside the server image of a line."""
+    """Run a stage of the checks of a version, inside the server image of a channel."""
     # the server is installed in its image only
     from registry.check import CheckUnavailableError, install_version, load_version  # noqa: PLC0415
 
     registry = load_registry(args.root)
-    if (line := registry.server_lines.get(args.line)) is None or line.frozen:
-        msg = f"{args.line!r} is not a server line that is tested"
+    if (channel := registry.channels.get(args.channel)) is None or channel.frozen:
+        msg = f"{args.channel!r} is not a channel that is tested"
         raise CommandError(msg)
     name = f"{args.domain} {args.version}"
     if (file := get_provider(registry, args.domain).versions.get(args.version)) is None:
@@ -181,14 +181,14 @@ def _check(args: argparse.Namespace) -> None:
         try:
             outcome = asyncio.run(install_version(archive, file, args.domain, args.scratch))
         except CheckUnavailableError as err:
-            msg = f"{name}: the check could not run on {args.line}: {err}"
+            msg = f"{name}: the check could not run on {args.channel}: {err}"
             raise CommandError(msg) from err
         if outcome is None:
             print(f"{name}: ready to load")
             return
     else:
         outcome = asyncio.run(load_version(archive, file, args.domain, args.scratch))
-    previous = file.checks.get(args.line)
+    previous = file.checks.get(args.channel)
     result = VersionResult(
         domain=args.domain,
         version=args.version,
@@ -198,7 +198,7 @@ def _check(args: argparse.Namespace) -> None:
         passed_before=previous is not None and previous.passed,
         unavailable=outcome.unavailable,
     )
-    results = LineResults(line=args.line, checked=format_date(now()), results=[result])
+    results = ChannelResults(channel=args.channel, checked=format_date(now()), results=[result])
     args.output.write_bytes(dumps(results.to_dict()))
     print(f"{name}: {'passed' if outcome.passed else outcome.reason}")
 
@@ -226,27 +226,27 @@ def _report(args: argparse.Namespace) -> None:
     """
     Write the report of every provider: its failures in this run and what settles them.
 
-    Also the report of every server line with results: whether its checks could run.
+    Also the report of every channel with results: whether its checks could run.
     """
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
     results = read_results(args.results, read_plan(args.work))
     registry = load_registry(args.root)
     reports = build_reports(registry, fetched, results)
     folder = args.work / ISSUES_FOLDER
-    (folder / LINES_FOLDER).mkdir(parents=True, exist_ok=True)
+    (folder / CHANNELS_FOLDER).mkdir(parents=True, exist_ok=True)
     for report in reports:
         (folder / f"{report.domain}.json").write_bytes(dumps(report.to_dict()))
         for failure in report.failures:
             print(f"{report.domain}: {failure.heading}")
-    for line in build_line_reports(registry, results):
-        (folder / LINES_FOLDER / f"{line.line}.json").write_bytes(dumps(line.to_dict()))
-        if line.reason is not None:
-            print(f"{line.line}: the checks cannot run: {line.reason}")
+    for channel in build_channel_reports(registry, results):
+        (folder / CHANNELS_FOLDER / f"{channel.channel}.json").write_bytes(dumps(channel.to_dict()))
+        if channel.reason is not None:
+            print(f"{channel.channel}: the checks cannot run: {channel.reason}")
     print(f"{len(reports)} report(s) written to {folder}")
 
 
 def _post_issues(args: argparse.Namespace) -> int:
-    """Open, add to or close the issue of each provider and server line, after its report."""
+    """Open, add to or close the issue of each provider and channel, after its report."""
     github = GitHub(_token())
     issues = open_issues(github, args.repository)
     failed = 0
@@ -269,17 +269,19 @@ def _post_issues(args: argparse.Namespace) -> int:
             continue
         if done is not None:
             print(f"{report.domain}: {done}")
-    line_issues = open_line_issues(github, args.repository)
-    for path in sorted((args.work / ISSUES_FOLDER / LINES_FOLDER).glob("*.json")):
-        line = _load(path, LineReport)
+    channel_issues = open_channel_issues(github, args.repository)
+    for path in sorted((args.work / ISSUES_FOLDER / CHANNELS_FOLDER).glob("*.json")):
+        channel = _load(path, ChannelReport)
         try:
-            done = post_line_report(line, line_issues.get(line.line), github, args.repository)
+            done = post_channel_report(
+                channel, channel_issues.get(channel.channel), github, args.repository
+            )
         except OSError as err:
             failed += 1
-            print(f"warning: {line.line}: {err}", file=sys.stderr)
+            print(f"warning: {channel.channel}: {err}", file=sys.stderr)
             continue
         if done is not None:
-            print(f"{line.line}: {done}")
+            print(f"{channel.channel}: {done}")
     return 1 if failed else 0
 
 
@@ -394,7 +396,7 @@ def _unblock_version(args: argparse.Namespace) -> None:
     write_indexes(args.root)
 
 
-def _admission(args: argparse.Namespace) -> tuple[AdmissionReport | None, list[LineResults]]:
+def _admission(args: argparse.Namespace) -> tuple[AdmissionReport | None, list[ChannelResults]]:
     """
     Return the report of the prepare step and the results of the check step.
 
@@ -422,7 +424,7 @@ def _token() -> str:
     return token
 
 
-def _load[T: (FetchReport, ProviderReport, LineReport, AdmissionReport)](
+def _load[T: (FetchReport, ProviderReport, ChannelReport, AdmissionReport)](
     path: Path, model: type[T]
 ) -> T:
     """
@@ -494,7 +496,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command = commands.add_parser("record-check", help=_record_check.__doc__)
     command.add_argument("domain")
     command.add_argument("version")
-    command.add_argument("line", help="the server line, as in server_lines.json")
+    command.add_argument("channel", help="the channel, as in channels.json")
     result = command.add_mutually_exclusive_group(required=True)
     result.add_argument("--passed", action="store_true", help="the version passed")
     result.add_argument("--failed", metavar="REASON", help="the version failed, and why")
@@ -514,7 +516,7 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.set_defaults(run=_fetch)
 
     command = commands.add_parser("check", help=_check.__doc__, parents=[work])
-    command.add_argument("--line", required=True, help="the server line of this server image")
+    command.add_argument("--channel", required=True, help="the channel of this server image")
     command.add_argument("--domain", required=True)
     command.add_argument("--version", required=True)
     command.add_argument(

@@ -1,9 +1,9 @@
 """
-The check step, which runs inside the official server image of a line and executes provider code.
+The check step, which runs inside the official server image of a channel and executes provider code.
 
 Only the standard library, the registry and what the server image has are used here. The
-verdict on the requirements comes from the server's own code, so it is exactly what a server of
-the line decides.
+verdict on the requirements comes from the server's own code, so it is exactly what a server on
+the channel decides.
 """
 
 from __future__ import annotations

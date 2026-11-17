@@ -97,7 +97,7 @@ class ProviderFile(StrictModel):
 
 @dataclass
 class CheckResult(StrictModel):
-    """The result of the checks of a version on one server line."""
+    """The result of the checks of a version on one channel."""
 
     passed: bool
     checked: str
@@ -120,7 +120,7 @@ class VersionFile(StrictModel):
     requirements: list[str]
     released: str
     icon_svg: str | None = None
-    # the result by server line
+    # the result by channel
     checks: dict[str, CheckResult] = field(default_factory=dict)
 
 
@@ -137,20 +137,20 @@ class RefusedRelease(StrictModel):
 
 
 @dataclass
-class ServerLine(StrictModel):
-    """A server line an index is built for."""
+class Channel(StrictModel):
+    """A channel an index is built for."""
 
-    # the official server image of the line, which the checks of a version run in
+    # the official server image of the channel, which the checks of a version run in
     image: str
-    # a frozen line is no longer tested; blocks still reach its index
+    # a frozen channel is no longer tested; blocks still reach its index
     frozen: bool = False
 
 
 @dataclass
-class ServerLines(StrictModel):
-    """`server_lines.json`: the server lines an index is built for."""
+class Channels(StrictModel):
+    """`channels.json`: the channels an index is built for."""
 
-    lines: dict[str, ServerLine]
+    channels: dict[str, Channel]
 
 
 @dataclass
@@ -181,18 +181,18 @@ class VersionResult(StrictModel):
     reason: str | None = None
     # the full output of the check that failed, for the maintainer
     output: str | None = None
-    # the version passed on this line before, so a failure means it stopped passing
+    # the version passed on this channel before, so a failure means it stopped passing
     passed_before: bool = False
-    # the check could not run in the server image of the line, for a reason that is not the
+    # the check could not run in the server image of the channel, for a reason that is not the
     # provider's; the reason and output say why
     unavailable: bool = False
 
 
 @dataclass
-class LineResults(StrictModel):
-    """The results file the check step writes for one server line."""
+class ChannelResults(StrictModel):
+    """The results file the check step writes for one channel."""
 
-    line: str
+    channel: str
     checked: str
     results: list[VersionResult]
 
@@ -231,9 +231,9 @@ class FetchReport(StrictModel):
 
 @dataclass
 class CheckPlan(StrictModel):
-    """`plan.json`: the versions the check step checks, by server line."""
+    """`plan.json`: the versions the check step checks, by channel."""
 
-    lines: dict[str, list[ProviderVersion]]
+    channels: dict[str, list[ProviderVersion]]
 
 
 @dataclass
@@ -296,7 +296,7 @@ class ProviderReport(StrictModel):
     failures: list[Failure]
     # the highest version of the provider, with a version file or refused
     newest: str | None
-    # the server lines tested in this run, and those the newest version passed on
+    # the channels tested in this run, and those the newest version passed on
     tested: list[str]
     passed: list[str]
     # whether GitHub gives the repository the ids of provider.json
@@ -304,11 +304,11 @@ class ProviderReport(StrictModel):
 
 
 @dataclass
-class LineReport(StrictModel):
-    """`issues/lines/<line>.json`: whether the checks could run on a server line in this run."""
+class ChannelReport(StrictModel):
+    """`issues/channels/<channel>.json`: whether the checks could run on a channel in this run."""
 
-    line: str
-    # why the checks could not run in the server image of the line; None when they ran
+    channel: str
+    # why the checks could not run in the server image of the channel; None when they ran
     reason: str | None = None
     # the output of a check that could not run
     output: str | None = None
@@ -348,9 +348,11 @@ class IndexProvider(DataClassDictMixin):
 
 @dataclass
 class CatalogIndex(DataClassDictMixin):
-    """The index of the catalog for one server line."""
+    """The index of the catalog for one channel."""
 
     schema: int
+    channel: str
+    # the channel again, for the servers that read it under this name only
     server_line: str
     generated: str
     providers: dict[str, IndexProvider]

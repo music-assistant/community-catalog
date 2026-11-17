@@ -27,7 +27,7 @@ from registry.edit import CommandError
 from registry.files import load_model
 from registry.formats import is_date
 from registry.github import GitHub
-from registry.models import AdmissionReport, CheckPlan, Finding, LineResults, ProviderFile
+from registry.models import AdmissionReport, ChannelResults, CheckPlan, Finding, ProviderFile
 from registry.pipeline import PLAN_FILE, archive_path
 from registry.registry import load_registry
 from tests.conftest import (
@@ -107,12 +107,14 @@ def _failed(report: AdmissionReport) -> list[str]:
     ]
 
 
-def _results(line: str, passed: bool, version: str = "1.0.0", domain: str = DOMAIN) -> LineResults:
-    """Return the results file of a line with one result for a provider."""
+def _results(
+    channel: str, passed: bool, version: str = "1.0.0", domain: str = DOMAIN
+) -> ChannelResults:
+    """Return the results file of a channel with one result for a provider."""
     reason = None if passed else "load: ModuleNotFoundError: No module named 'x'"
-    return LineResults.from_dict(
+    return ChannelResults.from_dict(
         {
-            "line": line,
+            "channel": channel,
             "checked": "2026-11-15T03:00:00Z",
             "results": [{"domain": domain, "version": version, "passed": passed, "reason": reason}],
         }
@@ -151,7 +153,7 @@ def _propose(
     passed: bool = True,
     issue: int = ISSUE,
 ) -> Proposal:
-    """Run the propose step for an issue with the results of the nightly line."""
+    """Run the propose step for an issue with the results of the nightly channel."""
     domain = report.domain or DOMAIN if report else DOMAIN
     version = report.version or "1.0.0" if report else "1.0.0"
     return propose_admission(
@@ -206,7 +208,9 @@ def test_a_submission_that_passes(files: Files, github: FakeGitHub) -> None:
     assert set(registry.providers[DOMAIN].versions) == {"1.0.0"}
     assert archive_path(files.root / "work", DOMAIN, "1.0.0").is_file()
     plan = load_model(files.root / "work" / PLAN_FILE, CheckPlan)
-    assert {line: [(e.domain, e.version) for e in v] for line, v in plan.lines.items()} == {
+    assert {
+        channel: [(e.domain, e.version) for e in v] for channel, v in plan.channels.items()
+    } == {
         "beta": [(DOMAIN, "1.0.0")],
         "nightly": [(DOMAIN, "1.0.0")],
     }
@@ -223,8 +227,11 @@ def test_a_submission_that_passes(files: Files, github: FakeGitHub) -> None:
         f"## Admission checks for ` {DOMAIN} `\n\nChecked {report.checked}: repository "
         f"` {REPOSITORY} `, release ` v1.0.0 ` (commit ` {COMMIT} `).\n\n"
     )
-    assert "- ✅ nightly: passed" in text
-    assert "- ❌ beta: failed: ` load: ModuleNotFoundError: No module named 'x' `" in text
+    assert "- ✅ Passed on the nightly channel" in text
+    assert (
+        "- ❌ Failed on the beta channel: ` load: ModuleNotFoundError: No module named 'x' `"
+        in text
+    )
     assert "Every check passed. A registry maintainer reviews the provider against" in text
     assert f"[rules of the community catalog]({RULES_URL})" in text
 
@@ -253,8 +260,8 @@ def test_the_folder_and_tag_prefix_of_the_form(files: Files, github: FakeGitHub)
     )
 
 
-def test_the_release_must_pass_on_a_line(files: Files, github: FakeGitHub) -> None:
-    """A release that passes on no line, or was not checked, fails the admission."""
+def test_the_release_must_pass_on_a_channel(files: Files, github: FakeGitHub) -> None:
+    """A release that passes on no channel, or was not checked, fails the admission."""
     report = _prepare(files, github)
     registry = load_registry(files.root)
 
@@ -265,19 +272,21 @@ def test_the_release_must_pass_on_a_line(files: Files, github: FakeGitHub) -> No
 
     assert not failed
     assert not other
-    assert "- ❌ beta: the checks did not run" in failed_text
-    assert "- ❌ nightly: failed:" in failed_text
+    assert "- ❌ The checks did not run on the beta channel" in failed_text
+    assert "- ❌ Failed on the nightly channel:" in failed_text
     assert "Not every check passed. Fix what failed, then edit this issue" in failed_text
     assert "close and reopen it after you publish a new release" in failed_text
 
 
-def test_a_line_whose_checks_could_not_run_is_no_failure(files: Files, github: FakeGitHub) -> None:
+def test_a_channel_whose_checks_could_not_run_is_no_failure(
+    files: Files, github: FakeGitHub
+) -> None:
     """A check that could not run in the server image shows as not run, without its error."""
     report = _prepare(files, github)
     error = "load: the load script cannot start in this server image: cannot import name 'x'"
-    unavailable = LineResults.from_dict(
+    unavailable = ChannelResults.from_dict(
         {
-            "line": "beta",
+            "channel": "beta",
             "checked": "2026-11-15T03:00:00Z",
             "results": [
                 {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": error,
@@ -291,8 +300,8 @@ def test_a_line_whose_checks_could_not_run_is_no_failure(files: Files, github: F
     )
 
     assert passed
-    assert "- ❌ beta: the checks did not run\n" in text
-    assert "- ✅ nightly: passed" in text
+    assert "- ❌ The checks did not run on the beta channel\n" in text
+    assert "- ✅ Passed on the nightly channel" in text
     assert "cannot import name" not in text
 
 
@@ -335,7 +344,7 @@ def test_an_issue_that_is_no_submission(
     assert report.refusal is not None
     assert refusal in report.refusal
     assert (report.repository, report.domain, report.findings) == (None, None, [])
-    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).lines == {}
+    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).channels == {}
     assert [request.full_url for request in github.requests] == [ISSUE_URL]
 
 
@@ -376,7 +385,7 @@ def test_a_submission_that_cannot_be_checked(
     assert report.refusal is not None
     assert report.refusal.startswith(refusal)
     assert (report.domain, report.findings, report.provider) == (None, [], None)
-    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).lines == {}
+    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).channels == {}
     passed, text = check_admission(load_registry(files.root), report, [], run_url=RUN_URL)
     assert not passed
     assert text.startswith("## Admission checks\n\nChecked ")
@@ -408,7 +417,7 @@ def test_a_submission_that_failed_a_requirement_is_not_checked(
 
     assert report.version == "1.0.0"
     assert _failed(report)
-    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).lines == {}
+    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).channels == {}
     passed, text = check_admission(load_registry(files.root), report, [])
     assert not passed
     assert "the checks did not run" not in text
@@ -495,18 +504,18 @@ def test_provider_text_is_shown_as_code(files: Files, github: FakeGitHub) -> Non
     report = _prepare(files, github)
     reason = "load: `` **Every check passed** @a-maintainer"
     result = {"domain": DOMAIN, "version": "1.0.0", "passed": False, "reason": reason}
-    results = {"line": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [result]}
+    results = {"channel": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [result]}
 
     _, refused = check_admission(load_registry(files.root), report, [])
     _, failed = check_admission(
-        load_registry(files.root), _passed(), [LineResults.from_dict(results)]
+        load_registry(files.root), _passed(), [ChannelResults.from_dict(results)]
     )
 
     assert "is refused:\n\n  `````\n  providers/sample_music/versions/1.0.0.json: manifest" in (
         refused
     )
     assert refused.count("  `````\n") == 2
-    assert f"- ❌ nightly: failed: ``` {reason} ```" in failed
+    assert f"- ❌ Failed on the nightly channel: ``` {reason} ```" in failed
 
 
 def test_a_refusal_is_quoted_as_code(files: Files) -> None:
@@ -1013,7 +1022,7 @@ def test_propose_writes_the_outputs_of_its_job(
     github.pull(REGISTRY, f"admit/{DOMAIN}-8", "Closes #8\n")
     files.write("work/admission.json", _passed().to_dict())
     entry = [{"domain": DOMAIN, "version": "1.0.0"}]
-    files.write("work/plan.json", {"lines": {"nightly": entry}})
+    files.write("work/plan.json", {"channels": {"nightly": entry}})
     files.write(f"results/nightly/{DOMAIN}-1.0.0.json", _results("nightly", passed=True).to_dict())
     output = files.root / "output"
     args = ["--root", str(files.root), "propose-admission", str(files.root / "results"),

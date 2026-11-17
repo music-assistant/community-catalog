@@ -1,4 +1,4 @@
-"""Tests for scripts/check-line.sh: what the trusted side keeps of the containers it runs."""
+"""Tests for scripts/check-channel.sh: what the trusted side keeps of the containers it runs."""
 
 from __future__ import annotations
 
@@ -10,14 +10,14 @@ import pytest
 
 from registry.cli import main
 from registry.registry import load_registry
-from tests.conftest import can_run_check_line, docker_runs, run_check_line
+from tests.conftest import can_run_check_channel, docker_runs, run_check_channel
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from tests.conftest import Files
 
-pytestmark = pytest.mark.skipif(not can_run_check_line(), reason="needs bash, jq and timeout")
+pytestmark = pytest.mark.skipif(not can_run_check_channel(), reason="needs bash, jq and timeout")
 
 # a container that does what a hostile provider could, by domain and stage
 HOSTILE = """
@@ -30,7 +30,7 @@ results = os.path.dirname(output)
 
 
 def result(of=domain, reason=None):
-    content = {"line": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [
+    content = {"channel": "nightly", "checked": "2026-11-15T03:00:00Z", "results": [
         {"domain": of, "version": "1.0.0", "passed": reason is None, "reason": reason}]}
     return json.dumps(content)
 
@@ -76,11 +76,11 @@ def catalog(files: Files) -> Files:
     """Return a registry with a version of each provider, all of them in the plan for nightly."""
     for domain in DOMAINS:
         files.provider(domain, folder=domain)
-        files.version("1.0.0", domain, folder=domain, lines={"nightly": True})
+        files.version("1.0.0", domain, folder=domain, channels={"nightly": True})
     plan = [
         {"domain": domain, "version": "1.0.0"} for domain in DOMAINS if domain != "victim_music"
     ]
-    files.write("work/plan.json", {"lines": {"nightly": plan}})
+    files.write("work/plan.json", {"channels": {"nightly": plan}})
     assert main(["--root", str(files.root), "build"]) == 0
     return files
 
@@ -96,7 +96,7 @@ def test_only_the_results_file_each_container_was_asked_for_is_kept(
     monkeypatch.setenv("SECRET", str(secret))
     log = tmp_path / "docker.log"
 
-    run = run_check_line(catalog.root, "nightly", [sys.executable, str(script)], log)
+    run = run_check_channel(catalog.root, "nightly", [sys.executable, str(script)], log)
 
     assert run.returncode == 0, run.stderr
     kept = catalog.root / "results" / "nightly"
@@ -127,7 +127,7 @@ def test_one_container_per_version_and_stage_with_limits(
     monkeypatch.setenv("SECRET", str(tmp_path))
     log = tmp_path / "docker.log"
 
-    run = run_check_line(catalog.root, "nightly", [sys.executable, str(script)], log)
+    run = run_check_channel(catalog.root, "nightly", [sys.executable, str(script)], log)
 
     assert run.returncode == 0, run.stderr
     runs = docker_runs(log)
@@ -157,11 +157,13 @@ def test_one_container_per_version_and_stage_with_limits(
         assert call[call.index("--output") + 1] == "/results/result.json"
 
 
-def test_nothing_runs_for_a_line_without_a_plan(catalog: Files, tmp_path: Path) -> None:
-    """A frozen line has no versions in the plan, so no container runs."""
+def test_nothing_runs_for_a_channel_without_a_plan(catalog: Files, tmp_path: Path) -> None:
+    """A frozen channel has no versions in the plan, so no container runs."""
     log = tmp_path / "docker.log"
 
-    run = run_check_line(catalog.root, "2.11", [sys.executable, "-c", "raise SystemExit(1)"], log)
+    run = run_check_channel(
+        catalog.root, "2.11", [sys.executable, "-c", "raise SystemExit(1)"], log
+    )
 
     assert run.returncode == 0, run.stderr
     assert docker_runs(log) == []

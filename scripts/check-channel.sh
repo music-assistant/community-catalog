@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Runs the checks of one server line in its server image: two containers per version of the
+# Runs the checks of one channel in its server image: two containers per version of the
 # plan, and of each container only the results file it was asked for is kept.
 #
-#   scripts/check-line.sh <catalog> <line> <image> <results>
+#   scripts/check-channel.sh <catalog> <channel> <image> <results>
 #
 # <catalog> holds the registry and the work folder with plan.json and the archives; it is
-# mounted read-only. A results file lands in <results>/<line>/<domain>-<version>.json; a
+# mounted read-only. A results file lands in <results>/<channel>/<domain>-<version>.json; a
 # version without one has no result tonight.
 set -euo pipefail
 
 catalog=$(cd "$1" && pwd)
-line=$2
+channel=$2
 image=$3
 results=$4
 # a results file holds a reason of one line and at most 50 kB of output
@@ -23,14 +23,14 @@ load_timeout=420
 # run <stage> <seconds> <network> <scratch mode> <domain> <version> <folder>
 run() {
   local stage=$1 seconds=$2 network=$3 mode=$4 domain=$5 version=$6 folder=$7
-  local name="check-$line-$domain-$version-$stage" status=0
+  local name="check-$channel-$domain-$version-$stage" status=0
   timeout --kill-after=30 "$seconds" docker run --rm --name "$name" --pull never \
     --platform linux/amd64 --network "$network" --user "$(id -u):$(id -g)" \
     --cap-drop ALL --security-opt no-new-privileges --pids-limit 512 \
     --memory 4g --memory-swap 4g --env HOME=/tmp \
     --volume "$catalog:/catalog:ro" --volume "$folder/scratch:/scratch:$mode" \
     --volume "$folder/$stage:/results" --workdir /catalog --entrypoint python "$image" \
-    -m registry --root /catalog check --line "$line" --domain "$domain" \
+    -m registry --root /catalog check --channel "$channel" --domain "$domain" \
     --version "$version" --stage "$stage" --scratch /scratch --output /results/result.json \
     </dev/null || status=$?
   # a container that outlived its time is ended before its folders are read
@@ -47,15 +47,15 @@ keep() {
   fi
 }
 
-plan=$(jq -r --arg line "$line" '.lines[$line] // [] | .[] | "\(.domain) \(.version)"' \
+plan=$(jq -r --arg channel "$channel" '.channels[$channel] // [] | .[] | "\(.domain) \(.version)"' \
   "$catalog/work/plan.json")
-mkdir -p "$results/$line"
+mkdir -p "$results/$channel"
 docker pull --quiet --platform linux/amd64 "$image"
 while read -r domain version; do
   [ -n "$domain" ] || continue
   folder=$(mktemp -d)
   mkdir "$folder/scratch" "$folder/install" "$folder/load"
-  target="$results/$line/$domain-$version.json"
+  target="$results/$channel/$domain-$version.json"
   status=0
   run install "$install_timeout" bridge rw "$domain" "$version" "$folder" || status=$?
   if [ -e "$folder/install/result.json" ] || [ -L "$folder/install/result.json" ]; then

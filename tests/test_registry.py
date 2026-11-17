@@ -28,7 +28,7 @@ def test_repository_itself_is_valid() -> None:
     """The files of this repository are valid."""
     registry = load_registry(ROOT)
 
-    assert set(registry.server_lines) >= {"nightly", "beta"}
+    assert set(registry.channels) >= {"nightly", "beta"}
 
 
 def test_valid_registry(files: Files) -> None:
@@ -52,43 +52,43 @@ def test_registry_without_providers_folder(files: Files) -> None:
 @pytest.mark.parametrize(
     ("file", "problem"),
     [
-        ("server_lines.json", "server_lines.json: is missing"),
+        ("channels.json", "channels.json: is missing"),
         ("reserved_domains.json", "reserved_domains.json: is missing"),
     ],
 )
 def test_missing_file(files: Files, file: str, problem: str) -> None:
-    """The server lines and the reserved domains are needed."""
+    """The channels and the reserved domains are needed."""
     (files.root / file).unlink()
 
     assert _problems(files) == [problem]
 
 
 @pytest.mark.parametrize(
-    ("lines", "problem"),
+    ("channels", "problem"),
     [
-        ({"lines": {"stable": {"image": NIGHTLY_IMAGE}}}, "'stable' is not a server line"),
-        ({"lines": {}}, "there is no server line"),
+        ({"channels": {"stable": {"image": NIGHTLY_IMAGE}}}, "'stable' is not a channel"),
+        ({"channels": {}}, "there is no channel"),
         (
-            {"lines": {"nightly": {"image": NIGHTLY_IMAGE, "frozen": "no"}}},
-            "lines.frozen: expected bool, got str",
+            {"channels": {"nightly": {"image": NIGHTLY_IMAGE, "frozen": "no"}}},
+            "channels.frozen: expected bool, got str",
         ),
-        ({"lines": {"nightly": {}}}, "lines.image: is missing"),
+        ({"channels": {"nightly": {}}}, "channels.image: is missing"),
         (
-            {"lines": {"nightly": {"image": "--privileged"}}},
-            "lines.nightly.image: '--privileged' is not a container image with a tag",
+            {"channels": {"nightly": {"image": "--privileged"}}},
+            "channels.nightly.image: '--privileged' is not a container image with a tag",
         ),
         (
-            {"lines": {"nightly": {"image": "ghcr.io/music-assistant/server"}}},
+            {"channels": {"nightly": {"image": "ghcr.io/music-assistant/server"}}},
             "is not a container image with a tag",
         ),
     ],
 )
-def test_server_lines(files: Files, lines: dict[str, Any], problem: str) -> None:
-    """Every server line is nightly, beta or MAJOR.MINOR, and there is at least one."""
-    files.write("server_lines.json", lines)
+def test_channels(files: Files, channels: dict[str, Any], problem: str) -> None:
+    """Every channel is nightly, beta or MAJOR.MINOR, and there is at least one."""
+    files.write("channels.json", channels)
 
     [found] = _problems(files)
-    assert found.startswith("server_lines.json: ")
+    assert found.startswith("channels.json: ")
     assert problem in found
 
 
@@ -293,7 +293,7 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
         ({"icon_svg": "<svg/>"}, "icon_svg: its root element is not an SVG element"),
         (
             {"checks": {"2.10": {"passed": True, "checked": "2026-11-02T03:00:00Z"}}},
-            "checks: '2.10' is not a line in server_lines.json",
+            "checks: '2.10' is not a channel in channels.json",
         ),
         (
             {"checks": {"nightly": {"passed": False, "checked": "2026-11-02T03:00:00Z"}}},
