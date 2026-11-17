@@ -183,6 +183,9 @@ class VersionResult(StrictModel):
     output: str | None = None
     # the version passed on this line before, so a failure means it stopped passing
     passed_before: bool = False
+    # the check could not run in the server image of the line, for a reason that is not the
+    # provider's; the reason and output say why
+    unavailable: bool = False
 
 
 @dataclass
@@ -293,11 +296,22 @@ class ProviderReport(StrictModel):
     failures: list[Failure]
     # the highest version of the provider, with a version file or refused
     newest: str | None
-    # the tested server lines, and those the newest version passed on
+    # the server lines tested in this run, and those the newest version passed on
     tested: list[str]
     passed: list[str]
     # whether GitHub gives the repository the ids of provider.json
     admitted: bool
+
+
+@dataclass
+class LineReport(StrictModel):
+    """`issues/lines/<line>.json`: whether the checks could run on a server line in this run."""
+
+    line: str
+    # why the checks could not run in the server image of the line; None when they ran
+    reason: str | None = None
+    # the output of a check that could not run
+    output: str | None = None
 
 
 # The index, in the shape the server reads it: CatalogIndex and the classes below it in

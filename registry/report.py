@@ -1,4 +1,8 @@
-"""The report step: one issue on the registry for each provider whose releases need attention."""
+"""
+The report step: one issue on the registry for each provider whose releases need attention.
+
+Also one issue for each server line whose checks cannot run, for the maintainers of the registry.
+"""
 
 from __future__ import annotations
 
@@ -9,12 +13,12 @@ from typing import TYPE_CHECKING
 from registry.formats import version_key
 from registry.github import ACTIONS_LOGIN
 from registry.markdown import code_block, code_span
-from registry.models import Failure, ProviderReport
+from registry.models import Failure, LineReport, ProviderReport
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from registry.github import GitHub
+    from registry.github import GitHub, IssueInfo
     from registry.models import FetchReport, LineResults, VersionResult
     from registry.registry import Provider, Registry
 
@@ -32,6 +36,8 @@ _MAX_TEXT = 65_536
 _MAX_OUTPUT = 40_000
 # the first line of an issue or comment of the pipeline: the domain and the keys of its failures
 _MARKER = re.compile(r"<!-- release-check: ([a-z][a-z0-9_]*)((?:; [a-z0-9. ]+)*) -->")
+# the first line of an issue of the pipeline about a server line whose checks cannot run
+_LINE_MARKER = re.compile(r"<!-- release-check line: ([a-z0-9.]+) -->")
 # a manifest name a title shows; any other name is left out of the title
 _TITLE_NAME = re.compile(r"[\w .,()&'+-]{1,60}")
 
@@ -52,13 +58,21 @@ def build_reports(
     Return the report of every provider: its failures in this run not settled, and its state.
 
     The failures are the releases refused in this run, the versions that failed a check and a
-    repository that is not the admitted one. A failure is settled when is_settled says so.
+    repository that is not the admitted one. A failure is settled when is_settled says so. A line
+    whose checks could not run in this run counts as not tested.
 
     :param registry: The registry, with the refused releases of the fetch step.
     :param fetched: What the fetch step found.
     :param results: The results of the check step, as read_results returns them.
     """
-    tested = sorted(line for line, config in registry.server_lines.items() if not config.frozen)
+    unavailable = {
+        line.line for line in build_line_reports(registry, results) if line.reason is not None
+    }
+    tested = sorted(
+        line
+        for line, config in registry.server_lines.items()
+        if not config.frozen and line not in unavailable
+    )
     passed: dict[tuple[str, str, str], bool] = {
         (domain, version, line): check.passed
         for domain, provider in registry.providers.items()
@@ -107,8 +121,8 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     Return whether a failure of a provider no longer needs its maintainers.
 
     That is when the newest version passed on a tested line, and also on the line of a failed
-    check, unless that line is no longer tested; for a repository that was not the admitted one,
-    GitHub must give the admitted one again.
+    check, unless that line is not tested in this run; for a repository that was not the admitted
+    one, GitHub must give the admitted one again.
 
     :param report: The report of the provider.
     :param key: The key of the failure.
@@ -124,6 +138,24 @@ def is_settled(report: ProviderReport, key: str) -> bool:
         case "repository", [_, _]:
             return report.admitted
     return False
+
+
+def build_line_reports(registry: Registry, results: list[LineResults]) -> list[LineReport]:
+    """
+    Return whether the checks could run, for every tested server line with results in this run.
+
+    :param registry: The registry.
+    :param results: The results of the check step, as read_results returns them.
+    """
+    reports: dict[str, LineReport] = {}
+    for file in results:
+        if (config := registry.server_lines.get(file.line)) is None or config.frozen:
+            continue
+        report = reports.setdefault(file.line, LineReport(line=file.line))
+        for result in file.results:
+            if result.unavailable and report.reason is None:
+                report.reason, report.output = result.reason, result.output
+    return [reports[line] for line in sorted(reports)]
 
 
 def open_issues(github: GitHub, repository: str) -> dict[str, OpenIssue | OSError]:
@@ -204,6 +236,79 @@ def post_report(
         github.close_issue(repository, issue.number)
         return f"#{issue.number}: closed"
     return None
+
+
+def open_line_issues(github: GitHub, repository: str) -> dict[str, IssueInfo]:
+    """
+    Return the open issue of the pipeline about each server line whose checks cannot run, by line.
+
+    Only what the pipeline's own account wrote counts.
+
+    :param github: A client.
+    :param repository: The repository of the registry, as owner/name.
+    :raises OSError: The issues could not be listed.
+    """
+    result: dict[str, IssueInfo] = {}
+    for issue in sorted(github.issues(repository, LABEL), key=lambda issue: issue.number):
+        found = _LINE_MARKER.fullmatch(issue.body.split("\n", 1)[0])
+        if issue.author == ACTIONS_LOGIN and found is not None:
+            result.setdefault(found[1], issue)
+    return result
+
+
+def post_line_report(
+    report: LineReport, issue: IssueInfo | None, github: GitHub, repository: str
+) -> str | None:
+    """
+    Tell the maintainers of the registry that the checks cannot run on a server line.
+
+    A line whose checks cannot run gets an issue, whose text is kept up to date while they cannot;
+    once they run again, the issue is closed. Returns what was done, or None when nothing was.
+
+    :param report: The report of the line.
+    :param issue: The open issue of the pipeline about the line.
+    :param github: A client whose token may write issues on the registry.
+    :param repository: The repository of the registry, as owner/name.
+    :raises GitHubError: GitHub refused a request.
+    """
+    line = report.line
+    if report.reason is None:
+        if issue is None:
+            return None
+        text = f"The checks run on the `{line}` line again, so this issue is closed."
+        github.add_comment(repository, issue.number, text)
+        github.close_issue(repository, issue.number)
+        return f"#{issue.number}: closed"
+    failure = Failure(
+        key=f"line {line}",
+        heading=f"The checks cannot run in the server image of {line}",
+        text=(
+            f"The checks of every version stopped in the server image of the `{line}` line, "
+            f"before any provider code ran:\n\n{code_block(report.reason)}\n"
+            f"Until this is fixed, no version gets a new result on this line: servers of the "
+            f"`{line}` line are offered only the versions that passed there before. The "
+            "maintainers of the providers are not told about this."
+        ),
+        output=report.output if report.output != report.reason else None,
+    )
+    body = _fit(
+        lambda room: (
+            f"<!-- release-check line: {line} -->\n"
+            f"The Music Assistant community catalog cannot check releases on the `{line}` line. "
+            f"This needs the attention of the maintainers of the catalog:\n\n"
+            f"{_failures([failure], room)}### What to do\n\n"
+            "Make the checks of the catalog run in the server image of this line again. This "
+            "issue is kept up to date while the checks cannot run, and closes by itself once "
+            f"they run on the `{line}` line again.\n"
+        )
+    )
+    if issue is None:
+        title = f"The release checks cannot run on the {line} line"
+        return github.create_issue(repository, title, body, [LABEL])
+    if issue.body == body:
+        return None
+    github.update_issue(repository, issue.number, body)
+    return f"#{issue.number}: updated"
 
 
 def _check_failure(provider: Provider, line: str, result: VersionResult) -> Failure:

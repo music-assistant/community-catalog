@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING
 
-from registry.edit import CommandError, record_check, write_indexes
+from registry.edit import CommandError, clear_failed_check, record_check, write_indexes
 from registry.files import dumps, load_model
 from registry.formats import is_reason, version_key
 from registry.index import build_index
@@ -22,6 +22,8 @@ FETCH_REPORT = "fetch.json"
 ADMISSION_REPORT = "admission.json"
 PLAN_FILE = "plan.json"
 ISSUES_FOLDER = "issues"
+# the reports of the server lines, in the issues folder
+LINES_FOLDER = "lines"
 _ARCHIVES_FOLDER = "archives"
 # the versions above the latest of a line that are checked again every night, newest first
 RECHECKED_ABOVE_LATEST = 3
@@ -163,7 +165,9 @@ def apply_results(registry: Registry, results: list[LineResults]) -> None:
     """
     Record the results of the check step in the version files, and write the index files.
 
-    A result that cannot be recorded is skipped with a warning; the others are recorded.
+    A check that could not run removes a failed result of its version on the line, which leaves
+    the version unchecked there; a passed result stays. A result that cannot be recorded is
+    skipped with a warning; the others are recorded.
 
     :param registry: The registry.
     :param results: The results of the check step, as read_results returns them.
@@ -175,14 +179,17 @@ def apply_results(registry: Registry, results: list[LineResults]) -> None:
             continue
         for result in file.results:
             try:
-                record_check(
-                    registry,
-                    result.domain,
-                    result.version,
-                    file.line,
-                    reason=None if result.passed else (result.reason or ""),
-                    checked=file.checked,
-                )
+                if result.unavailable:
+                    clear_failed_check(registry, result.domain, result.version, file.line)
+                else:
+                    record_check(
+                        registry,
+                        result.domain,
+                        result.version,
+                        file.line,
+                        reason=None if result.passed else (result.reason or ""),
+                        checked=file.checked,
+                    )
             except (CommandError, InvalidRegistryError) as err:
                 _warn(f"{result.domain} {result.version} on {file.line}: skipped: {err}")
     write_indexes(registry.root)

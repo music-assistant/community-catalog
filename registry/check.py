@@ -14,6 +14,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import traceback
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,8 @@ class Outcome:
     passed: bool
     reason: str | None = None
     output: str | None = None
+    # the check could not run in this server image, for a reason that is not the provider's
+    unavailable: bool = False
 
 
 async def install_version(
@@ -279,6 +282,12 @@ async def _load(location: Path, domain: str, cache: Path, scratch: Path) -> Outc
     :param cache: The folder its requirements were installed in.
     :param scratch: A folder for the output of the import.
     """
+    try:
+        # what the load script imports from the server, before any provider code runs
+        import registry.load  # noqa: F401, PLC0415
+    except ImportError as err:
+        message = f"the load script cannot start in this server image: {err}"
+        return _failed("load", message, "".join(traceback.format_exception(err)), unavailable=True)
     log = scratch / "load.log"
     with log.open("wb") as output:
         # a session of its own, so the processes the import starts end with it
@@ -320,13 +329,16 @@ def _tail(path: Path) -> str:
         return file.read().decode(errors="replace")
 
 
-def _failed(stage: str, message: str, output: str | None = None) -> Outcome:
+def _failed(
+    stage: str, message: str, output: str | None = None, *, unavailable: bool = False
+) -> Outcome:
     """
     Return the outcome of a check that failed.
 
     :param stage: The check that failed: content, manifest, dependencies or load.
     :param message: Why it failed.
     :param output: The full output of the check, when it has more than the message.
+    :param unavailable: The check could not run, for a reason that is not the provider's.
     """
     # a name in an archive or an output can hold what plain JSON or one line cannot
     line = " ".join(message.encode(errors="replace").decode().split())
@@ -335,4 +347,4 @@ def _failed(stage: str, message: str, output: str | None = None) -> Outcome:
     if len(reason) > MAX_REASON:
         reason = f"{reason[: MAX_REASON - 1]}…"
     full = (output or message).encode(errors="replace").decode()
-    return Outcome(passed=False, reason=reason, output=full[-_MAX_OUTPUT:])
+    return Outcome(passed=False, reason=reason, output=full[-_MAX_OUTPUT:], unavailable=unavailable)

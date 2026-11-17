@@ -220,9 +220,9 @@ The commands of the release pipeline, which the workflows run:
 | `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `plan.json` (what to check on each line) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
 | `check --line <line> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the line. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
-| `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. |
-| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. |
-| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
+| `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. A check that could not run in the server image removes a failed result of its version on that line. |
+| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. Also the report of every line with results: whether its checks could run. |
+| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider and of each line whose checks cannot run on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
 | `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | Opens the pull request of a submission whose checks passed, leaves standing the open one that holds the same, or closes it (see [Admission](#admission)). Adds its outcome (`opened`, `stands`, `not-passed`, `closed`, `changed` or `conflict`), the address of its pull request and those of other submissions of the domain to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
@@ -322,12 +322,17 @@ reports anything. Its jobs share only files:
      ended with it, and the issue gets the last 50 kB of its output.
 
    A check that cannot run (the package index cannot be reached, a container that runs out of
-   time) gives no result; the version is checked again the next night. The provider's own tests
-   are not run.
+   time) gives no result; the version is checked again the next night. When the registry's own
+   load script cannot start in the server image (it imports from the server what that server
+   lacks), the load stage runs no provider code and gives a result that says so: no version
+   fails because of it, and the line gets an issue for the registry maintainers instead (see
+   [Release issues](#release-issues)). The provider's own tests are not run.
 3. **Apply** records the results with the rules of `record-check`, writes the index files,
    validates and pushes to `main` with the token of the Music Assistant Bot app. A version that
    stops passing on a line leaves that line's index: the newest version that still passes there
-   becomes `latest`. The push starts the Publish workflow.
+   becomes `latest`. A check that could not run removes a failed result of its version on that
+   line and keeps a passed one, so the version is not offered there until it passes. The push
+   starts the Publish workflow.
 4. **Report** tells the maintainers of a provider about every version that failed a check on a
    line (first checks and versions that stopped passing), every release refused in this run and
    a repository that is not the admitted one, in one issue per provider on this repository (see
@@ -477,7 +482,8 @@ shown as code; the title shows the name of the manifest only when it is plain te
 A failure is settled when the newest version of the provider (the highest with a version file or
 a refusal) passed on a line that is tested, and:
 
-- for a failed check, also on the line of the check, unless that line is no longer tested;
+- for a failed check, also on the line of the check, unless that line is not tested in this run
+  (no longer tested, or its checks could not run);
 - for a repository that was not the admitted one, GitHub gives the admitted one again.
 
 A failure that is settled when it happens is not told. Once every failure an issue tells is
@@ -487,6 +493,12 @@ a failure after that opens a new issue.
 An issue that stays open without a reaction of the provider's maintainer is a reason to withdraw
 the provider: `set-status <domain> withdrawn --reason <text> --reason-url <issue>`. Nothing does
 this automatically.
+
+A line whose checks cannot run in its server image gets one issue for the registry maintainers,
+with the same label, titled "The release checks cannot run on the <line> line" and without
+mentions; its first line `<!-- release-check line: <line> -->` names the line. Its text shows the
+newest output and is kept up to date while the checks cannot run, and the pipeline closes it once
+they run on that line again.
 
 ## Still open
 
