@@ -283,9 +283,13 @@ withdrawals still reach its index.
   resolve against the server's packages, which include the pins of that copy: a release keeps
   those pins until the server no longer ships the provider.
 
-A move normally arrives through the form: a code owner of the provider in the server (in
-`codeowners` of its `manifest.json` on the server's `dev` branch) ticks "Moving from the server",
-and the pull request of the bot adds the domain to `moving` next to the `provider.json`, so
+A provider the server ships is one in `builtin_providers`, or one the server has a folder
+`music_assistant/providers/<domain>` for on its `dev` or `stable` branch: the list can lag the
+server. A move normally arrives through the form: a code owner of the provider in the server ticks
+"Moving from the server". A code owner is in `codeowners` of its `manifest.json` on the server's
+`dev` branch, and authored at least one commit of its folder there with that same account (GitHub
+gives a freed handle to whoever takes it next). The pull request of the bot adds the domain to
+`moving` next to the `provider.json` (and to `builtin_providers` when the list lacks it), so
 merging it admits the move. After the merge, the team removes the provider from the server in the
 release whose catalog index offers it; the server's CI refuses the removal before that. `moving`
 is still edited by hand, but only for a move the team agreed outside the form.
@@ -396,10 +400,10 @@ It checks:
 - that the repository exists, is public, not archived, and has an open source licence GitHub
   recognises;
 - that its latest release has a provider folder whose manifest names a domain that is free: not
-  reserved, and not a provider in the catalog. A provider the server ships is free only for a
-  move, with the box "Moving from the server" ticked by a code owner of it in the server (see
-  [Reserved domains](#reserved-domains)); the checkout then lists it as moving, so the load check
-  imports the release;
+  reserved, not a provider the server ships, and not a provider in the catalog. A provider the
+  server ships is free only for a move, with the box "Moving from the server" ticked by a code
+  owner of it in the server (see [Reserved domains](#reserved-domains)); the checkout then lists
+  it as moving, so the provider.json is valid there;
 - that the `provider.json` it leads to is valid; its ids come from GitHub;
 - that the author of the issue owns the repository or is a code owner in the manifest of the
   latest release;
@@ -419,12 +423,15 @@ Its jobs:
    again, and a pull request is never changed: it holds what one run checked.
    * The checks passed and the issue is still open, labelled and holds the text that was
      checked: when the open pull request of the issue holds the same `provider.json` (whatever
-     its `added`) and release, it stands. Otherwise that pull request is closed first, with a
+     its `added`) and release, as a move or not as the submission, it stands. Otherwise that pull request is closed first, with a
      line that says why, and its branch deleted; then the branch `admit/<domain>-<issue>` is
      made from `main` with one commit that adds only the `provider.json` (a move adds a second
      one that adds the domain to `moving` in the `reserved_domains.json` of that commit of
-     `main`), and only then the pull request "Admit <domain>" is opened, with the result, and
-     closes the issue when merged. A run
+     `main`, unless that lists it already), and only then the pull request "Admit <domain>" is
+     opened, with the result, and closes the issue when merged. Before it writes, it checks the
+     provider against the `reserved_domains.json` of that commit, which may be newer than the
+     checkout: the domain of a plain admission is still free, the one of a move is still a
+     provider the server ships. A run
      cut off at any of these steps leaves no open pull request whose file and text disagree, and
      the next run finishes the work.
    * Nothing is written to the branch while another pull request (of a person, say) uses it:

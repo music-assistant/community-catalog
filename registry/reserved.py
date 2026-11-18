@@ -39,12 +39,18 @@ def add_server_domains(reserved: ReservedDomains, server: Path) -> ReservedDomai
 
 def add_moving(reserved: ReservedDomains, domain: str) -> ReservedDomains:
     """
-    Return the reserved domains with a built-in provider added to those that move to the catalog.
+    Return the reserved domains with a provider the server ships added to those that move.
+
+    It is added to the built-in providers as well, when the list does not hold it yet.
 
     :param reserved: The current reserved domains.
-    :param domain: The domain of the built-in provider.
+    :param domain: The domain of the provider the server ships.
     """
-    return replace(reserved, moving=sorted({*reserved.moving, domain}))
+    return replace(
+        reserved,
+        builtin_providers=sorted({*reserved.builtin_providers, domain}),
+        moving=sorted({*reserved.moving, domain}),
+    )
 
 
 def _packages(folder: Path) -> set[str]:

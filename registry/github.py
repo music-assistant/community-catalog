@@ -463,6 +463,43 @@ class GitHub:
             msg = f"{url} answered a file that cannot be read: {err}"
             raise GitHubError(msg) from err
 
+    def has_folder(self, repository: str, path: str, ref: str) -> bool:
+        """
+        Return whether a repository has a folder at a branch or commit.
+
+        :param repository: The repository, as owner/name.
+        :param path: The path of the folder in the repository.
+        :param ref: The branch or the full SHA of the commit.
+        :raises GitHubError: GitHub refused the request.
+        """
+        query = urllib.parse.urlencode({"ref": ref})
+        url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}?{query}"
+        try:
+            # the listing of a folder is a list, a file is an object
+            return isinstance(self._answer(self._request(url)), list)
+        except NotFoundError:
+            return False
+
+    def has_commit(self, repository: str, ref: str, path: str, author: str) -> bool:
+        """
+        Return whether an account authored a commit that changed a path, in the history of a ref.
+
+        GitHub matches the commits by the account, not by the name a commit gives.
+
+        :param repository: The repository, as owner/name.
+        :param ref: The branch or the full SHA of the commit whose history is searched.
+        :param path: The file or folder the commit changed.
+        :param author: The GitHub handle of the account.
+        :raises GitHubError: GitHub refused the request, or answered no list of commits.
+        """
+        query = urllib.parse.urlencode({"sha": ref, "path": path, "author": author, "per_page": 1})
+        url = f"{API_URL}/repos/{repository}/commits?{query}"
+        found = self._answer(self._request(url))
+        if not isinstance(found, list):
+            msg = f"{url} answered no list of commits"
+            raise GitHubError(msg)
+        return bool(found)
+
     def put_file(
         self,
         repository: str,
@@ -493,7 +530,9 @@ class GitHub:
         if replaces is not None:
             data["sha"] = replaces
         url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}"
-        self._json(self._request(url, json.dumps(data).encode(), method="PUT"), expected=201)
+        # GitHub answers 200 for a file it updated and 201 for one it created
+        expected = 201 if replaces is None else 200
+        self._json(self._request(url, json.dumps(data).encode(), method="PUT"), expected=expected)
 
     def create_issue(self, repository: str, title: str, body: str, labels: list[str]) -> str:
         """
