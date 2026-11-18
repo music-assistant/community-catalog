@@ -204,10 +204,10 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry add-version <domain> <version> <source> --tag <tag> --commit <sha> [--released <date>]` | Writes the version file of a release. The source is the downloaded GitHub archive of the commit, or a local provider folder. |
 | `uv run python -m registry record-check <domain> <version> <channel> (--passed \| --failed <reason>) [--checked <date>]` | Records the result of the checks of a version on a channel. |
 | `uv run python -m registry content-hash <source> [--folder <folder>]` | Prints the content hash of a provider folder, or of a folder in an archive. |
+| `uv run python -m registry read-archive <archive> --folder <folder> [--base <archive>]` | Reads a release against the rules (see [The reading of a release](#the-reading-of-a-release)) and prints the reading; writes nothing. Without `--base` the release is read in full. Needs `ANTHROPIC_API_KEY`. |
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
 | `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
-| `uv run python -m registry read-archive <archive> --folder <folder> [--base <archive>]` | Reads a release against the rules (see [The reading of a release](#the-reading-of-a-release)) and prints the reading; writes nothing. Without `--base` the release is read in full. Needs `ANTHROPIC_API_KEY`. |
 
 Blocking is one command and one commit:
 
