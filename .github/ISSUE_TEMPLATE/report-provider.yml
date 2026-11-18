@@ -1,6 +1,6 @@
 name: Report or change a provider
 description: Report a provider that breaks the rules, make a takedown request, or change or remove a provider you maintain.
-title: "Report or change a provider"
+title: "Report or change: "
 labels: [report]
 body:
   - type: markdown

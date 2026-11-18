@@ -1,9 +1,9 @@
 # Music Assistant community catalog
 
-The community catalog holds providers (music sources, plugins etc.) that the community builds and
-maintains. Each provider lives in the repository of its maintainer, with its own documentation,
-support and releases. This repository is the registry: the list of those providers. It holds no
-code.
+The community catalog holds providers (music sources, player support, metadata sources and
+plugins) that the community builds and maintains. Each provider lives in the repository of its
+maintainer, with its own documentation, support and releases. This repository is the registry:
+the list of those providers. It holds no code.
 
 An administrator of a Music Assistant server (a user with the admin role) enables the community
 catalog in the Marketplace of that server, and installs providers from it.
@@ -35,6 +35,8 @@ Report a risk to users privately: "Report a vulnerability" on the
 
 ## Getting your provider listed
 
+Registry maintainers are the Music Assistant core team.
+
 1. **Start from the [provider template](https://github.com/music-assistant/community-provider-template).**
    It holds a working provider, its tests and the checks of the community catalog for your CI.
 2. **Meet the requirements:**
@@ -42,7 +44,8 @@ Report a risk to users privately: "Report a vulnerability" on the
    - a valid `manifest.json`;
    - a `domain` in that manifest (the unique id of the provider, such as `sample_music`) that no
      other provider uses;
-   - the provider in a folder named after that domain, or `provider`;
+   - the provider in a folder named after its domain, `provider`, or `providers/<domain>` in a
+     repository with several providers;
    - requirements that install as wheels;
    - <a name="the-icon"></a>optionally an `icon.svg` ([what it may hold](MAINTAINING.md#the-icon)).
 
@@ -91,6 +94,12 @@ To move your provider to another repository, folder or tag prefix, to withdraw i
 listed again, use the form
 [Report or change a provider](https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml).
 A registry maintainer makes the change.
+
+**Handing it over.** To add a maintainer, add their GitHub handle to `codeowners` in the manifest
+and publish a release. To give the provider away, transfer the repository on GitHub and fill in
+the form [Report or change a provider](https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml)
+with the new repository. New releases are not checked after a transfer until a registry
+maintainer has updated the listing.
 
 ## For registry maintainers
 

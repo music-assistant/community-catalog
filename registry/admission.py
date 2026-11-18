@@ -557,7 +557,7 @@ def _domain_findings(
         return [Finding(passed=False, text=text, detail=domain)]
     if move:
         text = (
-            "The domain is no provider the server ships, so there is nothing to move: untick "
+            "The domain is not a provider the server ships, so there is nothing to move: untick "
             f"the box {MOVE_FIELD}"
         )
         return [Finding(passed=False, text=text, detail=domain)]

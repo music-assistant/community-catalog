@@ -20,8 +20,9 @@ provider maintainer needs is in the [README](README.md).
 The exact rules a provider and its releases meet; the checks name the one that fails.
 
 - The repository is public, not archived, and has an open source licence GitHub recognises.
-- The provider is in a folder named after its domain, or named `provider`. The domain folder is
-  what lets a server in development mode, the test fixture and the Dev app import it.
+- The provider is in a folder named after its domain, named `provider`, or `providers/<domain>`.
+  The domain folder is what lets a server in development mode, the test fixture and the Dev app
+  import it.
 - The domain is free: not in `reserved_domains.json` (see [Reserved domains](#reserved-domains))
   and not a folder in `providers/`.
 - The `manifest.json` is plain JSON the server reads (no `NaN` or `Infinity`, no key twice), at
@@ -73,14 +74,14 @@ owner alone.
 |---|---|
 | `domain` | Lower case letters, digits and underscores, starting with a letter. Equals the name of the folder in `providers/`, and is not a domain the server ships or reserves. |
 | `repository` | The GitHub repository as `owner/name`. |
-| `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename or a transfer keeps them; another repository under the same name has others, and nothing of it is fetched until a registry maintainer updates them. |
+| `repository_id`, `owner_id` | The ids GitHub gives the repository and its owner (`databaseId` in the GraphQL API). A rename keeps both, a transfer keeps `repository_id` but changes `owner_id`, and another repository under the same name has other ids. While GitHub gives other ids, no release of it is fetched until a registry maintainer updates them. |
 | `folder` | The provider folder in that repository, such as `sample_music`, `providers/sample_music` or `provider`. Its last part is the domain or `provider`: one predictable layout for a repository with a single provider (`provider`), and one for a repository with several (each in a folder named after its domain). A server installs it as a folder named after the domain. |
 | `added` | When the provider entered the catalog, which servers show as new in the community catalog. |
 | `tag_prefix` | Optional, default empty. What the release tags of this provider start with, for a repository that holds several providers. |
 | `status` | Optional, default `listed`. `listed`, `withdrawn` (not offered; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
 | `blocked_versions` | Optional. Version to reason. A blocked version is loaded by no server. |
-| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while the [reading](#versionsversionjson) held it or had not read it yet (when it cannot run, say). A version the reading passed is never cleared. The index does not use it yet. |
+| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while the [reading](#versionsversionjson) held it or had not read it yet (for example when the reading cannot run). A version the reading passed is never cleared. The index does not use it yet. |
 
 ### versions/\<version\>.json
 
@@ -404,8 +405,8 @@ version. It is not part of the release pipeline yet; `read-archive` runs it by h
 - The code holds a release with binary code or data that is added or changed, or whose request
   (instructions, header, file table and content together) would hold more than 400 kB, without
   asking the model; no text is numbered or diffed beyond that size. It also holds one the model
-  refused, whose answer was cut off or is not valid. A failure of the API (no connection, a time-out, an error status other than
-  413) gives no verdict: the release is read again later.
+  refused, whose answer was cut off or is not valid. A failure of the API (no connection, a
+  time-out, an error status other than 413) gives no verdict: the release is read again later.
 - `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
   is allowed" of the rules; a change to those sections is copied in the same week, with the
   command in `test_rules_are_the_two_sections_of_the_rules_page` (`tests/test_reading.py`).
@@ -454,17 +455,17 @@ Its jobs:
    again, and a pull request is never changed: it holds what one run checked.
    * The checks passed and the issue is still open, labelled and holds the text that was
      checked: when the open pull request of the issue holds the same `provider.json` (whatever
-     its `added`) and release, as a move or not as the submission, it stands. Otherwise that pull request is closed first, with a
-     line that says why, and its branch deleted; then the branch `admit/<domain>-<issue>` is
-     made from `main` with one commit that adds only the `provider.json` (a move adds a second
-     one that adds the domain to `moving` in the `reserved_domains.json` of that commit of
-     `main`, unless that lists it already), and only then the pull request "Admit <domain>" is
-     opened, with the result, and closes the issue when merged. Before it writes, it checks the
-     provider against the `reserved_domains.json` of that commit, which may be newer than the
-     checkout: the domain of a plain admission is still free, the one of a move is still a
-     provider the server ships. A run
-     cut off at any of these steps leaves no open pull request whose file and text disagree, and
-     the next run finishes the work.
+     its `added`) and release, as a move or not as the submission, it stands. Otherwise that
+     pull request is closed first, with a line that says why, and its branch deleted; then the
+     branch `admit/<domain>-<issue>` is made from `main` with one commit that adds only the
+     `provider.json` (a move adds a second one that adds the domain to `moving` in the
+     `reserved_domains.json` of that commit of `main`, unless that lists it already), and only
+     then the pull request "Admit <domain>" is opened, with the result, and closes the issue when
+     merged. Before it writes, it checks the provider against the `reserved_domains.json` of that
+     commit, which may be newer than the checkout: the domain of a plain admission is still free,
+     the one of a move is still a provider the server ships. A run cut off at any of these steps
+     leaves no open pull request whose file and text disagree, and the next run finishes the
+     work.
    * Nothing is written to the branch while another pull request (of a person, say) uses it:
      the outcome is a conflict, which the result names.
    * Otherwise, and when the issue is closed, the open pull request of the issue is closed with
@@ -514,7 +515,7 @@ a registry maintainer reads it and makes the change in an ordinary pull request:
   (`set-status <domain> withdrawn ...`), or block one version (`block-version`);
 - **its maintainer changed the repository, folder or tag prefix**: check that the author owns the
   repository or is a code owner in its manifest, then edit `repository` (and `repository_id` and
-  `owner_id` when it is another repository: `gh api repos/<owner>/<name> --jq
+  `owner_id` when it is another repository or was transferred: `gh api repos/<owner>/<name> --jq
   '{repository_id: .id, owner_id: .owner.id}'`), `folder` or `tag_prefix` in its `provider.json`,
   and run `validate`;
 - **its maintainer wants it removed**: after the same check,
@@ -529,10 +530,11 @@ The release pipeline keeps one open issue per provider that needs its maintainer
 `release-check`, opened by `github-actions[bot]`; `is:issue is:open label:release-check` lists
 them. A new issue mentions the maintainers of the provider (at most 10): the owner of its
 repository and the code owners in its manifest. A provider that uses its manifest to notify others
-is blocked. A new failure while it is open becomes a comment without mentions, and a failure is never told twice: the first line of the
-issue and of each comment of the pipeline names the failures it tells, and only those lines of
-`github-actions[bot]` count. Everything a provider controls (reasons, output, manifest values) is
-shown as code; the title shows the name of the manifest only when it is plain text.
+is blocked. A new failure while it is open becomes a comment without mentions, and a failure is
+never told twice: the first line of the issue and of each comment of the pipeline names the
+failures it tells, and only those lines of `github-actions[bot]` count. Everything a provider
+controls (reasons, output, manifest values) is shown as code; the title shows the name of the
+manifest only when it is plain text.
 
 A failure is settled when the newest version of the provider (the highest with a version file or
 a refusal) passed on a channel that is tested, and:
@@ -561,6 +563,7 @@ cannot run, and the pipeline closes it once they run on that channel again.
   same app pushes the commits of the release pipeline to `main`. A separate app for the pull
   requests would remove that.
 - Running the provider's own tests in the check step.
-- The reading of every release against the red lines by Bot-MArley, and its summary on the pull
-  request of a submission.
+- Running the reading of every release in the release pipeline, and using its verdict in the
+  index.
+- A summary by a review bot of Music Assistant on the pull request of a submission.
 - Making the changes a maintainer asks for with the form "Report or change a provider" by the bot.
