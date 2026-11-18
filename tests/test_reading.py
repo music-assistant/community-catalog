@@ -13,6 +13,7 @@ from anthropic.types import Message
 
 from registry.cli import main
 from registry.content import unpack
+from registry.models import Verdict
 from registry.reading import (
     CUT_OFF,
     EFFORT,
@@ -30,7 +31,6 @@ from registry.reading import (
     Rule,
     Side,
     Status,
-    Verdict,
     compare_folders,
     read_release,
 )

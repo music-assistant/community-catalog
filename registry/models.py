@@ -65,6 +65,14 @@ class ProviderStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class Verdict(StrEnum):
+    """The verdict of the reading of a release against the rules."""
+
+    PASS = "pass"  # noqa: S105 - a verdict, not a password
+    # waits for a person
+    HOLD = "hold"
+
+
 @dataclass
 class ProviderFile(StrictModel):
     """`providers/<domain>/provider.json`: a provider, written at admission."""

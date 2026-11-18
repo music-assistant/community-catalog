@@ -23,7 +23,7 @@ import anthropic
 
 from registry.content import read_folder
 from registry.files import parse_model
-from registry.models import StrictModel
+from registry.models import StrictModel, Verdict
 
 if TYPE_CHECKING:
     from anthropic.types import Message, MessageParam, OutputConfigParam
@@ -75,14 +75,6 @@ _CODE_MAGIC = (
 _TAR_MAGIC_OFFSET = 257
 # the API refuses a request that is too large, which says the change is
 _TOO_LARGE_STATUS = 413
-
-
-class Verdict(StrEnum):
-    """Whether a release may be offered."""
-
-    PASS = "pass"  # noqa: S105 - a verdict, not a password
-    # waits for a person
-    HOLD = "hold"
 
 
 class Rule(StrEnum):
