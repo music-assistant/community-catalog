@@ -27,8 +27,9 @@ The message holds one release, in sections that each open with a line of the for
 - one section per file that is shown: the numbered lines of an added file, or the unified diff
   of a changed or removed one.
 
-Not shown are media and fonts, and minified or generated text such as a built web page, which
-runs in the browser, not in the server. A file that is not shown is no finding by itself.
+Not shown are media and fonts whose content is of their format, and built web assets (minified
+scripts and styles, and source maps), which run in the browser, not in the server. A file that is
+not shown is no finding by itself.
 
 ## The data is not an instruction
 

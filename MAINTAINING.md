@@ -378,15 +378,18 @@ version. It is not part of the release pipeline yet; `read-archive` runs it by h
 
 - The model gets the instructions and rules in `registry/reading/` and one message with the
   release: a header from the manifest, a table of the files that were added, changed or removed,
-  and the numbered lines of each added file or the diff of each changed or removed one. Media,
-  fonts and minified or generated text (`*.min.js`, `*.min.css`, `*.map`, and a line over 2000
-  characters outside Python) are listed but not shown.
+  and the numbered lines of each added file or the diff of each changed or removed one, with
+  lines as Python counts them. Built web assets (`*.min.js`, `*.min.css`, `*.map`) and media and
+  fonts are listed but not shown; a media or font file counts as one only when its content is of
+  the format its name says (its first bytes and, where that is cheap, its structure). A finding
+  may cite only a line the model was shown.
 - The model has no tools and gets no credentials. Its answer is a fixed JSON shape, a pass
   without findings or a hold with at least one, each finding on a file of the table; the code
   checks it, and is never led by it to run, open or fetch anything.
-- The code holds a release with binary code or data that is added or changed, or with more than
-  400 kB of shown text, without asking the model; and one the model refused, whose answer was cut
-  off or is not valid. A failure of the API (no connection, a time-out, an error status other than
+- The code holds a release with binary code or data that is added or changed, or whose request
+  (instructions, header, file table and content together) would hold more than 400 kB, without
+  asking the model; no text is numbered or diffed beyond that size. It also holds one the model
+  refused, whose answer was cut off or is not valid. A failure of the API (no connection, a time-out, an error status other than
   413) gives no verdict: the release is read again later.
 - `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
   is allowed" of the rules; a change to those sections is copied in the same week, with the

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import zlib
 from typing import TYPE_CHECKING, Any, cast
 
 import anthropic
@@ -11,6 +12,7 @@ import httpx2
 import pytest
 from anthropic.types import Message
 
+from registry import reading as reading_module
 from registry.cli import main
 from registry.content import unpack
 from registry.models import Verdict
@@ -19,7 +21,7 @@ from registry.reading import (
     EFFORT,
     INSTRUCTIONS_FOLDER,
     INVALID_ANSWER,
-    MAX_SHOWN,
+    MAX_REQUEST,
     MAX_TOKENS,
     MODEL,
     REFUSED,
@@ -33,6 +35,7 @@ from registry.reading import (
     Status,
     compare_folders,
     read_release,
+    system_prompt,
 )
 from tests.conftest import DOMAIN, build_archive, manifest
 
@@ -41,12 +44,62 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 FOLDER = f"providers/{DOMAIN}"
+
+
+def _png(data: bytes = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00") -> bytes:
+    """Return a PNG of an IHDR chunk with this data, and IEND."""
+    chunks = b""
+    for kind, body in ((b"IHDR", data), (b"IEND", b"")):
+        crc = zlib.crc32(kind + body).to_bytes(4)
+        chunks += len(body).to_bytes(4) + kind + body + crc
+    return b"\x89PNG\r\n\x1a\n" + chunks
+
+
+def _riff(form: bytes, body: bytes = b"fmt \x00\x00") -> bytes:
+    """Return a RIFF file of a form."""
+    return b"RIFF" + (4 + len(body)).to_bytes(4, "little") + form + body
+
+
+def _ico(image: bytes = b"\x89\x00image") -> bytes:
+    """Return an icon file with one image."""
+    entry = b"\x10\x10\x00\x00\x01\x00\x20\x00" + len(image).to_bytes(4, "little")
+    return b"\x00\x00\x01\x00\x01\x00" + entry + (22).to_bytes(4, "little") + image
+
+
+def _sfnt(version: bytes = b"\x00\x01\x00\x00", offset: int = 28) -> bytes:
+    """Return a font with one table."""
+    record = b"head" + b"\x00" * 4 + offset.to_bytes(4) + (4).to_bytes(4)
+    return version + (1).to_bytes(2) + b"\x00" * 6 + record + b"\x00\x01\x00\x00"
+
+
+def _woff(signature: bytes, extra: int = 0) -> bytes:
+    """Return a WOFF or WOFF2 font that gives its length."""
+    return signature + b"\x00\x01\x00\x00" + (16 + extra).to_bytes(4) + b"\x00" * 4
+
+
+MEDIA = {
+    "image.png": _png(),
+    "image.jpg": b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9",
+    "image.jpeg": b"\xff\xd8\xff\xe1\x00\x10Exif\xff\xd9",
+    "image.gif": b"GIF89a\x01\x00\x01\x00\x00;",
+    "image.webp": _riff(b"WEBP", b"VP8 \x00\x00"),
+    "sound.wav": _riff(b"WAVE"),
+    "icon.ico": _ico(),
+    "sound.flac": b"fLaC\x00\x00\x00\x22",
+    "sound.ogg": b"OggS\x00\x02",
+    "sound.mp3": b"ID3\x04\x00",
+    "frames.mp3": b"\xff\xfb\x90\x00",
+    "font.woff": _woff(b"wOFF"),
+    "font.woff2": _woff(b"wOF2"),
+    "font.ttf": _sfnt(),
+    "font.otf": _sfnt(b"OTTO"),
+}
 BASE = {
     "manifest.json": json.dumps(manifest(requirements=["some-package==1.0"])).encode(),
     "__init__.py": b"import api\n\nVALUE = 1\nNAME = 'sample'\n",
     "helpers.py": b"def helper():\n    return 1\n",
     "unchanged.py": b"STAYS = True\n",
-    "logo.png": b"\x89PNG\r\n\x1a\n\x00old",
+    "logo.png": _png(b"\x00old"),
 }
 RELEASE = {
     "manifest.json": json.dumps(manifest(requirements=["some-package==2.0"])).encode(),
@@ -54,10 +107,10 @@ RELEASE = {
     "unchanged.py": b"STAYS = True\n",
     "api.py": b"import json\n\n\ndef fetch():\n    return json.loads('{}')\n",
     "vendor/lib.py": b"VENDORED = 1\n",
-    "logo.png": b"\x89PNG\r\n\x1a\n\x00new",
+    "logo.png": _png(b"\x00new"),
     "web/app.min.js": b"var a=1;\n",
     "web/page.js": b"x" * 2001 + b"\n",
-    "fonts/font.woff2": b"wOF2\x00\x01",
+    "fonts/font.woff2": _woff(b"wOF2"),
 }
 PASS: dict[str, Any] = {"verdict": "pass", "findings": [], "summary": "Adds an API module."}
 FINDING: dict[str, Any] = {
@@ -171,15 +224,15 @@ def test_changes_between_two_archives(tmp_path: Path) -> None:
         "logo.png": (Status.CHANGED, "media or font"),
         "manifest.json": (Status.CHANGED, None),
         "vendor/lib.py": (Status.ADDED, None),
-        "web/app.min.js": (Status.ADDED, "minified or generated"),
-        "web/page.js": (Status.ADDED, "minified or generated"),
+        "web/app.min.js": (Status.ADDED, "a built web asset"),
+        "web/page.js": (Status.ADDED, None),
     }
     assert not any(change.unreadable for change in changes.values())
     assert changes["api.py"].text == (
         "     1\timport json\n     2\t\n     3\t\n     4\tdef fetch():\n"
         "     5\t    return json.loads('{}')"
     )
-    assert changes["api.py"].lines == 5
+    assert changes["api.py"].shown_lines == (range(1, 6),)
     assert changes["__init__.py"].text == (
         "--- a/__init__.py\n+++ b/__init__.py\n@@ -1,4 +1,4 @@\n import api\n \n"
         "-VALUE = 1\n+VALUE = 2\n NAME = 'sample'"
@@ -187,9 +240,9 @@ def test_changes_between_two_archives(tmp_path: Path) -> None:
     assert changes["helpers.py"].text == (
         "--- a/helpers.py\n+++ b/helpers.py\n@@ -1,2 +0,0 @@\n-def helper():\n-    return 1"
     )
-    assert changes["helpers.py"].lines == 2
+    assert changes["helpers.py"].shown_lines == (range(1, 3),)
     assert changes["logo.png"].text is None
-    assert changes["logo.png"].lines == 0
+    assert changes["logo.png"].shown_lines == ()
 
 
 def test_a_first_read_takes_every_file_as_added(tmp_path: Path) -> None:
@@ -205,11 +258,107 @@ def test_a_first_read_takes_every_file_as_added(tmp_path: Path) -> None:
     ]
 
 
-def test_a_long_line_in_python_is_shown(tmp_path: Path) -> None:
-    """Python with a long line runs in the server, so it is shown, not taken as generated."""
-    changes = compare_folders(_folder(tmp_path, "release", {"code.py": b"x" * 2001 + b"\n"}), None)
+@pytest.mark.parametrize(
+    "path", ["code.py", "settings.json", "page.js", "style.css", "notes.txt", "page.html"]
+)
+def test_long_lines_are_shown(tmp_path: Path, path: str) -> None:
+    """Text with a long line is shown: only built web assets are left out."""
+    content = b'{"key": "' + b"x" * 2001 + b'"}\n'
 
-    assert changes[0].not_shown is None
+    changes = compare_folders(_folder(tmp_path, "release", {path: content}), None)
+
+    assert (changes[0].not_shown, changes[0].text is not None) == (None, True)
+
+
+@pytest.mark.parametrize("path", ["app.min.js", "style.min.css", "app.js.map", "APP.MIN.JS"])
+def test_built_web_assets_are_left_out(tmp_path: Path, path: str) -> None:
+    """Minified scripts and styles and source maps run in the browser, and are only listed."""
+    changes = compare_folders(_folder(tmp_path, "release", {path: b"var a=1;\n"}), None)
+
+    assert (changes[0].not_shown, changes[0].unreadable) == ("a built web asset", False)
+
+
+@pytest.mark.parametrize("path", sorted(MEDIA))
+def test_media_of_its_own_format_is_listed(tmp_path: Path, path: str) -> None:
+    """Media and fonts whose content is the format their name says are listed, not read."""
+    changes = compare_folders(_folder(tmp_path, "release", {path: MEDIA[path]}), None)
+
+    assert (changes[0].not_shown, changes[0].unreadable) == ("media or font", False)
+
+
+@pytest.mark.parametrize(
+    ("path", "content"),
+    [
+        ("cover.png", b"\x00\x01 arbitrary binary data"),
+        ("cover.png", _png()[:-1] + b"\x00"),
+        ("cover.png", _png() + b"\x7fELF appended"),
+        ("cover.png", _png()[:-12]),
+        ("cover.jpg", _png()),
+        ("cover.jpg", b"\xff\xd8\xff\xe0\x00\x10JFIF\x00"),
+        ("cover.gif", b"GIF89a\x01\x00\x01\x00\x00"),
+        ("cover.webp", _riff(b"WEBP") + b"\x00\x00"),
+        ("sound.wav", _riff(b"WEBP")),
+        ("icon.ico", _ico()[:-3]),
+        ("sound.flac", b"fLaX\x00\x00"),
+        ("sound.ogg", b"OggX\x00\x02"),
+        ("sound.mp3", b"\xff\x10\x00\x00"),
+        ("font.woff", _woff(b"wOFF", extra=1)),
+        ("font.woff2", _woff(b"wOFF")),
+        ("font.ttf", _sfnt(offset=400)),
+        ("font.otf", _sfnt(b"\x00\x00\x00\x00")),
+    ],
+    ids=[
+        "arbitrary-png",
+        "png-bad-crc",
+        "png-data-after-iend",
+        "png-without-iend",
+        "png-named-jpg",
+        "jpg-without-end",
+        "gif-without-trailer",
+        "webp-of-another-size",
+        "wav-of-another-form",
+        "ico-image-outside",
+        "flac-magic",
+        "ogg-magic",
+        "mp3-magic",
+        "woff-of-another-length",
+        "woff-named-woff2",
+        "ttf-table-outside",
+        "otf-version",
+    ],
+)
+def test_media_of_another_format_is_held(tmp_path: Path, path: str, content: bytes) -> None:
+    """Binary data named as media or a font that is not that format is held without a request."""
+    reading = _read(tmp_path, FakeClient(), release={**RELEASE, path: content})
+
+    assert reading == Reading(
+        Verdict.HOLD,
+        reason=UNREADABLE,
+        findings=[ReadingFinding(Rule.UNCLEAR, path, None, UNREADABLE)],
+    )
+
+
+def test_lines_end_as_python_reads_them(tmp_path: Path) -> None:
+    """Lines end at CR LF, CR and LF only, as Python numbers the lines of source."""
+    code = b"a = 1\rb = 2\r\nc = '\x0c\x1c\xe2\x80\xa8'\n"
+
+    [change] = compare_folders(_folder(tmp_path, "release", {"code.py": code}), None)
+
+    assert change.text == "     1\ta = 1\n     2\tb = 2\n     3\tc = '\x0c\x1c\u2028'"
+    assert change.shown_lines == (range(1, 4),)
+
+
+def test_a_change_of_the_end_of_a_file_shows(tmp_path: Path) -> None:
+    """A change of only the line end at the end of a file is a diff, with the end marked."""
+    [change] = compare_folders(
+        _folder(tmp_path, "release", {"code.py": b"a = 1\nb = 2\n"}),
+        _folder(tmp_path, "base", {"code.py": b"a = 1\nb = 2"}),
+    )
+
+    assert change.text == (
+        "--- a/code.py\n+++ b/code.py\n@@ -1,2 +1,2 @@\n a = 1\n-b = 2\n"
+        "\\ No newline at end of file\n+b = 2"
+    )
 
 
 def test_a_pass(tmp_path: Path) -> None:
@@ -264,6 +413,7 @@ def test_the_data_lies_between_lines_of_a_random_boundary(tmp_path: Path) -> Non
         'file "helpers.py": unified diff',
         'file "manifest.json": unified diff',
         'file "vendor/lib.py": numbered lines',
+        'file "web/page.js": numbered lines',
         "end",
     ]
     header = json.loads(first.split("\n")[2])
@@ -384,6 +534,28 @@ def test_an_inconsistent_answer_is_a_hold(tmp_path: Path, answer: dict[str, Any]
     assert reading == Reading(Verdict.HOLD, reason=INVALID_ANSWER)
 
 
+@pytest.mark.parametrize(
+    ("line", "valid"),
+    [(None, True), (11, False), (12, True), (15, True), (18, True), (19, False), (5, False)],
+)
+def test_a_finding_cites_only_a_line_that_was_shown(
+    tmp_path: Path, line: int | None, valid: bool
+) -> None:
+    """A line of a changed file outside the hunks the diff shows is no evidence: a hold."""
+    code = [f"line_{number} = {number}\n".encode() for number in range(1, 21)]
+    changed = [*code[:14], b"line_15 = 'changed'\n", *code[15:]]
+    answer = {**HOLD, "findings": [{**FINDING, "file": "long.py", "line": line}]}
+
+    reading = _read(
+        tmp_path,
+        FakeClient(_message(answer)),
+        release={**RELEASE, "long.py": b"".join(changed)},
+        base={**BASE, "long.py": b"".join(code)},
+    )
+
+    assert (reading.reason is None) is valid
+
+
 @pytest.mark.parametrize("file", ["unchanged.py", "elsewhere.py", "API.PY"])
 def test_a_finding_on_a_file_not_in_the_input_is_a_hold(tmp_path: Path, file: str) -> None:
     """A finding may only name a file of the file table: not an unchanged or an unknown one."""
@@ -436,11 +608,57 @@ def test_a_request_too_large_for_the_api_is_a_hold(tmp_path: Path) -> None:
 
 
 def test_a_change_larger_than_the_reading_takes_is_held_without_a_request(tmp_path: Path) -> None:
-    """A change with more shown text than MAX_SHOWN is held without asking the model."""
+    """A change with more text than MAX_REQUEST is held without asking the model."""
     line = b"x = 1  # " + b"y" * 90 + b"\n"
-    big = {**RELEASE, "big.py": line * (MAX_SHOWN // len(line) + 1)}
+    big = {**RELEASE, "big.py": line * (MAX_REQUEST // len(line) + 1)}
 
     reading = _read(tmp_path, FakeClient(), release=big)
+
+    assert reading == Reading(Verdict.HOLD, reason=TOO_LARGE)
+
+
+def test_text_beyond_the_cap_is_not_built(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Once the shown text would pass MAX_REQUEST, no more text is numbered or diffed."""
+    lines = reading_module._lines  # noqa: SLF001 - counts the texts that are built
+    seen: list[str] = []
+
+    def counted(text: str) -> list[str]:
+        seen.append(text)
+        return lines(text)
+
+    monkeypatch.setattr(reading_module, "_lines", counted)
+    # a.py is shown in 260 kB of numbered lines; b.py alone is more than the 140 kB left
+    release = {"a.py": b"x = 1\n" * 20_000, "b.py": b"y = 2\n" * 25_000, "c.py": b"z = 3\n"}
+
+    changes = compare_folders(_folder(tmp_path, "release", release), None)
+
+    assert [(change.path, change.too_large) for change in changes] == [
+        ("a.py", False),
+        ("b.py", True),
+        ("c.py", True),
+    ]
+    assert [change.text is None for change in changes] == [False, True, True]
+    assert len(seen) == 1
+
+
+def test_the_whole_request_counts_against_the_cap(tmp_path: Path) -> None:
+    """The instructions and the header count: text under the cap is held when the request is not."""
+    code = b"x = 1\n" * ((MAX_REQUEST - len(system_prompt()) // 2) // 13)
+    release = {**RELEASE, "code.py": code}
+    (tmp_path / "check").mkdir()
+
+    changes = compare_folders(_folder(tmp_path / "check", "release", release), None)
+    reading = _read(tmp_path, FakeClient(), release=release, base=None)
+
+    assert sum(len((change.text or "").encode()) for change in changes) < MAX_REQUEST
+    assert reading == Reading(Verdict.HOLD, reason=TOO_LARGE)
+
+
+def test_the_file_table_counts_against_the_cap(tmp_path: Path) -> None:
+    """A release of many files that are only listed is held when its file table is too large."""
+    release = {f"media/{number:04d}.png": _png(number.to_bytes(4)) for number in range(3000)}
+
+    reading = _read(tmp_path, FakeClient(), release={**RELEASE, **release}, base=None)
 
     assert reading == Reading(Verdict.HOLD, reason=TOO_LARGE)
 

@@ -12,8 +12,10 @@ import functools
 import hashlib
 import json
 import os
+import re
 import secrets
 import stat
+import zlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -26,16 +28,17 @@ from registry.files import parse_model
 from registry.models import StrictModel, Verdict
 
 if TYPE_CHECKING:
-    from anthropic.types import Message, MessageParam, OutputConfigParam
+    from collections.abc import Callable, Iterator
+
+    from anthropic.types import Message
+    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
 
 MODEL: Final = "claude-opus-5-5"
 EFFORT: Final = "high"
 # thinking included; an answer cut off at this limit is a hold
 MAX_TOKENS = 16000
-# the most text the reading takes, about 115k tokens; a larger change waits for a person
-MAX_SHOWN = 400_000
-# a line this long is generated, not written by a person
-MAX_LINE = 2000
+# the most the request may hold as JSON, about 115k tokens; a larger change waits for a person
+MAX_REQUEST = 400_000
 MAX_EXPLANATION = 400
 MAX_SUMMARY = 600
 # the instructions and the rules the reading follows, also for the summary of a submission
@@ -48,31 +51,13 @@ REFUSED = "the reading was refused"
 CUT_OFF = "the answer of the reading was cut off"
 INVALID_ANSWER = "the answer of the reading is invalid"
 
-_PYTHON_SUFFIX = ".py"
 _CODE_SUFFIXES = frozenset({".so", ".pyd", ".dll", ".dylib", ".exe", ".whl", ".jar", ".zip"})
-_MEDIA_SUFFIXES = frozenset(
-    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".wav", ".flac", ".mp3", ".ogg"}
-    | {".woff", ".woff2", ".ttf", ".otf"}
-)
-_GENERATED_SUFFIXES = (".min.js", ".min.css", ".map")
-# the first bytes of executables (ELF, Mach-O, PE) and archives (zip, gzip, bzip2, xz, 7z, zstd)
-_CODE_MAGIC = (
-    b"\x7fELF",
-    b"\xfe\xed\xfa\xce",
-    b"\xfe\xed\xfa\xcf",
-    b"\xce\xfa\xed\xfe",
-    b"\xcf\xfa\xed\xfe",
-    b"\xca\xfe\xba\xbe",
-    b"MZ",
-    b"PK\x03\x04",
-    b"PK\x05\x06",
-    b"\x1f\x8b",
-    b"BZh",
-    b"\xfd7zXZ\x00",
-    b"7z\xbc\xaf\x27\x1c",
-    b"\x28\xb5\x2f\xfd",
-)
-_TAR_MAGIC_OFFSET = 257
+# built web assets, which run in the browser and not in the server
+_BUILT_SUFFIXES = (".min.js", ".min.css", ".map")
+# Python reads \r\n, \r and \n as the end of a line, and nothing else
+_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_SFNT_VERSIONS = (b"\x00\x01\x00\x00", b"true", b"OTTO")
 # the API refuses a request that is too large, which says the change is
 _TOO_LARGE_STATUS = 413
 
@@ -159,14 +144,17 @@ class FileChange:
     # of the file in the release, or in the base for a removed file
     size: int
     sha256: str
-    # the number of lines a finding may cite; 0 when the content is not shown
-    lines: int
     # numbered lines of an added file, or the unified diff of a changed or removed one
     text: str | None
+    # the lines a finding may cite, as numbered in the release, or in the base for a removed
+    # file: those the text shows
+    shown_lines: tuple[range, ...] = ()
     # why the content is not shown; None when it is
     not_shown: str | None = None
     # added or changed content the reading cannot read, which holds the release
     unreadable: bool = False
+    # text beyond what the reading takes, which holds the release
+    too_large: bool = False
 
 
 ANSWER_SCHEMA: dict[str, Any] = {
@@ -199,7 +187,8 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
     Read a release against the rules of the community catalog.
 
     The release is read in full without a base, otherwise as its change since the base. A
-    release with binary code, or a change larger than MAX_SHOWN, is held without asking the model.
+    release with binary code or data, or a request larger than MAX_REQUEST, is held without
+    asking the model.
 
     :param client: The client of the Claude API.
     :param release: The release.
@@ -217,22 +206,23 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
                 ReadingFinding(Rule.UNCLEAR, change.path, None, UNREADABLE) for change in unreadable
             ],
         )
-    if sum(len(change.text.encode()) for change in changes if change.text) > MAX_SHOWN:
+    if any(change.too_large for change in changes):
         return Reading(Verdict.HOLD, reason=TOO_LARGE)
-    output: OutputConfigParam = {
-        "effort": EFFORT,
-        "format": {"type": "json_schema", "schema": ANSWER_SCHEMA},
+    request: MessageCreateParamsNonStreaming = {
+        "model": MODEL,
+        "max_tokens": MAX_TOKENS,
+        "thinking": {"type": "adaptive"},
+        "output_config": {
+            "effort": EFFORT,
+            "format": {"type": "json_schema", "schema": ANSWER_SCHEMA},
+        },
+        "system": system_prompt(),
+        "messages": [{"role": "user", "content": build_message(release, base, changes)}],
     }
-    message: MessageParam = {"role": "user", "content": build_message(release, base, changes)}
+    if len(_json(request).encode()) > MAX_REQUEST:
+        return Reading(Verdict.HOLD, reason=TOO_LARGE)
     try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            thinking={"type": "adaptive"},
-            output_config=output,
-            system=system_prompt(),
-            messages=[message],
-        )
+        response = client.messages.create(**request)
     except anthropic.APIStatusError as err:
         if err.status_code == _TOO_LARGE_STATUS:
             return Reading(Verdict.HOLD, reason=TOO_LARGE)
@@ -251,6 +241,9 @@ def compare_folders(release: Path, base: Path | None) -> list[FileChange]:
     """
     Return the files that differ between two provider folders, sorted by path.
 
+    Text is shown until it reaches MAX_REQUEST; the text after that is marked too large and
+    not built.
+
     :param release: The provider folder of the release.
     :param base: The provider folder it is compared with; None to take every file as added.
     :raises OSError: A folder cannot be read.
@@ -258,16 +251,23 @@ def compare_folders(release: Path, base: Path | None) -> list[FileChange]:
     after = _files(release)
     before = _files(base) if base else {}
     changes = []
+    budget = MAX_REQUEST
     for path in sorted(after.keys() | before.keys(), key=str.encode):
         new, old = after.get(path), before.get(path)
         if new == old:
             continue
         if new is None:
             assert old is not None
-            changes.append(_change(path, Status.REMOVED, old, b""))
+            change = _change(path, Status.REMOVED, old, b"", budget)
         else:
             status = Status.ADDED if old is None else Status.CHANGED
-            changes.append(_change(path, status, new, old or b""))
+            change = _change(path, status, new, old or b"", budget)
+        if change.text is not None:
+            budget -= len(change.text.encode())
+        # the change is held already, so nothing after it is built
+        if change.too_large:
+            budget = -1
+        changes.append(change)
     return changes
 
 
@@ -365,7 +365,7 @@ def _consistent(answer: ReadingAnswer, changes: dict[str, FileChange]) -> bool:
     """
     Return whether an answer holds together: a pass without findings, a hold with them.
 
-    Every finding names a file the model was shown, and a line that file has.
+    Every finding names a file of the file table, and a line the model was shown of it.
 
     :param answer: The answer of the model.
     :param changes: The files the model was shown, by path.
@@ -377,7 +377,9 @@ def _consistent(answer: ReadingAnswer, changes: dict[str, FileChange]) -> bool:
     for finding in answer.findings:
         if (change := changes.get(finding.file)) is None:
             return False
-        if finding.line is not None and not 1 <= finding.line <= change.lines:
+        if finding.line is not None and not any(
+            finding.line in lines for lines in change.shown_lines
+        ):
             return False
         if len(finding.explanation) > MAX_EXPLANATION:
             return False
@@ -400,7 +402,7 @@ def _files(folder: Path) -> dict[str, bytes]:
     return files
 
 
-def _change(path: str, status: Status, content: bytes, base: bytes) -> FileChange:
+def _change(path: str, status: Status, content: bytes, base: bytes, budget: int) -> FileChange:
     """
     Return a file that differs, with what the reading is shown of it.
 
@@ -408,46 +410,178 @@ def _change(path: str, status: Status, content: bytes, base: bytes) -> FileChang
     :param status: How it changed.
     :param content: Its content in the release, or in the base when it was removed.
     :param base: Its content in the base; empty when it was added or removed.
+    :param budget: How much more text the reading takes, in bytes.
     """
     size, digest = len(content), hashlib.sha256(content).hexdigest()
     name = PurePosixPath(path).name.lower()
     suffix = PurePosixPath(name).suffix
     text = _text(content)
     if text is None or suffix in _CODE_SUFFIXES:
-        if suffix in _MEDIA_SUFFIXES and not _is_code(content):
-            return FileChange(path, status, size, digest, 0, None, "media or font")
+        if _is_media(suffix, content):
+            return FileChange(path, status, size, digest, None, not_shown="media or font")
         return FileChange(
             path,
             status,
             size,
             digest,
-            0,
             None,
-            "binary code or data",
+            not_shown="binary code or data",
             unreadable=status is not Status.REMOVED,
         )
-    lines = _lines(text)
-    if name.endswith(_GENERATED_SUFFIXES) or (
-        suffix != _PYTHON_SUFFIX and any(len(line) > MAX_LINE for line in lines)
-    ):
-        return FileChange(path, status, size, digest, 0, None, "minified or generated")
-    if status is Status.ADDED:
-        shown = "\n".join(f"{number:6d}\t{line}" for number, line in enumerate(lines, 1))
-        return FileChange(path, status, size, digest, len(lines), shown)
-    if status is Status.REMOVED:
-        before, after = lines, []
-    else:
-        before, after = _lines(_text(base) or ""), lines
-    label = _json(path)[1:-1]
-    diff = difflib.unified_diff(
-        before, after, fromfile=f"a/{label}", tofile=f"b/{label}", lineterm=""
+    if name.endswith(_BUILT_SUFFIXES):
+        return FileChange(path, status, size, digest, None, not_shown="a built web asset")
+    too_large = FileChange(
+        path, status, size, digest, None, not_shown="larger than the reading takes", too_large=True
     )
-    return FileChange(path, status, size, digest, len(lines), "\n".join(diff))
+    # neither the numbering nor the diff of more than the reading takes is built
+    if max(len(content), len(base)) > budget:
+        return too_large
+    lines = _lines(text)
+    if status is Status.ADDED:
+        shown = "\n".join(
+            f"{number:6d}\t{line.rstrip('\r\n')}" for number, line in enumerate(lines, 1)
+        )
+        shown_lines: tuple[range, ...] = (range(1, len(lines) + 1),)
+    elif status is Status.REMOVED:
+        shown, shown_lines = _diff(path, lines, [], in_base=True)
+    else:
+        shown, shown_lines = _diff(path, _lines(_text(base) or ""), lines, in_base=False)
+    if len(shown.encode()) > budget:
+        return too_large
+    return FileChange(path, status, size, digest, shown, shown_lines)
 
 
-def _is_code(content: bytes) -> bool:
-    """Return whether binary content starts as an executable or an archive does."""
-    return content.startswith(_CODE_MAGIC) or content[_TAR_MAGIC_OFFSET:].startswith(b"ustar")
+def _diff(
+    path: str, before: list[str], after: list[str], *, in_base: bool
+) -> tuple[str, tuple[range, ...]]:
+    """
+    Return the unified diff of two versions of a file, and the lines it shows.
+
+    A last line without a line end is marked, so a change of only the end of the file shows.
+
+    :param path: The path in the provider folder.
+    :param before: The lines in the base, with their line ends.
+    :param after: The lines in the release, with their line ends.
+    :param in_base: Give the lines shown as numbered in the base, for a removed file.
+    """
+    label = _json(path)[1:-1]
+    diff = [f"--- a/{label}", f"+++ b/{label}"]
+    shown = []
+    for group in difflib.SequenceMatcher(None, before, after).get_grouped_opcodes(3):
+        (_, i1, _, j1, _), (_, _, i2, _, j2) = group[0], group[-1]
+        diff.append(f"@@ -{_hunk_range(i1, i2)} +{_hunk_range(j1, j2)} @@")
+        shown.append(range(i1 + 1, i2 + 1) if in_base else range(j1 + 1, j2 + 1))
+        for tag, a1, a2, b1, b2 in group:
+            if tag == "equal":
+                diff.extend(_diff_lines(" ", after[b1:b2]))
+                continue
+            diff.extend(_diff_lines("-", before[a1:a2]))
+            diff.extend(_diff_lines("+", after[b1:b2]))
+    return "\n".join(diff), tuple(shown)
+
+
+def _diff_lines(prefix: str, lines: list[str]) -> Iterator[str]:
+    """Return lines of a diff, marking a line without a line end."""
+    for line in lines:
+        yield prefix + line.rstrip("\r\n")
+        if not line.endswith(("\r", "\n")):
+            yield "\\ No newline at end of file"
+
+
+def _hunk_range(start: int, stop: int) -> str:
+    """Return the lines start to stop, counted from 0, as a unified diff names them."""
+    if stop - start == 1:
+        return str(start + 1)
+    return f"{start + 1 if stop > start else start},{stop - start}"
+
+
+def _is_media(suffix: str, content: bytes) -> bool:
+    """
+    Return whether binary content is the media or font format its suffix names.
+
+    The format is told by its first bytes and, where that is cheap, its structure.
+
+    :param suffix: The suffix of the file, in lower case.
+    :param content: The content.
+    """
+    formats: dict[str, Callable[[], bool]] = {
+        ".png": lambda: _is_png(content),
+        ".jpg": lambda: content.startswith(b"\xff\xd8\xff") and content.endswith(b"\xff\xd9"),
+        ".gif": lambda: content[:6] in {b"GIF87a", b"GIF89a"} and content.endswith(b";"),
+        ".webp": lambda: _is_riff(content, b"WEBP"),
+        ".wav": lambda: _is_riff(content, b"WAVE"),
+        ".ico": lambda: _is_ico(content),
+        ".flac": lambda: content.startswith(b"fLaC"),
+        ".ogg": lambda: content.startswith(b"OggS"),
+        # an ID3 tag, or the sync bits of the first frame
+        ".mp3": lambda: content.startswith(b"ID3") or content[:2] >= b"\xff\xe0",
+        ".woff": lambda: _is_woff(content, b"wOFF"),
+        ".woff2": lambda: _is_woff(content, b"wOF2"),
+        ".ttf": lambda: _is_sfnt(content),
+        ".otf": lambda: _is_sfnt(content),
+    }
+    formats[".jpeg"] = formats[".jpg"]
+    return (check := formats.get(suffix)) is not None and check()
+
+
+def _is_woff(content: bytes, signature: bytes) -> bool:
+    """Return whether content is a WOFF or WOFF2 font of the length it gives."""
+    return content[:4] == signature and int.from_bytes(content[8:12]) == len(content)
+
+
+def _is_png(content: bytes) -> bool:
+    """Return whether content is a PNG: its signature, then chunks with their CRC up to IEND."""
+    if not content.startswith(_PNG_SIGNATURE):
+        return False
+    position = len(_PNG_SIGNATURE)
+    while position + 12 <= len(content):
+        length = int.from_bytes(content[position : position + 4])
+        end = position + 12 + length
+        if end > len(content):
+            return False
+        body = content[position + 4 : end - 4]
+        if zlib.crc32(body) != int.from_bytes(content[end - 4 : end]):
+            return False
+        if body[:4] == b"IEND":
+            return end == len(content)
+        position = end
+    return False
+
+
+def _is_riff(content: bytes, form: bytes) -> bool:
+    """Return whether content is a RIFF file of a form whose size is the size of the file."""
+    size = int.from_bytes(content[4:8], "little")
+    return (
+        content[:4] == b"RIFF" and content[8:12] == form and size + 8 + (size & 1) == len(content)
+    )
+
+
+def _is_ico(content: bytes) -> bool:
+    """Return whether content is an icon file whose images all lie inside it."""
+    count = int.from_bytes(content[4:6], "little")
+    table = 6 + 16 * count
+    if content[:4] != b"\x00\x00\x01\x00" or not count or table > len(content):
+        return False
+    for entry in range(6, table, 16):
+        size = int.from_bytes(content[entry + 8 : entry + 12], "little")
+        offset = int.from_bytes(content[entry + 12 : entry + 16], "little")
+        if offset < table or offset + size > len(content):
+            return False
+    return True
+
+
+def _is_sfnt(content: bytes) -> bool:
+    """Return whether content is a TrueType or OpenType font whose tables all lie inside it."""
+    count = int.from_bytes(content[4:6])
+    directory = 12 + 16 * count
+    if content[:4] not in _SFNT_VERSIONS or not count or directory > len(content):
+        return False
+    for record in range(12, directory, 16):
+        offset = int.from_bytes(content[record + 8 : record + 12])
+        length = int.from_bytes(content[record + 12 : record + 16])
+        if offset < directory or offset + length > len(content):
+            return False
+    return True
 
 
 def _text(content: bytes) -> str | None:
@@ -461,11 +595,8 @@ def _text(content: bytes) -> str | None:
 
 
 def _lines(text: str) -> list[str]:
-    """Return the lines of a text as an editor numbers them."""
-    lines = text.split("\n")
-    if lines[-1] == "":
-        lines.pop()
-    return lines
+    """Return the lines of a text with their line ends, as Python reads source."""
+    return _LINE.findall(text)
 
 
 def _json(value: Any) -> str:
