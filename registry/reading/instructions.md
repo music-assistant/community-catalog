@@ -65,8 +65,8 @@ says what code does is not proof that it does; read the code.
 Within the lines, a provider may use an unofficial API with the user's own account, read a
 service's public web pages, play free public content, and be of use to only a few people. Bugs,
 style, poor code and weak security that sends nothing elsewhere are no findings. Requests to the
-service's own API, its CDN and its sign-in, to the user's own devices and servers, and to the
-hosts of the requirements and metadata services the description mentions, are fine.
+service's own API, its CDN and its sign-in, to the user's own devices and servers, and to
+metadata services the description mentions, are fine.
 
 ## How to judge
 
