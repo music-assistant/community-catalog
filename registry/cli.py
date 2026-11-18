@@ -22,6 +22,7 @@ from registry.edit import (
     CommandError,
     add_version,
     block_version,
+    clear_version,
     get_provider,
     now,
     read_source,
@@ -396,6 +397,12 @@ def _unblock_version(args: argparse.Namespace) -> None:
     write_indexes(args.root)
 
 
+def _clear_version(args: argparse.Namespace) -> None:
+    """Accept a version that the reading did not pass, after a person read it."""
+    clear_version(load_registry(args.root), args.domain, args.version, args.reason)
+    write_indexes(args.root)
+
+
 def _admission(args: argparse.Namespace) -> tuple[AdmissionReport | None, list[ChannelResults]]:
     """
     Return the report of the prepare step and the results of the check step.
@@ -635,4 +642,12 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command.add_argument("domain")
     command.add_argument("version")
     command.set_defaults(run=_unblock_version)
+
+    command = commands.add_parser("clear-version", help=_clear_version.__doc__)
+    command.add_argument("domain")
+    command.add_argument("version")
+    command.add_argument(
+        "--reason", required=True, help="an https link to why the version is accepted"
+    )
+    command.set_defaults(run=_clear_version)
     return parser

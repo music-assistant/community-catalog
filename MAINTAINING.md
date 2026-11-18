@@ -80,6 +80,7 @@ owner alone.
 | `status` | Optional, default `listed`. `listed`, `withdrawn` (not offered; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
 | `blocked_versions` | Optional. Version to reason. A blocked version is loaded by no server. |
+| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, when the [reading](#versionsversionjson) did not pass it. The index does not use it yet. |
 
 ### versions/\<version\>.json
 
@@ -97,7 +98,8 @@ owner alone.
   "checks": {
     "nightly": {"passed": true, "checked": "2026-11-15T03:00:00Z", "reason": null},
     "beta": {"passed": false, "checked": "2026-11-15T03:00:00Z", "reason": "dependencies: some-package==1.0 clashes with the server"}
-  }
+  },
+  "reading": {"verdict": "hold", "read": "2026-11-15T03:41:12Z", "base": "1.1.0", "advisory": "GHSA-2c4m-59x8-p8cg"}
 }
 ```
 
@@ -113,6 +115,7 @@ owner alone.
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
 | `checks` | The result per channel in `channels.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
+| `reading` | Absent until the version is read against the rules. `verdict` is `pass` or `hold` (waits for a person), `read` when. `base` is the lower version whose change was read, with a version file, or `null` when the version was read in full. `advisory` is the GHSA id of the draft security advisory with the findings of a hold, or `null`: always for a pass. The index does not use it yet. |
 
 ### refused/\<version\>.json
 
@@ -207,6 +210,7 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
 | `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
+| `uv run python -m registry clear-version <domain> <version> --reason <url>` | Accepts a version the reading did not pass, after a person read it, with an `https` link to why, and writes the index files. A clearance is withdrawn with `block-version`. |
 
 Blocking is one command and one commit:
 

@@ -65,6 +65,14 @@ class ProviderStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+class Verdict(StrEnum):
+    """The verdict of the reading of a release against the rules."""
+
+    PASS = "pass"  # noqa: S105 - a verdict, not a password
+    # waits for a person
+    HOLD = "hold"
+
+
 @dataclass
 class ProviderFile(StrictModel):
     """`providers/<domain>/provider.json`: a provider, written at admission."""
@@ -93,6 +101,9 @@ class ProviderFile(StrictModel):
     reason_url: str | None = None
     # the reason, by version
     blocked_versions: dict[str, str] = field(default_factory=dict)
+    # versions a registry maintainer accepted without a pass of the reading: a link to why, by
+    # version
+    cleared_versions: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -103,6 +114,18 @@ class CheckResult(StrictModel):
     checked: str
     # why the version did not pass
     reason: str | None = None
+
+
+@dataclass
+class VersionReading(StrictModel):
+    """The reading of a version against the rules."""
+
+    verdict: Verdict
+    read: str
+    # the version the change was read against; None when the version was read in full
+    base: str | None = None
+    # the draft security advisory with the findings of a hold
+    advisory: str | None = None
 
 
 @dataclass
@@ -122,6 +145,14 @@ class VersionFile(StrictModel):
     icon_svg: str | None = None
     # the result by channel
     checks: dict[str, CheckResult] = field(default_factory=dict)
+    # None until the version is read
+    reading: VersionReading | None = None
+
+    def __post_serialize__(self, d: dict[Any, Any]) -> dict[Any, Any]:
+        """Leave out a reading that is not there, so a version file has the key once it is read."""
+        if d.get("reading") is None:
+            d.pop("reading", None)
+        return d
 
 
 @dataclass

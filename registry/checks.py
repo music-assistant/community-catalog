@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from registry import formats
 from registry.icon import check_icon
-from registry.models import ProviderStatus
+from registry.models import ProviderStatus, Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         RefusedRelease,
         ReservedDomains,
         VersionFile,
+        VersionReading,
     )
 
 # the provider types of a manifest a community provider can have; core is for the server itself
@@ -106,6 +107,11 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
             problems.append(f"blocked_versions: {version!r} is not a version: MAJOR.MINOR.PATCH")
         if not reason.strip():
             problems.append(f"blocked_versions: {version} has no reason")
+    for version, url in provider.cleared_versions.items():
+        if not formats.is_version(version):
+            problems.append(f"cleared_versions: {version!r} is not a version: MAJOR.MINOR.PATCH")
+        if not formats.is_https_url(url):
+            problems.append(f"cleared_versions: {version}: {url!r} is not an https address")
     problems += _date_problems("added", provider.added)
     return problems
 
@@ -149,6 +155,8 @@ def check_version(
             problems.append(f"icon_svg: {err}")
     for channel, result in version.checks.items():
         problems += _check_result_problems(channel, result, channels)
+    if version.reading is not None:
+        problems += _reading_problems(version.reading, version.version)
     return problems
 
 
@@ -233,6 +241,23 @@ def _check_result_problems(
             "characters"
         )
     problems += _date_problems(f"checks.{channel}.checked", result.checked)
+    return problems
+
+
+def _reading_problems(reading: VersionReading, version: str) -> list[str]:
+    """Return what is wrong in the reading of a version."""
+    problems = _date_problems("reading.read", reading.read)
+    if reading.base is not None and not (
+        formats.is_version(reading.base)
+        and formats.is_version(version)
+        and formats.version_key(reading.base) < formats.version_key(version)
+    ):
+        problems.append(f"reading.base: {reading.base!r} is not a version below {version}")
+    if reading.advisory is not None:
+        if reading.verdict is Verdict.PASS:
+            problems.append("reading.advisory: a version that passed has no advisory")
+        elif not formats.is_advisory(reading.advisory):
+            problems.append(f"reading.advisory: {reading.advisory!r} is not a GHSA id")
     return problems
 
 

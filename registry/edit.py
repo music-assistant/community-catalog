@@ -193,6 +193,23 @@ def block_version(registry: Registry, domain: str, version: str, reason: str | N
     _write_provider(registry, provider, replace(provider.file, blocked_versions=blocked))
 
 
+def clear_version(registry: Registry, domain: str, version: str, reason_url: str) -> None:
+    """
+    Accept a version of a provider that the reading did not pass, after a person read it.
+
+    :param registry: The registry.
+    :param domain: The domain of the provider.
+    :param version: The version.
+    :param reason_url: An https link to why the version is accepted, such as its issue.
+    :raises CommandError: There is no such provider.
+    :raises InvalidRegistryError: The provider would not be valid, such as a version without
+        a version file or a link that is not https.
+    """
+    provider = get_provider(registry, domain)
+    cleared = {**provider.file.cleared_versions, version: reason_url}
+    _write_provider(registry, provider, replace(provider.file, cleared_versions=cleared))
+
+
 def write_indexes(root: Path) -> None:
     """
     Check every file of the registry and write the index file of every channel that changed.
@@ -276,8 +293,12 @@ def _write_provider(registry: Registry, provider: Provider, file: ProviderFile) 
     """
     problems = check_provider(file, registry.reserved)
     problems += [
-        f"blocked_versions: {version} has no version file"
-        for version in file.blocked_versions
+        f"{key}: {version} has no version file"
+        for key, kept in (
+            ("blocked_versions", file.blocked_versions),
+            ("cleared_versions", file.cleared_versions),
+        )
+        for version in kept
         if version not in provider.versions
     ]
     path = registry.root / PROVIDERS_FOLDER / file.domain / PROVIDER_FILE

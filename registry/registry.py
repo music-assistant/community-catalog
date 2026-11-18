@@ -191,9 +191,21 @@ def _load_provider(
         problems += [f"{file}: {p}" for p in check_refused(release, provider)]
         refused[path.stem] = release
     problems += [
-        f"{where}/{PROVIDER_FILE}: blocked_versions: {version} has no version file"
-        for version in provider.blocked_versions
+        f"{where}/{PROVIDER_FILE}: {key}: {version} has no version file"
+        for key, kept in (
+            ("blocked_versions", provider.blocked_versions),
+            ("cleared_versions", provider.cleared_versions),
+        )
+        for version in kept
         if version not in versions
+    ]
+    problems += [
+        f"{where}/{VERSIONS_FOLDER}/{version}.json: reading.base: {file.reading.base} has no "
+        "version file"
+        for version, file in versions.items()
+        if file.reading is not None
+        and file.reading.base is not None
+        and file.reading.base not in versions
     ]
     return Provider(provider, versions, refused)
 

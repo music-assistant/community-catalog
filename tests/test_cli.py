@@ -353,6 +353,29 @@ def test_block_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None
     assert load_registry(files.root).providers[DOMAIN].file.blocked_versions == {}
 
 
+def test_clear_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
+    """A version is cleared with a link to why; the index does not change for it yet."""
+    issue = "https://github.com/music-assistant/community-catalog/issues/31"
+    files.provider()
+    files.version("1.0.0")
+    files.version("1.1.0", reading={"verdict": "hold", "read": "2026-11-03T03:00:00Z"})
+    assert _run(files, "build") == 0
+    index = (files.root / "site/v1/nightly.json").read_bytes()
+
+    assert _run(files, "clear-version", DOMAIN, "1.1.0", "--reason", issue) == 0
+
+    assert load_registry(files.root).providers[DOMAIN].file.cleared_versions == {"1.1.0": issue}
+    assert (files.root / "site/v1/nightly.json").read_bytes() == index
+    assert _run(files, "validate") == 0
+    capsys.readouterr()
+    assert _run(files, "clear-version", DOMAIN, "2.0.0", "--reason", issue) == 1
+    assert "cleared_versions: 2.0.0 has no version file" in capsys.readouterr().err
+    assert _run(files, "clear-version", DOMAIN, "1.0.0", "--reason", "http://x") == 1
+    assert "cleared_versions: 1.0.0: 'http://x' is not an https address" in capsys.readouterr().err
+    assert _run(files, "clear-version", "other_music", "1.0.0", "--reason", issue) == 1
+    assert "there is no provider other_music" in capsys.readouterr().err
+
+
 def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
     """The result of the admission is printed, and the exit code says whether it passed."""
     files.provider()

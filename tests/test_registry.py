@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from registry.models import Verdict, VersionFile, VersionReading
 from registry.registry import InvalidRegistryError, load_registry
 from tests.conftest import DOMAIN, NIGHTLY_IMAGE, ROOT, manifest, provider_file, version_file
 
@@ -15,6 +16,9 @@ if TYPE_CHECKING:
 
 PROVIDER = f"providers/{DOMAIN}/provider.json"
 VERSION = f"providers/{DOMAIN}/versions/1.0.0.json"
+ISSUE = "https://github.com/music-assistant/community-catalog/issues/31"
+ADVISORY = "GHSA-2c4m-59x8-p8cg"
+READ = "2026-11-03T03:00:00Z"
 
 
 def _problems(files: Files) -> list[str]:
@@ -191,6 +195,13 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
         ),
         (DOMAIN, {"added": "2026-10-01"}, "added: '2026-10-01' is not a date in UTC"),
         (DOMAIN, {"blocked_versions": {"1.0": "x"}}, "blocked_versions: '1.0' is not a version"),
+        (DOMAIN, {"cleared_versions": {"1.0": ISSUE}}, "cleared_versions: '1.0' is not a version"),
+        (
+            DOMAIN,
+            {"cleared_versions": {"1.0.0": "http://x"}},
+            "cleared_versions: 1.0.0: 'http://x' is not an https address",
+        ),
+        (DOMAIN, {"cleared_versions": {"1.0.0": ""}}, "cleared_versions: 1.0.0: '' is not an"),
     ],
 )
 def test_provider_file_rules(
@@ -323,6 +334,29 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
             },
             "checks.nightly.reason: is not one line of at most 300 printable characters",
         ),
+        (
+            {"reading": {"verdict": "maybe", "read": READ}},
+            "reading.verdict: 'maybe' is not a valid Verdict",
+        ),
+        ({"reading": {"verdict": "pass"}}, "reading.read: is missing"),
+        ({"reading": {"verdict": "pass", "read": READ, "by": "x"}}, "reading: unknown key by"),
+        ({"reading": {"verdict": "pass", "read": "today"}}, "reading.read: 'today' is not a date"),
+        (
+            {"reading": {"verdict": "pass", "read": READ, "base": "1.0.0"}},
+            "reading.base: '1.0.0' is not a version below 1.0.0",
+        ),
+        (
+            {"reading": {"verdict": "pass", "read": READ, "base": "1.0"}},
+            "reading.base: '1.0' is not a version below 1.0.0",
+        ),
+        (
+            {"reading": {"verdict": "pass", "read": READ, "advisory": ADVISORY}},
+            "reading.advisory: a version that passed has no advisory",
+        ),
+        (
+            {"reading": {"verdict": "hold", "read": READ, "advisory": "CVE-2026-1"}},
+            "reading.advisory: 'CVE-2026-1' is not a GHSA id",
+        ),
     ],
 )
 def test_version_file_rules(files: Files, changes: dict[str, Any], problem: str) -> None:
@@ -366,6 +400,51 @@ def test_tag_with_prefix(files: Files) -> None:
             "sample-v1.2.0"
         )
     ]
+
+
+def test_a_version_with_its_reading(files: Files) -> None:
+    """A version keeps the reading of its change against a lower version."""
+    reading = {"verdict": "hold", "read": READ, "base": "1.0.0", "advisory": ADVISORY}
+    files.provider(cleared_versions={"1.1.0": ISSUE})
+    files.version("1.0.0", reading={"verdict": "pass", "read": READ})
+    files.version("1.1.0", reading=reading)
+
+    versions = load_registry(files.root).providers[DOMAIN].versions
+
+    assert versions["1.0.0"].reading == VersionReading(Verdict.PASS, READ)
+    assert versions["1.1.0"].reading == VersionReading(Verdict.HOLD, READ, "1.0.0", ADVISORY)
+
+
+def test_a_version_file_without_a_reading_has_no_reading_key() -> None:
+    """A version that is not read yet is written without the key, and with it once it is read."""
+    unread = VersionFile.from_dict(version_file())
+    read = VersionFile.from_dict(version_file(reading={"verdict": "pass", "read": READ}))
+
+    assert "reading" not in unread.to_dict()
+    assert read.to_dict()["reading"] == {
+        "verdict": "pass",
+        "read": READ,
+        "base": None,
+        "advisory": None,
+    }
+
+
+def test_the_base_of_a_reading_needs_a_version_file(files: Files) -> None:
+    """The version a change was read against is one of the versions of the provider."""
+    files.provider()
+    files.version("1.1.0", reading={"verdict": "pass", "read": READ, "base": "1.0.0"})
+
+    assert _problems(files) == [
+        f"providers/{DOMAIN}/versions/1.1.0.json: reading.base: 1.0.0 has no version file"
+    ]
+
+
+def test_a_cleared_version_needs_a_version_file(files: Files) -> None:
+    """A cleared version is one of the versions of the provider."""
+    files.provider(cleared_versions={"1.0.0": ISSUE, "2.0.0": ISSUE})
+    files.version("1.0.0")
+
+    assert _problems(files) == [f"{PROVIDER}: cleared_versions: 2.0.0 has no version file"]
 
 
 def test_blocked_version_needs_a_version_file(files: Files) -> None:
