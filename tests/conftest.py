@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import itertools
 import json
@@ -276,6 +277,8 @@ class FakeGitHub:
         self.pulls: dict[str, list[dict[str, Any]]] = {}
         # the commit of each branch, by (owner/name, branch)
         self.branches: dict[tuple[str, str], str] = {}
+        # the files the contents API reads, by owner/name, branch or commit, and path
+        self.contents: dict[tuple[str, str, str], bytes] = {}
         # the files committed through the contents API and their commit messages, by owner/name,
         # branch and path
         self.files: dict[tuple[str, str, str], bytes] = {}
@@ -457,15 +460,38 @@ class FakeGitHub:
             return 201, b"{}"
         if found := re.fullmatch(r"git/refs/heads/(.+)", path):
             return self._move_branch(request, repository, unquote(found[1]))
-        if (found := re.fullmatch(r"contents/(.+)", path)) and method == "PUT":
-            data = request_json(request)
-            key = (repository, data["branch"], unquote(found[1]))
-            assert (repository, data["branch"]) in self.branches
-            assert key not in self.files
-            self.files[key] = base64.b64decode(data["content"])
-            self.messages[key] = data["message"]
-            return 201, b"{}"
+        if path.startswith("contents/"):
+            return self._contents(request, repository, path)
         return 404, b"{}"
+
+    def _contents(
+        self, request: urllib.request.Request, repository: str, path: str
+    ) -> tuple[int, bytes]:
+        """Read a file at a branch or commit, or commit a file to a branch."""
+        if found := re.fullmatch(r"contents/([^?]+)\?ref=(.+)", path):
+            assert request.get_method() == "GET"
+            content = self.contents.get((repository, unquote(found[2]), unquote(found[1])))
+            if content is None:
+                return 404, b"{}"
+            answer = {
+                "type": "file",
+                "encoding": "base64",
+                # GitHub breaks the content into lines
+                "content": base64.encodebytes(content).decode(),
+                "sha": blob_sha(content),
+            }
+            return 200, json.dumps(answer).encode()
+        assert request.get_method() == "PUT"
+        data = request_json(request)
+        key = (repository, data["branch"], unquote(path.removeprefix("contents/")))
+        assert (repository, data["branch"]) in self.branches
+        assert key not in self.files
+        # a file that exists where the branch was made from is replaced by its blob only
+        base = self.contents.get((repository, self.branches[key[:2]], key[2]))
+        assert data.get("sha") == (None if base is None else blob_sha(base))
+        self.files[key] = base64.b64decode(data["content"])
+        self.messages[key] = data["message"]
+        return 201, b"{}"
 
     def _move_branch(
         self, request: urllib.request.Request, repository: str, branch: str
@@ -582,6 +608,15 @@ def release(
         "publishedAt": None if draft else published,
         "tagCommit": {"oid": commit},
     }
+
+
+def blob_sha(content: bytes) -> str:
+    """
+    Return the SHA git gives the blob of a file.
+
+    :param content: The content of the file.
+    """
+    return hashlib.sha1(b"blob %d\0" % len(content) + content, usedforsecurity=False).hexdigest()
 
 
 def request_json(request: urllib.request.Request) -> dict[str, Any]:

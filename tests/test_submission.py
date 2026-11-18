@@ -8,15 +8,19 @@ import tarfile
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import yaml
 
 from registry.submission import (
+    CONFIRMATIONS,
+    FIELDS,
     MAX_BODY,
+    MOVE_FIELD,
     Submission,
     SubmissionError,
     find_provider,
     parse_submission,
 )
-from tests.conftest import ARCHIVE_ROOT, build_archive, manifest, member
+from tests.conftest import ARCHIVE_ROOT, ROOT, build_archive, manifest, member
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -25,6 +29,10 @@ TICKED = (
     "- [X] I own this repository, or I am a code owner in the manifest of its provider.\n"
     "- [X] I have read the [rules of the community catalog](https://example.com/rules)."
 )
+NOT_MOVED = (
+    "- [ ] This provider ships with the Music Assistant server today, and I want to move it here."
+)
+MOVED = NOT_MOVED.replace("[ ]", "[X]")
 
 
 def body(
@@ -32,6 +40,7 @@ def body(
     folder: str = "_No response_",
     tag_prefix: str = "_No response_",
     ticked: str = TICKED,
+    move: str = NOT_MOVED,
 ) -> str:
     """
     Return the text of an issue as GitHub writes it from the form.
@@ -40,10 +49,12 @@ def body(
     :param folder: The value of the field Folder.
     :param tag_prefix: The value of the field Tag prefix.
     :param ticked: The boxes of the field Before you submit.
+    :param move: The box of the field Moving from the server.
     """
     return (
         f"### Repository\n\n{repository}\n\n### Folder\n\n{folder}\n\n"
-        f"### Tag prefix\n\n{tag_prefix}\n\n### Before you submit\n\n{ticked}"
+        f"### Tag prefix\n\n{tag_prefix}\n\n### Moving from the server\n\n{move}\n\n"
+        f"### Before you submit\n\n{ticked}"
     )
 
 
@@ -72,6 +83,30 @@ def test_the_optional_fields() -> None:
     )
 
 
+def test_the_form_gives_the_fields_that_are_read() -> None:
+    """The form holds the fields in the order they are read; only the move is optional."""
+    form = yaml.safe_load((ROOT / ".github" / "ISSUE_TEMPLATE" / "submit-provider.yml").read_text())
+    fields = {
+        item["attributes"]["label"]: item for item in form["body"] if item["type"] != "markdown"
+    }
+
+    assert list(fields) == list(FIELDS)
+    [move] = fields[MOVE_FIELD]["attributes"]["options"]
+    assert MOVED.endswith(move["label"])
+    assert not move.get("required", False)
+    confirmations = fields[FIELDS[-1]]["attributes"]["options"]
+    assert len(confirmations) == CONFIRMATIONS
+    assert all(option["required"] for option in confirmations)
+
+
+@pytest.mark.parametrize(
+    ("move", "moved"), [(NOT_MOVED, False), ("_No response_", False), (MOVED, True)]
+)
+def test_a_move_from_the_server(move: str, moved: bool) -> None:
+    """Only the ticked box of the field Moving from the server makes the submission a move."""
+    assert parse_submission(body(move=move)).move is moved
+
+
 @pytest.mark.parametrize(
     ("text", "problem"),
     [
@@ -85,6 +120,8 @@ def test_the_optional_fields() -> None:
         (body(tag_prefix="a b"), "Tag prefix: 'a b' cannot start a tag"),
         (body(ticked=TICKED.replace("[X]", "[ ]", 1)), "Before you submit: every box"),
         (body(ticked=TICKED.splitlines()[0]), "Before you submit: every box"),
+        (body(move="yes"), "Moving from the server: holds something else than the box"),
+        (body(move=f"{MOVED}\n{MOVED}"), "Moving from the server: holds more than one line"),
         (body() + "\n\n### Approved\n\nyes", "does not hold the fields of the form"),
         ("Please add my provider: someone/ma-sample", "does not hold the fields of the form"),
         ("**Approved**\n\n" + body(), "does not hold the fields of the form"),
@@ -100,6 +137,8 @@ def test_the_optional_fields() -> None:
         "tag prefix",
         "a box not ticked",
         "a box missing",
+        "a move that is no box",
+        "a move twice",
         "an extra heading",
         "junk",
         "text before the form",

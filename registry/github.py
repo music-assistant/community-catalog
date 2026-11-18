@@ -431,17 +431,58 @@ class GitHub:
             msg = f"{url} answered {status}: {body[:500]!r}"
             raise GitHubError(msg)
 
+    def file(self, repository: str, path: str, ref: str) -> tuple[bytes, str] | None:
+        """
+        Return the content of a file at a branch or commit and the SHA of its blob, or None.
+
+        None is for a file that does not exist there.
+
+        :param repository: The repository, as owner/name.
+        :param path: The path of the file in the repository.
+        :param ref: The branch or the full SHA of the commit.
+        :raises GitHubError: GitHub refused the request, or answered no file.
+        """
+        query = urllib.parse.urlencode({"ref": ref})
+        url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}?{query}"
+        try:
+            found = self._json(self._request(url))
+        except NotFoundError:
+            return None
+        content, sha = found.get("content"), found.get("sha")
+        if (
+            found.get("type") != "file"
+            or found.get("encoding") != "base64"
+            or not isinstance(content, str)
+            or not isinstance(sha, str)
+        ):
+            msg = f"{url} answered no file"
+            raise GitHubError(msg)
+        try:
+            return base64.b64decode(content), sha
+        except ValueError as err:
+            msg = f"{url} answered a file that cannot be read: {err}"
+            raise GitHubError(msg) from err
+
     def put_file(
-        self, repository: str, branch: str, path: str, content: bytes, message: str
+        self,
+        repository: str,
+        branch: str,
+        path: str,
+        content: bytes,
+        message: str,
+        *,
+        replaces: str | None = None,
     ) -> None:
         """
-        Commit a file that does not exist on a branch yet.
+        Commit a file to a branch.
 
         :param repository: The repository, as owner/name.
         :param branch: The name of the branch.
         :param path: The path of the file in the repository.
         :param content: The content of the file.
         :param message: The commit message.
+        :param replaces: The blob SHA of the file it replaces; None for a file that does not
+            exist on the branch yet.
         :raises GitHubError: GitHub refused the request.
         """
         data = {
@@ -449,6 +490,8 @@ class GitHub:
             "content": base64.b64encode(content).decode(),
             "branch": branch,
         }
+        if replaces is not None:
+            data["sha"] = replaces
         url = f"{API_URL}/repos/{repository}/contents/{urllib.parse.quote(path)}"
         self._json(self._request(url, json.dumps(data).encode(), method="PUT"), expected=201)
 

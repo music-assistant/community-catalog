@@ -29,7 +29,7 @@ from registry.formats import is_date
 from registry.github import GitHub
 from registry.models import AdmissionReport, ChannelResults, CheckPlan, Finding, ProviderFile
 from registry.pipeline import PLAN_FILE, archive_path
-from registry.registry import load_registry
+from registry.registry import InvalidRegistryError, load_registry
 from tests.conftest import (
     BOT_LOGIN,
     DOMAIN,
@@ -40,7 +40,7 @@ from tests.conftest import (
     manifest,
     release,
 )
-from tests.test_submission import body
+from tests.test_submission import MOVED, body
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -143,6 +143,22 @@ def _passed(issue: int = ISSUE, repository: str = REPOSITORY) -> AdmissionReport
         name="Sample `music`\n@a-maintainer",
         provider=candidate,
     )
+
+
+def _moved(domain: str = "builtin_one") -> AdmissionReport:
+    """Return the report of a move out of the server that passes every check of the prepare step."""
+    report = _passed()
+    assert report.provider is not None
+    report.domain = report.provider.domain = report.provider.folder = domain
+    report.name, report.moving = "Sample music", True
+    return report
+
+
+def _server_manifest(github: FakeGitHub, domain: str, codeowners: list[Any]) -> None:
+    """Give the server's dev branch the manifest of a provider it ships."""
+    content = json.dumps({**manifest(domain), "codeowners": codeowners}).encode()
+    path = f"music_assistant/providers/{domain}/manifest.json"
+    github.contents["music-assistant/server", "dev", path] = content
 
 
 def _propose(
@@ -503,13 +519,107 @@ def test_a_reserved_domain(files: Files, github: FakeGitHub) -> None:
     report = _prepare(files, github)
 
     assert _failed(report) == [
-        "The domain is a provider the server ships: builtin_one",
+        (
+            "The domain is a provider the server ships; only a code owner of it in the server "
+            "moves it here, with the box Moving from the server: builtin_one"
+        ),
         (
             "Not valid: providers/builtin_one/provider.json: domain: builtin_one is a provider "
             "the server ships"
         ),
     ]
-    assert (report.provider, report.version) == (None, None)
+    assert (report.provider, report.version, report.moving) == (None, None, False)
+
+
+def test_a_moving_domain_without_the_box(files: Files, github: FakeGitHub) -> None:
+    """A provider the server ships moves only with the box ticked, also one main lists as moving."""
+    github.archives[REPOSITORY, COMMIT] = _release("moving_one", "moving_one")
+
+    report = _prepare(files, github)
+
+    assert _failed(report) == [
+        (
+            "The domain is a provider the server ships; only a code owner of it in the server "
+            "moves it here, with the box Moving from the server: moving_one"
+        )
+    ]
+    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).channels == {}
+
+
+def test_a_move_by_a_code_owner(files: Files, github: FakeGitHub) -> None:
+    """A code owner of a provider in the server moves it, and the check loads its release."""
+    github.archives[REPOSITORY, COMMIT] = _release("builtin_one", "builtin_one")
+    # GitHub handles are compared without case
+    github.issue(REGISTRY, ISSUE, body(move=MOVED), user={"login": "SomeOne"})
+    _server_manifest(github, "builtin_one", ["@another", "@someone"])
+
+    report = _prepare(files, github)
+
+    assert _failed(report) == []
+    assert report.moving
+    assert [(finding.text, finding.detail) for finding in report.findings][2:4] == [
+        (
+            "The domain is a provider the server ships, which this submission moves here",
+            "builtin_one",
+        ),
+        ("The submitter is a code owner of the provider in the server", "SomeOne"),
+    ]
+    # the check step reads the registry of the checkout, which moves the domain
+    assert load_registry(files.root).reserved.moving == ["builtin_one", "moving_one"]
+    plan = load_model(files.root / "work" / PLAN_FILE, CheckPlan)
+    assert [(e.domain, e.version) for e in plan.channels["nightly"]] == [("builtin_one", "1.0.0")]
+    passed, text = check_admission(
+        load_registry(files.root),
+        report,
+        [_results("nightly", passed=True, domain="builtin_one")],
+        proposal=Proposal(Outcome.OPENED, PULL),
+    )
+    assert passed
+    assert (
+        "This submission moves ` builtin_one ` out of the Music Assistant server. Once its pull "
+        "request is merged, the team removes the provider from the server in the release whose "
+        "catalog index offers it; the server's CI refuses the removal before that.\n\n- ✅"
+    ) in text
+
+
+@pytest.mark.parametrize(
+    "codeowners", [["@another"], ["someone-else", 7], None], ids=["another", "junk", "none"]
+)
+def test_a_move_by_someone_who_is_no_code_owner(
+    files: Files, github: FakeGitHub, codeowners: list[Any] | None
+) -> None:
+    """Only a code owner of the provider in the server moves it; its release is not checked."""
+    github.archives[REPOSITORY, COMMIT] = _release("builtin_one", "builtin_one")
+    github.issue(REGISTRY, ISSUE, body(move=MOVED))
+    if codeowners is not None:
+        _server_manifest(github, "builtin_one", codeowners)
+
+    report = _prepare(files, github)
+
+    assert _failed(report) == [
+        (
+            "The submitter is no code owner of the provider in the server, and only a code owner "
+            "moves it here: ask one of them to submit it: someone"
+        )
+    ]
+    assert load_model(files.root / "work" / PLAN_FILE, CheckPlan).channels == {}
+
+
+def test_a_move_of_a_domain_the_server_does_not_ship(files: Files, github: FakeGitHub) -> None:
+    """A move needs a provider the server ships; the server is not asked about another."""
+    github.issue(REGISTRY, ISSUE, body(move=MOVED))
+
+    report = _prepare(files, github)
+
+    assert _failed(report) == [
+        (
+            "The domain is no provider the server ships, so there is nothing to move: untick the "
+            f"box Moving from the server: {DOMAIN}"
+        )
+    ]
+    assert not report.moving
+    assert load_registry(files.root).reserved.moving == ["moving_one"]
+    assert not [r for r in github.requests if "music-assistant/server" in r.full_url]
 
 
 def test_a_domain_that_is_taken(files: Files, github: FakeGitHub) -> None:
@@ -1047,6 +1157,58 @@ def test_propose_leaves_other_pull_requests_alone(files: Files, github: FakeGitH
 
     assert json.dumps(github.pulls) == before
     assert github.comments == {}
+
+
+def test_propose_moves_a_provider_out_of_the_server(files: Files, github: FakeGitHub) -> None:
+    """The pull request of a move adds its provider.json and its domain to the moving ones."""
+    reserved = files.root / "reserved_domains.json"
+    github.contents[REGISTRY, MAIN, "reserved_domains.json"] = reserved.read_bytes()
+
+    _propose(files, github, _moved())
+
+    branch = f"admit/builtin_one-{ISSUE}"
+    provider = (REGISTRY, branch, "providers/builtin_one/provider.json")
+    moving = (REGISTRY, branch, "reserved_domains.json")
+    assert list(github.files) == [provider, moving]
+    assert json.loads(github.files[moving]) == {
+        **json.loads(reserved.read_bytes()),
+        "moving": ["builtin_one", "moving_one"],
+    }
+    [pull] = github.pulls[REGISTRY]
+    assert pull["title"] == "Admit builtin_one, moved from the server"
+    assert set(github.messages.values()) == {pull["title"]}
+    assert (
+        pull["body"]
+        .split("\n", 2)[2]
+        .startswith(
+            "\nMoves ` builtin_one ` out of the Music Assistant server: adds it to ` moving ` in "
+            "` reserved_domains.json `.\n\nAdds ` providers/builtin_one/provider.json `: "
+            f"` Sample music ` from [` {REPOSITORY} `](https://github.com/{REPOSITORY}).\n\n"
+            "## Admission checks"
+        )
+    )
+    assert "This submission moves ` builtin_one ` out of the" in pull["body"]
+    assert _consistent(github, pull)
+    # what CI validates in the pull request: main with both files; without the move it is refused
+    reserved.write_bytes(github.files[moving])
+    files.write("providers/builtin_one/provider.json", github.files[provider].decode())
+    assert set(load_registry(files.root).providers) == {"builtin_one"}
+    reserved.write_bytes(github.contents[REGISTRY, MAIN, "reserved_domains.json"])
+    with pytest.raises(InvalidRegistryError, match="builtin_one is a provider the server ships"):
+        load_registry(files.root)
+
+
+def test_propose_a_move_main_lists_already(files: Files, github: FakeGitHub) -> None:
+    """A domain main lists as moving already leaves reserved_domains.json as it is."""
+    github.contents[REGISTRY, MAIN, "reserved_domains.json"] = (
+        files.root / "reserved_domains.json"
+    ).read_bytes()
+
+    _propose(files, github, _moved("moving_one"))
+
+    assert list(github.files) == [
+        (REGISTRY, f"admit/moving_one-{ISSUE}", "providers/moving_one/provider.json")
+    ]
 
 
 def test_propose_refuses_what_main_cannot_take(files: Files, github: FakeGitHub) -> None:

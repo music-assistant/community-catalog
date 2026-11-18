@@ -283,6 +283,13 @@ withdrawals still reach its index.
   resolve against the server's packages, which include the pins of that copy: a release keeps
   those pins until the server no longer ships the provider.
 
+A move normally arrives through the form: a code owner of the provider in the server (in
+`codeowners` of its `manifest.json` on the server's `dev` branch) ticks "Moving from the server",
+and the pull request of the bot adds the domain to `moving` next to the `provider.json`, so
+merging it admits the move. After the merge, the team removes the provider from the server in the
+release whose catalog index offers it; the server's CI refuses the removal before that. `moving`
+is still edited by hand, but only for a move the team agreed outside the form.
+
 `refresh-reserved` only adds domains. Run it against the `dev` branch and every supported stable
 branch of the server; a domain leaves the list by hand, once no supported channel ships it.
 
@@ -389,7 +396,10 @@ It checks:
 - that the repository exists, is public, not archived, and has an open source licence GitHub
   recognises;
 - that its latest release has a provider folder whose manifest names a domain that is free: not
-  reserved, and not a provider in the catalog;
+  reserved, and not a provider in the catalog. A provider the server ships is free only for a
+  move, with the box "Moving from the server" ticked by a code owner of it in the server (see
+  [Reserved domains](#reserved-domains)); the checkout then lists it as moving, so the load check
+  imports the release;
 - that the `provider.json` it leads to is valid; its ids come from GitHub;
 - that the author of the issue owns the repository or is a code owner in the manifest of the
   latest release;
@@ -411,8 +421,10 @@ Its jobs:
      checked: when the open pull request of the issue holds the same `provider.json` (whatever
      its `added`) and release, it stands. Otherwise that pull request is closed first, with a
      line that says why, and its branch deleted; then the branch `admit/<domain>-<issue>` is
-     made from `main` with one commit that adds only the `provider.json`, and only then the pull
-     request "Admit <domain>" is opened, with the result, and closes the issue when merged. A run
+     made from `main` with one commit that adds only the `provider.json` (a move adds a second
+     one that adds the domain to `moving` in the `reserved_domains.json` of that commit of
+     `main`), and only then the pull request "Admit <domain>" is opened, with the result, and
+     closes the issue when merged. A run
      cut off at any of these steps leaves no open pull request whose file and text disagree, and
      the next run finishes the work.
    * Nothing is written to the branch while another pull request (of a person, say) uses it:
