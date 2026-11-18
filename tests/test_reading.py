@@ -17,6 +17,7 @@ from registry.cli import main
 from registry.content import unpack
 from registry.models import Verdict
 from registry.reading import (
+    ANSWER_SCHEMA,
     CUT_OFF,
     EFFORT,
     INSTRUCTIONS_FOLDER,
@@ -421,6 +422,18 @@ def test_the_data_lies_between_lines_of_a_random_boundary(tmp_path: Path) -> Non
     assert header["base_version"] == "1.0.0"
     assert header["requirements"] == ["some-package==2.0"]
     assert header["base_requirements"] == ["some-package==1.0"]
+
+
+def test_a_tool_that_steers_an_assistant_is_a_rule_of_its_own(tmp_path: Path) -> None:
+    """The answer format and its check take a finding on a tool that steers an AI assistant."""
+    finding = {**FINDING, "rule": "steers_assistant", "file": "manifest.json", "line": None}
+
+    reading = _read(tmp_path, FakeClient(_message({**HOLD, "findings": [finding]})))
+
+    rules = ANSWER_SCHEMA["properties"]["findings"]["items"]["properties"]["rule"]["enum"]
+    assert {"steers_assistant", "addresses_reader"} <= set(rules)
+    assert reading.reason is None
+    assert [found.rule for found in reading.findings] == [Rule.STEERS_ASSISTANT]
 
 
 def test_a_hold(tmp_path: Path) -> None:

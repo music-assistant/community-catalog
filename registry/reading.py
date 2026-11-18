@@ -72,6 +72,8 @@ class Rule(StrEnum):
     KEEPS_MUSIC = "keeps_music"
     # sends data elsewhere, loads code while it runs, or does what its description does not say
     HARMS_USER = "harms_user"
+    # offers AI assistants tools whose texts do more than describe the tool and report what it did
+    STEERS_ASSISTANT = "steers_assistant"
     # mainly exists to load providers or lists of sources from outside the catalog
     LOADS_PROVIDERS = "loads_providers"
     # text addressed to whoever or whatever reads the release
