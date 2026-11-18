@@ -53,8 +53,11 @@ says what code does is not proof that it does; read the code.
 - `no_rights`: getting around an account, a subscription tier or regional availability (a
   spoofed premium flag, someone else's shared credentials, a proxy or header to pass for another
   region), or a source that offers music without the permission of its rights holders.
-- `copy_protection`: DRM keys, a content decryption module, decrypting protected streams, or
-  extracting keys.
+- `copy_protection`: getting around copy protection to give more than the service's own app
+  gives the user's account, such as decrypting audio of a tier, quality or region that account
+  does not have. Decrypting a protected stream with the user's own account to play it, the way
+  the service's own app does, is allowed: DRM keys or a content decryption module used for that
+  are no finding.
 - `keeps_music`: downloading or exporting music to keep it: audio written to a place the user
   keeps, rather than a temporary cache that is only used for playback.
 - `steers_assistant`: a tool the provider offers AI assistants whose text does more than describe
@@ -70,11 +73,12 @@ says what code does is not proof that it does; read the code.
 
 ## What is allowed
 
-Within the lines, a provider may use an unofficial API with the user's own account, read a
-service's public web pages, play free public content, and be of use to only a few people. Bugs,
-style, poor code and weak security that sends nothing elsewhere are no findings. Requests to the
-service's own API, its CDN and its sign-in, to the user's own devices and servers, and to
-metadata services the description mentions, are fine.
+Within the lines, a provider may work like the service's own app does for the user's own
+account, also by reverse engineering it (an unofficial API, or decoding protected audio to play
+it), read a service's public web pages, play free public content, and be of use to only a few
+people. Bugs, style, poor code and weak security that sends nothing elsewhere are no findings.
+Requests to the service's own API, its CDN and its sign-in, to the user's own devices and
+servers, and to metadata services the description mentions, are fine.
 
 ## How to judge
 
