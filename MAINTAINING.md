@@ -207,6 +207,7 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
 | `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
+| `uv run python -m registry read-archive <archive> --folder <folder> [--base <archive>]` | Reads a release against the rules (see [The reading of a release](#the-reading-of-a-release)) and prints the reading; writes nothing. Without `--base` the release is read in full. Needs `ANTHROPIC_API_KEY`. |
 
 Blocking is one command and one commit:
 
@@ -367,6 +368,29 @@ check therefore finds honest mistakes; a provider that wants to can write a pass
 
 The admission runs the same check in the same way. The reusable workflow for a provider's own
 CI runs the same checks on the provider's checkout, in one container.
+
+## The reading of a release
+
+`registry/reading.py` reads a release against the
+[rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md) with
+one request to the Claude API (`claude-opus-5-5`): in full, or as its change since an earlier
+version. It is not part of the release pipeline yet; `read-archive` runs it by hand.
+
+- The model gets the instructions and rules in `registry/reading/` and one message with the
+  release: a header from the manifest, a table of the files that were added, changed or removed,
+  and the numbered lines of each added file or the diff of each changed or removed one. Media,
+  fonts and minified or generated text (`*.min.js`, `*.min.css`, `*.map`, and a line over 2000
+  characters outside Python) are listed but not shown.
+- The model has no tools and gets no credentials. Its answer is a fixed JSON shape, a pass
+  without findings or a hold with at least one, each finding on a file of the table; the code
+  checks it, and is never led by it to run, open or fetch anything.
+- The code holds a release with binary code or data that is added or changed, or with more than
+  400 kB of shown text, without asking the model; and one the model refused, whose answer was cut
+  off or is not valid. A failure of the API (no connection, a time-out, an error status other than
+  413) gives no verdict: the release is read again later.
+- `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
+  is allowed" of the rules; a change to those sections is copied in the same week, with the
+  command in `test_rules_are_the_two_sections_of_the_rules_page` (`tests/test_reading.py`).
 
 ## Admission
 

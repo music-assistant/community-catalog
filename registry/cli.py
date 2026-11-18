@@ -7,6 +7,8 @@ import asyncio
 import os
 import re
 import sys
+import tarfile
+import tempfile
 from pathlib import Path
 
 from registry.admission import (
@@ -18,6 +20,7 @@ from registry.admission import (
     prepare_admission,
     propose_admission,
 )
+from registry.content import unpack
 from registry.edit import (
     CommandError,
     add_version,
@@ -201,6 +204,30 @@ def _check(args: argparse.Namespace) -> None:
     results = ChannelResults(channel=args.channel, checked=format_date(now()), results=[result])
     args.output.write_bytes(dumps(results.to_dict()))
     print(f"{name}: {'passed' if outcome.passed else outcome.reason}")
+
+
+def _read_archive(args: argparse.Namespace) -> int:
+    """Read a release against the rules of the community catalog and print the verdict."""
+    # the server image the check step runs in has no client of the API
+    import anthropic  # noqa: PLC0415
+
+    from registry.reading import ReadingUnavailableError, Side, read_release  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory() as workdir:
+        release = Side(Path(workdir, "release"))
+        base = Side(Path(workdir, "base")) if args.base else None
+        try:
+            unpack(args.archive, args.folder, release.folder)
+            if base is not None:
+                unpack(args.base, args.folder, base.folder)
+            reading = read_release(anthropic.Anthropic(), release, base)
+        except ReadingUnavailableError as err:
+            print(f"pending: {err}", file=sys.stderr)
+            return 1
+        except (ValueError, tarfile.TarError, EOFError) as err:
+            raise CommandError(str(err)) from err
+    print(dumps(reading.to_dict()).decode(), end="")
+    return 0
 
 
 def _check_folder(args: argparse.Namespace) -> int:
@@ -538,6 +565,18 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
         "folder", type=Path, help="the provider folder, named after its domain or provider"
     )
     command.set_defaults(run=_check_folder)
+
+    command = commands.add_parser("read-archive", help=_read_archive.__doc__)
+    command.add_argument("archive", type=Path, help="the GitHub archive of the release")
+    command.add_argument(
+        "--folder", required=True, help="the folder of the provider in the archives"
+    )
+    command.add_argument(
+        "--base",
+        type=Path,
+        help="the GitHub archive of the version to read the change against (default: read all)",
+    )
+    command.set_defaults(run=_read_archive)
 
     command = commands.add_parser("apply-results", help=_apply_results.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")
