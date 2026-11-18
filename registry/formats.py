@@ -236,5 +236,11 @@ def is_https_url(value: str) -> bool:
 
     :param value: The value to check.
     """
-    parts = urlsplit(value)
-    return parts.scheme == "https" and bool(parts.hostname) and not any(c.isspace() for c in value)
+    try:
+        parts = urlsplit(value)
+        return (
+            parts.scheme == "https" and bool(parts.hostname) and not any(c.isspace() for c in value)
+        )
+    # a host in brackets that is no IPv6 address
+    except ValueError:
+        return False

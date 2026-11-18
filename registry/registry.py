@@ -5,7 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from registry.checks import check_channels, check_provider, check_refused, check_version
+from registry.checks import (
+    check_channels,
+    check_kept_versions,
+    check_provider,
+    check_reading_base,
+    check_refused,
+    check_version,
+)
 from registry.files import load_model
 from registry.formats import is_github_handle, version_key
 from registry.models import (
@@ -190,22 +197,11 @@ def _load_provider(
             problems.append(f"{file}: version: {path.stem} has a version file as well")
         problems += [f"{file}: {p}" for p in check_refused(release, provider)]
         refused[path.stem] = release
+    problems += [f"{where}/{PROVIDER_FILE}: {p}" for p in check_kept_versions(provider, versions)]
     problems += [
-        f"{where}/{PROVIDER_FILE}: {key}: {version} has no version file"
-        for key, kept in (
-            ("blocked_versions", provider.blocked_versions),
-            ("cleared_versions", provider.cleared_versions),
-        )
-        for version in kept
-        if version not in versions
-    ]
-    problems += [
-        f"{where}/{VERSIONS_FOLDER}/{version}.json: reading.base: {file.reading.base} has no "
-        "version file"
+        f"{where}/{VERSIONS_FOLDER}/{version}.json: {p}"
         for version, file in versions.items()
-        if file.reading is not None
-        and file.reading.base is not None
-        and file.reading.base not in versions
+        for p in check_reading_base(file, provider, versions)
     ]
     return Provider(provider, versions, refused)
 

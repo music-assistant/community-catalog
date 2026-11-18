@@ -202,6 +202,11 @@ def test_provider_file_shape(files: Files, changes: dict[str, Any], problem: str
             "cleared_versions: 1.0.0: 'http://x' is not an https address",
         ),
         (DOMAIN, {"cleared_versions": {"1.0.0": ""}}, "cleared_versions: 1.0.0: '' is not an"),
+        (
+            DOMAIN,
+            {"status": "blocked", "reason": "x", "reason_url": "https://[::1"},
+            "reason_url: 'https://[::1' is not an https address",
+        ),
     ],
 )
 def test_provider_file_rules(
@@ -436,6 +441,78 @@ def test_the_base_of_a_reading_needs_a_version_file(files: Files) -> None:
 
     assert _problems(files) == [
         f"providers/{DOMAIN}/versions/1.1.0.json: reading.base: 1.0.0 has no version file"
+    ]
+
+
+EARLIER = "2026-11-02T03:00:00Z"
+LATER = "2026-11-04T03:00:00Z"
+
+
+@pytest.mark.parametrize(
+    ("base", "cleared", "blocked", "accepted"),
+    [
+        (None, False, False, False),
+        ({"verdict": "hold", "read": EARLIER}, False, False, False),
+        ({"verdict": "pass", "read": LATER}, False, False, False),
+        ({"verdict": "pass", "read": EARLIER}, False, False, True),
+        ({"verdict": "pass", "read": READ}, False, False, True),
+        ({"verdict": "hold", "read": EARLIER}, True, False, True),
+        (None, True, False, True),
+        ({"verdict": "pass", "read": EARLIER}, False, True, True),
+        ({"verdict": "hold", "read": EARLIER}, True, True, True),
+    ],
+    ids=[
+        "pending",
+        "held",
+        "passed-later",
+        "passed-before",
+        "passed-at-once",
+        "held-and-cleared",
+        "pending-and-cleared",
+        "passed-then-blocked",
+        "cleared-then-blocked",
+    ],
+)
+def test_the_base_of_a_reading_was_accepted(
+    files: Files, base: dict[str, str] | None, cleared: bool, blocked: bool, accepted: bool
+) -> None:
+    """A change is read against a version that had a pass or a clearance; a later block is fine."""
+    files.provider(
+        cleared_versions={"1.0.0": ISSUE} if cleared else {},
+        blocked_versions={"1.0.0": "Sends the library elsewhere"} if blocked else {},
+    )
+    files.version("1.0.0", reading=base)
+    files.version("1.1.0", reading={"verdict": "pass", "read": READ, "base": "1.0.0"})
+
+    if accepted:
+        load_registry(files.root)
+    else:
+        assert _problems(files) == [
+            (
+                f"providers/{DOMAIN}/versions/1.1.0.json: reading.base: 1.0.0 had neither a pass "
+                "of the reading nor a clearance when 1.1.0 was read"
+            )
+        ]
+
+
+@pytest.mark.parametrize("reading", [None, {"verdict": "hold", "read": READ}])
+def test_a_held_or_pending_version_may_be_cleared(
+    files: Files, reading: dict[str, str] | None
+) -> None:
+    """A person may clear a version the reading held or did not read yet."""
+    files.provider(cleared_versions={"1.0.0": ISSUE})
+    files.version("1.0.0", reading=reading)
+
+    assert load_registry(files.root).providers[DOMAIN].file.cleared_versions == {"1.0.0": ISSUE}
+
+
+def test_a_version_that_passed_is_not_cleared(files: Files) -> None:
+    """A version the reading passed needs no clearance, so one is refused."""
+    files.provider(cleared_versions={"1.0.0": ISSUE})
+    files.version("1.0.0", reading={"verdict": "pass", "read": READ})
+
+    assert _problems(files) == [
+        f"{PROVIDER}: cleared_versions: 1.0.0 passed the reading, so it needs no clearance"
     ]
 
 

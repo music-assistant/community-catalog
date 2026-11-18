@@ -398,7 +398,7 @@ def _unblock_version(args: argparse.Namespace) -> None:
 
 
 def _clear_version(args: argparse.Namespace) -> None:
-    """Accept a version that the reading did not pass, after a person read it."""
+    """Accept a version that the reading held or did not read yet, after a person read it."""
     clear_version(load_registry(args.root), args.domain, args.version, args.reason)
     write_indexes(args.root)
 

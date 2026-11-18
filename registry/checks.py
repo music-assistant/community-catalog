@@ -160,6 +160,65 @@ def check_version(
     return problems
 
 
+def check_kept_versions(provider: ProviderFile, versions: Mapping[str, VersionFile]) -> list[str]:
+    """
+    Return what is wrong in the versions a provider.json blocks or clears.
+
+    :param provider: The content of the provider.json.
+    :param versions: The version files of the provider, by version.
+    """
+    problems = [
+        f"{key}: {version} has no version file"
+        for key, kept in (
+            ("blocked_versions", provider.blocked_versions),
+            ("cleared_versions", provider.cleared_versions),
+        )
+        for version in kept
+        if version not in versions
+    ]
+    problems += [
+        f"cleared_versions: {version} passed the reading, so it needs no clearance"
+        for version in provider.cleared_versions
+        if (file := versions.get(version)) is not None
+        and file.reading is not None
+        and file.reading.verdict is Verdict.PASS
+    ]
+    return problems
+
+
+def check_reading_base(
+    version: VersionFile, provider: ProviderFile, versions: Mapping[str, VersionFile]
+) -> list[str]:
+    """
+    Return what is wrong in the base of the reading of a version.
+
+    The base was accepted when the version was read: it had a pass recorded no later, or a
+    clearance. A block of the base after that changes nothing.
+
+    :param version: The version file.
+    :param provider: The provider the version belongs to.
+    :param versions: The version files of the provider, by version.
+    """
+    if (reading := version.reading) is None or reading.base is None:
+        return []
+    if (base := versions.get(reading.base)) is None:
+        return [f"reading.base: {reading.base} has no version file"]
+    # dates in the one format of the registry compare as text
+    passed = (
+        base.reading is not None
+        and base.reading.verdict is Verdict.PASS
+        and base.reading.read <= reading.read
+    )
+    if passed or reading.base in provider.cleared_versions:
+        return []
+    return [
+        (
+            f"reading.base: {reading.base} had neither a pass of the reading nor a clearance "
+            f"when {version.version} was read"
+        )
+    ]
+
+
 def check_refused(release: RefusedRelease, provider: ProviderFile) -> list[str]:
     """
     Return what is wrong in the file of a refused release.
