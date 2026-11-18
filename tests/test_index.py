@@ -157,6 +157,22 @@ def test_a_blocked_version_is_never_latest(files: Files) -> None:
     assert provider["blocked_versions"] == {"2.0.0": "Sends the library elsewhere"}
 
 
+def test_the_index_does_not_use_readings_yet(files: Files) -> None:
+    """A version the reading held or did not read is offered as before, cleared or not."""
+    files.provider()
+    files.version("1.0.0", reading={"verdict": "pass", "read": "2026-11-03T03:00:00Z"})
+    files.version("1.1.0", reading={"verdict": "hold", "read": "2026-11-03T03:00:00Z"})
+    files.version("1.2.0")
+    before = _index(files)
+    files.provider(cleared_versions={"1.1.0": "https://github.com/a/b/issues/1"})
+
+    provider = _index(files)["providers"][DOMAIN]
+
+    assert _index(files) == before
+    assert provider["latest"] == "1.2.0"
+    assert set(provider["versions"]) == {"1.0.0", "1.1.0", "1.2.0"}
+
+
 def test_blocked_and_withdrawn_providers_keep_their_versions(files: Files) -> None:
     """A blocked or withdrawn provider stays in the index with its versions and reason."""
     reason_url = "https://github.com/music-assistant/community-catalog/issues/1"

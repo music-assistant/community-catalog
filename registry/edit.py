@@ -7,13 +7,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from registry.checks import check_provider, check_refused, check_version
+from registry.checks import check_kept_versions, check_provider, check_refused, check_version
 from registry.content import ProviderContent, read_archive, read_folder
 from registry.files import dumps
 from registry.formats import format_date
 from registry.icon import check_icon
 from registry.index import render_indexes
-from registry.models import CheckResult, ProviderStatus, RefusedRelease, VersionFile
+from registry.models import CheckResult, ProviderStatus, RefusedRelease, Verdict, VersionFile
 from registry.registry import PROVIDER_FILE, PROVIDERS_FOLDER, InvalidRegistryError, load_registry
 
 if TYPE_CHECKING:
@@ -193,6 +193,27 @@ def block_version(registry: Registry, domain: str, version: str, reason: str | N
     _write_provider(registry, provider, replace(provider.file, blocked_versions=blocked))
 
 
+def clear_version(registry: Registry, domain: str, version: str, reason_url: str) -> None:
+    """
+    Accept a version that the reading held or did not read yet, after a person read it.
+
+    :param registry: The registry.
+    :param domain: The domain of the provider.
+    :param version: The version.
+    :param reason_url: An https link to why the version is accepted, such as its issue.
+    :raises CommandError: There is no such provider, or the version passed the reading.
+    :raises InvalidRegistryError: The provider would not be valid, such as a version without
+        a version file or a link that is not https.
+    """
+    provider = get_provider(registry, domain)
+    file = provider.versions.get(version)
+    if file is not None and file.reading is not None and file.reading.verdict is Verdict.PASS:
+        msg = f"{domain} {version} passed the reading, so it needs no clearance"
+        raise CommandError(msg)
+    cleared = {**provider.file.cleared_versions, version: reason_url}
+    _write_provider(registry, provider, replace(provider.file, cleared_versions=cleared))
+
+
 def write_indexes(root: Path) -> None:
     """
     Check every file of the registry and write the index file of every channel that changed.
@@ -275,11 +296,7 @@ def _write_provider(registry: Registry, provider: Provider, file: ProviderFile) 
     :raises InvalidRegistryError: The provider is not valid.
     """
     problems = check_provider(file, registry.reserved)
-    problems += [
-        f"blocked_versions: {version} has no version file"
-        for version in file.blocked_versions
-        if version not in provider.versions
-    ]
+    problems += check_kept_versions(file, provider.versions)
     path = registry.root / PROVIDERS_FOLDER / file.domain / PROVIDER_FILE
     _write(registry, path, file.to_dict(), problems)
     provider.file = file

@@ -172,6 +172,10 @@ def test_provider_folder(value: str, valid: bool) -> None:
         ("http://example.com", False),
         ("https://", False),
         ("https://example.com/a b", False),
+        ("https://[", False),
+        ("https://[::1", False),
+        ("https://[not-ipv6]/x", False),
+        ("https://[::1]/x", True),
     ],
 )
 def test_https_url(value: str, valid: bool) -> None:

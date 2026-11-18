@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from registry import formats
 from registry.icon import check_icon
-from registry.models import ProviderStatus
+from registry.models import ProviderStatus, Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
         RefusedRelease,
         ReservedDomains,
         VersionFile,
+        VersionReading,
     )
 
 # the provider types of a manifest a community provider can have; core is for the server itself
@@ -106,6 +107,11 @@ def check_provider(provider: ProviderFile, reserved: ReservedDomains) -> list[st
             problems.append(f"blocked_versions: {version!r} is not a version: MAJOR.MINOR.PATCH")
         if not reason.strip():
             problems.append(f"blocked_versions: {version} has no reason")
+    for version, url in provider.cleared_versions.items():
+        if not formats.is_version(version):
+            problems.append(f"cleared_versions: {version!r} is not a version: MAJOR.MINOR.PATCH")
+        if not formats.is_https_url(url):
+            problems.append(f"cleared_versions: {version}: {url!r} is not an https address")
     problems += _date_problems("added", provider.added)
     return problems
 
@@ -149,7 +155,68 @@ def check_version(
             problems.append(f"icon_svg: {err}")
     for channel, result in version.checks.items():
         problems += _check_result_problems(channel, result, channels)
+    if version.reading is not None:
+        problems += _reading_problems(version.reading, version.version)
     return problems
+
+
+def check_kept_versions(provider: ProviderFile, versions: Mapping[str, VersionFile]) -> list[str]:
+    """
+    Return what is wrong in the versions a provider.json blocks or clears.
+
+    :param provider: The content of the provider.json.
+    :param versions: The version files of the provider, by version.
+    """
+    problems = [
+        f"{key}: {version} has no version file"
+        for key, kept in (
+            ("blocked_versions", provider.blocked_versions),
+            ("cleared_versions", provider.cleared_versions),
+        )
+        for version in kept
+        if version not in versions
+    ]
+    problems += [
+        f"cleared_versions: {version} passed the reading, so it needs no clearance"
+        for version in provider.cleared_versions
+        if (file := versions.get(version)) is not None
+        and file.reading is not None
+        and file.reading.verdict is Verdict.PASS
+    ]
+    return problems
+
+
+def check_reading_base(
+    version: VersionFile, provider: ProviderFile, versions: Mapping[str, VersionFile]
+) -> list[str]:
+    """
+    Return what is wrong in the base of the reading of a version.
+
+    The base was accepted when the version was read: it had a pass recorded no later, or a
+    clearance. A block of the base after that changes nothing.
+
+    :param version: The version file.
+    :param provider: The provider the version belongs to.
+    :param versions: The version files of the provider, by version.
+    """
+    if (reading := version.reading) is None or reading.base is None:
+        return []
+    if (base := versions.get(reading.base)) is None:
+        return [f"reading.base: {reading.base} has no version file"]
+    # dates in the one format of the registry compare as text
+    passed = (
+        base.reading is not None
+        and base.reading.verdict is Verdict.PASS
+        and base.reading.read <= reading.read
+    )
+    if passed or reading.base in provider.cleared_versions:
+        return []
+    return [
+        (
+            f"reading.base: {reading.base} had neither a pass of the reading nor a clearance "
+            f"when {version.version} was read"
+        )
+    ]
 
 
 def check_refused(release: RefusedRelease, provider: ProviderFile) -> list[str]:
@@ -233,6 +300,23 @@ def _check_result_problems(
             "characters"
         )
     problems += _date_problems(f"checks.{channel}.checked", result.checked)
+    return problems
+
+
+def _reading_problems(reading: VersionReading, version: str) -> list[str]:
+    """Return what is wrong in the reading of a version."""
+    problems = _date_problems("reading.read", reading.read)
+    if reading.base is not None and not (
+        formats.is_version(reading.base)
+        and formats.is_version(version)
+        and formats.version_key(reading.base) < formats.version_key(version)
+    ):
+        problems.append(f"reading.base: {reading.base!r} is not a version below {version}")
+    if reading.advisory is not None:
+        if reading.verdict is Verdict.PASS:
+            problems.append("reading.advisory: a version that passed has no advisory")
+        elif not formats.is_advisory(reading.advisory):
+            problems.append(f"reading.advisory: {reading.advisory!r} is not a GHSA id")
     return problems
 
 
