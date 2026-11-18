@@ -683,8 +683,8 @@ def test_a_move_of_a_domain_the_server_does_not_ship(files: Files, github: FakeG
 
     assert _failed(report) == [
         (
-            "The domain is no provider the server ships, so there is nothing to move: untick the "
-            f"box Moving from the server: {DOMAIN}"
+            "The domain is not a provider the server ships, so there is nothing to move: untick "
+            f"the box Moving from the server: {DOMAIN}"
         )
     ]
     assert not report.moving

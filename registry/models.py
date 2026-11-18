@@ -85,8 +85,8 @@ class ProviderFile(StrictModel):
     domain: str
     # owner/name of the repository on GitHub
     repository: str
-    # the ids GitHub gives the repository and its owner, which a rename or transfer keeps and a
-    # new repository under the same name does not have
+    # the ids GitHub gives the repository and its owner: a rename keeps both, a transfer changes
+    # owner_id and a new repository under the same name has others
     repository_id: int
     owner_id: int
     # the folder of the provider in the repository, named after the domain or provider; the server

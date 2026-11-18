@@ -358,12 +358,12 @@ def _repository_failure(provider: Provider, repository_id: int, owner_id: int) -
     """Return the failure of a repository that has other ids than when it was admitted."""
     file = provider.file
     text = (
-        f"GitHub gives the repository `{file.repository}` repository_id {repository_id}, "
-        f"owner_id {owner_id}, while the catalog admitted repository_id {file.repository_id}, "
-        f"owner_id {file.owner_id}: it was renamed, transferred or replaced by another one under "
-        "the same name. No release of it is checked until a registry maintainer updates the "
+        f"The repository `{file.repository}` was transferred, or replaced by another one under the "
+        "same name, so its releases are not checked until a registry maintainer updates the "
         "catalog. If you moved the repository, ask for the change with the form "
-        f"[Report or change a provider]({CHANGE_FORM_URL})."
+        f"[Report or change a provider]({CHANGE_FORM_URL}). GitHub gives it repository_id "
+        f"{repository_id} and owner_id {owner_id}; the catalog admitted repository_id "
+        f"{file.repository_id} and owner_id {file.owner_id}."
     )
     return Failure(
         key=f"repository {repository_id} {owner_id}",

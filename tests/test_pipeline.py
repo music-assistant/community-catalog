@@ -468,6 +468,8 @@ def test_a_repository_that_is_not_the_admitted_one(files: Files) -> None:
 
     [failure] = report.failures
     assert failure.key == f"repository {REPOSITORY_ID} 999"
+    assert failure.text.startswith("The repository `someone/ma-sample` was transferred")
+    assert f"owner_id 999; the catalog admitted repository_id {REPOSITORY_ID}" in failure.text
     assert "Report or change a provider" in failure.text
     assert not report.admitted
     assert is_settled(_report(files), failure.key)
