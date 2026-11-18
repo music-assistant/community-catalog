@@ -267,6 +267,9 @@ class AdmissionReport(StrictModel):
     name: str | None = None
     # the provider.json to add when every check passes
     provider: ProviderFile | None = None
+    # whether the submission moves a provider the server ships, so its pull request also adds
+    # the domain to the moving ones
+    moving: bool = False
     # why the issue is no valid submission, so nothing was checked
     refusal: str | None = None
 

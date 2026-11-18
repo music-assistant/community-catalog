@@ -538,6 +538,8 @@ def test_blocks_and_withdrawals_reach_a_frozen_channel(files: Files) -> None:
     [
         (["providers/sample_music/provider.json", "site/v1/nightly.json"], []),
         (["registry/cli.py"], []),
+        # the pull request of a move out of the server
+        (["providers/builtin_one/provider.json", "reserved_domains.json"], []),
         (
             ["providers/sample_music/versions/1.0.0.json", "providers/x/refused/1.0.0.json"],
             ["providers/sample_music/versions/1.0.0.json", "providers/x/refused/1.0.0.json"],

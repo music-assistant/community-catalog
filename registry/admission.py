@@ -5,23 +5,32 @@ from __future__ import annotations
 import hashlib
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from registry import formats
 from registry.checks import check_provider, reserved_reason
+from registry.content import MANIFEST_FILE
 from registry.edit import CommandError, now
 from registry.fetch import newest_release, repository_state, take_release
-from registry.files import dumps
+from registry.files import dumps, loads, parse_model
 from registry.formats import format_date, is_commit, release_version
 from registry.github import ArchiveTooLargeError, GitHubError
 from registry.markdown import code_block, code_span, github_link
-from registry.models import AdmissionReport, CheckPlan, Finding, ProviderFile
+from registry.models import AdmissionReport, CheckPlan, Finding, ProviderFile, ReservedDomains
 from registry.pipeline import make_plan, write_plan
-from registry.registry import PROVIDER_FILE, PROVIDERS_FOLDER, InvalidRegistryError, load_registry
+from registry.registry import (
+    PROVIDER_FILE,
+    PROVIDERS_FOLDER,
+    RESERVED_DOMAINS_FILE,
+    InvalidRegistryError,
+    load_registry,
+)
+from registry.reserved import add_moving
 from registry.submission import (
+    MOVE_FIELD,
     SUBMISSION_LABEL,
     Submission,
     SubmissionError,
@@ -74,6 +83,12 @@ FORM_URL = (
 # holds no hyphen
 BRANCH_PREFIX = "admit/"
 BASE_BRANCH = "main"
+# where the code owners of a provider the server ships are read, for a move out of the server
+SERVER_REPOSITORY = "music-assistant/server"
+SERVER_BRANCH = "dev"
+# the branches of the server whose providers are providers the server ships
+SERVER_BRANCHES = ("dev", "stable")
+SERVER_PROVIDERS = "music_assistant/providers"
 _BRANCH = re.compile(rf"{BRANCH_PREFIX}([a-z][a-z0-9_]*)-([1-9][0-9]*)")
 _TITLE = "## Admission checks"
 # what happens next for a submission whose checks passed and that gets no pull request
@@ -197,6 +212,8 @@ def check_admission(
             "it after you publish a new release; the checks then run again."
         )
     title = f"{_TITLE} for {code_span(report.domain)}"
+    if report.moving:
+        what += f"{_move_note(report.domain)}\n\n"
     return passed, f"{title}\n\n{what}{''.join(rows)}\n{verdict}\n{link}"
 
 
@@ -278,7 +295,7 @@ def propose_admission(
             _close(github, repository, pull, why)
         return Proposal(outcome)
     provider = report.provider
-    _check_proposal(registry, provider)
+    _check_proposal(registry, provider, registry.reserved, moving=report.moving)
     branch = f"{BRANCH_PREFIX}{provider.domain}-{issue}"
     others = [
         pull.url
@@ -304,20 +321,24 @@ def propose_admission(
     if (base := github.branch_commit(repository, BASE_BRANCH)) is None:
         msg = f"{repository} has no branch {BASE_BRANCH}"
         raise GitHubError(msg)
+    # main may have changed since the checkout: what is written is checked against the commit
+    # the branch is made from
+    reserved, blob = _reserved_at(github, repository, base)
+    _check_proposal(registry, provider, reserved, moving=report.moving)
+    moved = add_moving(reserved, provider.domain) if report.moving else reserved
     # the domain is validated; nothing a submission writes reaches a title or a commit message
-    title = f"Admit {provider.domain}"
+    title = f"Admit {provider.domain}" + (", moved from the server" if report.moving else "")
     path = f"{PROVIDERS_FOLDER}/{provider.domain}/{PROVIDER_FILE}"
     github.set_branch(repository, branch, base)
     github.put_file(repository, branch, path, dumps(provider.to_dict()), title)
+    if moved != reserved:
+        content = dumps(moved.to_dict())
+        github.put_file(repository, branch, RESERVED_DOMAINS_FILE, content, title, replaces=blob)
     result = check_admission(
         registry, report, results, run_url=run_url, proposal=Proposal(Outcome.OPENED)
     )[1]
-    body = (
-        f"{marker}\nCloses #{issue}\n\nAdds {code_span(path)}: "
-        f"{code_span(report.name or provider.domain)} from "
-        f"{github_link(provider.repository, provider.repository)}."
-        f"\n\n{admission_comment(result, run_url)}"
-    )
+    what = _proposed(report, provider, _lists_added(reserved, moved, provider.domain))
+    body = f"{marker}\nCloses #{issue}\n\n{what}\n\n{admission_comment(result, run_url)}"
     url = github.create_pull_request(
         repository, title=title, branch=branch, base=BASE_BRANCH, body=body
     )
@@ -334,8 +355,11 @@ def proposal_fingerprint(provider: ProviderFile, report: AdmissionReport) -> str
     :param report: The report of the run, with the release it checked.
     """
     held = {key: value for key, value in provider.to_dict().items() if key != "added"}
-    content = dumps({"provider": held, "tag": report.tag, "commit": report.commit})
-    return hashlib.sha256(content).hexdigest()
+    data: dict[str, object] = {"provider": held, "tag": report.tag, "commit": report.commit}
+    # a move is another proposal than the plain admission of the same provider and release
+    if report.moving:
+        data["moving"] = True
+    return hashlib.sha256(dumps(data)).hexdigest()
 
 
 def issue_digest(body: str) -> str:
@@ -391,10 +415,9 @@ def _prepare(
     if domain in registry.providers:
         text = "The domain is taken by a provider in the community catalog"
         return [*findings, Finding(passed=False, text=text, detail=domain)]
-    if reason := reserved_reason(domain, registry.reserved):
-        findings.append(Finding(passed=False, text=f"The domain is {reason}", detail=domain))
-    else:
-        findings.append(Finding(passed=True, text="The domain is free", detail=domain))
+    findings += _domain_findings(
+        root, registry, report, move=submission.move, author=found.author, github=github
+    )
     candidate = ProviderFile(
         domain=domain,
         repository=info.name,
@@ -486,19 +509,159 @@ def _locate(
     return info, release, submission, folder
 
 
-def _check_proposal(registry: Registry, provider: ProviderFile) -> None:
+def _domain_findings(
+    root: Path,
+    registry: Registry,
+    report: AdmissionReport,
+    *,
+    move: bool,
+    author: str,
+    github: GitHub,
+) -> list[Finding]:
+    """
+    Return whether a submission may take its domain, and mark a move out of the server.
+
+    A move is written into the reserved domains of the registry at root.
+
+    :param root: The root folder of the registry, a scratch checkout.
+    :param registry: The registry at root.
+    :param report: The report, with the domain; it gets whether the submission is a move.
+    :param move: Whether the box of a move out of the server is ticked.
+    :param author: The submitter, a GitHub handle.
+    :param github: The GitHub client.
+    :raises GitHubError: GitHub could not answer.
+    """
+    domain = report.domain
+    assert domain is not None
+    # the list lags the server, so a provider only the server has yet is one it ships as well
+    builtin = domain in registry.reserved.builtin_providers or any(
+        github.has_folder(SERVER_REPOSITORY, f"{SERVER_PROVIDERS}/{domain}", ref)
+        for ref in SERVER_BRANCHES
+    )
+    if builtin and move:
+        report.moving = True
+        # the registry the provider.json is validated in, and the check step loads from, holds
+        # the move as its pull request does
+        reserved = add_moving(registry.reserved, domain)
+        (root / RESERVED_DOMAINS_FILE).write_bytes(dumps(reserved.to_dict()))
+        text = "The domain is a provider the server ships, which this submission moves here"
+        return [
+            Finding(passed=True, text=text, detail=domain),
+            _code_owner_finding(github, domain, author),
+        ]
+    if builtin:
+        text = (
+            "The domain is a provider the server ships; only a code owner of it in the server "
+            f"moves it here, with the box {MOVE_FIELD}"
+        )
+        return [Finding(passed=False, text=text, detail=domain)]
+    if move:
+        text = (
+            "The domain is no provider the server ships, so there is nothing to move: untick "
+            f"the box {MOVE_FIELD}"
+        )
+        return [Finding(passed=False, text=text, detail=domain)]
+    if reason := reserved_reason(domain, registry.reserved):
+        return [Finding(passed=False, text=f"The domain is {reason}", detail=domain)]
+    return [Finding(passed=True, text="The domain is free", detail=domain)]
+
+
+def _code_owner_finding(github: GitHub, domain: str, author: str) -> Finding:
+    """
+    Return whether the submitter of a move is a code owner of the provider in the server.
+
+    :param github: The GitHub client.
+    :param domain: The domain of the provider the server ships.
+    :param author: The submitter, a GitHub handle.
+    :raises GitHubError: GitHub could not answer.
+    """
+    folder = f"{SERVER_PROVIDERS}/{domain}"
+    manifest_path = f"{folder}/{MANIFEST_FILE}"
+    codeowners: list[object] = []
+    if (found := github.file(SERVER_REPOSITORY, manifest_path, SERVER_BRANCH)) is not None:
+        try:
+            manifest = loads(found[0])
+        except ValueError:
+            manifest = None
+        if isinstance(manifest, dict) and isinstance(manifest.get("codeowners"), list):
+            codeowners = manifest["codeowners"]
+    owners = {owner.removeprefix("@").lower() for owner in codeowners if isinstance(owner, str)}
+    if author.lower() not in owners:
+        text = (
+            "The submitter is no code owner of the provider in the server, and only a code owner "
+            "moves it here: ask one of them to submit it"
+        )
+        return Finding(passed=False, text=text, detail=author)
+    # GitHub frees the handle of a renamed account, so the handle alone is no proof: the account
+    # itself has worked on the provider
+    if not github.has_commit(SERVER_REPOSITORY, SERVER_BRANCH, folder, author):
+        text = (
+            "The submitter is a code owner of the provider in the server by handle, but no commit "
+            "of the provider there is theirs, so it may be another account by that name: ask a "
+            "code owner or the team"
+        )
+        return Finding(passed=False, text=text, detail=author)
+    text = "The submitter is a code owner of the provider in the server"
+    return Finding(passed=True, text=text, detail=author)
+
+
+def _check_proposal(
+    registry: Registry, provider: ProviderFile, reserved: ReservedDomains, *, moving: bool
+) -> None:
     """
     Refuse to propose a provider main cannot take.
 
-    :param registry: The registry of main.
+    :param registry: The registry of the checkout of main.
     :param provider: The provider.json to add.
+    :param reserved: The reserved domains of main to check against.
+    :param moving: Whether it moves a provider the server ships.
     :raises CommandError: The provider cannot be added.
     """
-    problems = check_provider(provider, registry.reserved)
-    if provider.domain in registry.providers:
-        problems.append(f"domain: {provider.domain} is in the community catalog already")
+    domain = provider.domain
+    if moving:
+        problems = check_provider(provider, add_moving(reserved, domain))
+        if (
+            domain in registry.reserved.builtin_providers
+            and domain not in reserved.builtin_providers
+        ):
+            problems.append(f"domain: {domain} is no longer a provider the server ships")
+    else:
+        # a plain admission takes no provider the server ships, also none that moves
+        problems = check_provider(provider, replace(reserved, moving=[]))
+    if domain in registry.providers:
+        problems.append(f"domain: {domain} is in the community catalog already")
     if problems:
         raise CommandError("; ".join(problems))
+
+
+def _reserved_at(github: GitHub, repository: str, commit: str) -> tuple[ReservedDomains, str]:
+    """
+    Return the reserved domains of a commit of the registry, and the blob SHA of their file.
+
+    :param github: The GitHub client.
+    :param repository: The repository of the registry, as owner/name.
+    :param commit: The full SHA of the commit.
+    :raises CommandError: The commit holds no valid reserved_domains.json.
+    :raises GitHubError: GitHub refused the request.
+    """
+    if (found := github.file(repository, RESERVED_DOMAINS_FILE, commit)) is None:
+        msg = f"{repository} has no {RESERVED_DOMAINS_FILE} at {commit}"
+        raise CommandError(msg)
+    content, blob = found
+    try:
+        return parse_model(content, ReservedDomains), blob
+    except ValueError as err:
+        msg = f"{RESERVED_DOMAINS_FILE} at {commit}: {err}"
+        raise CommandError(msg) from err
+
+
+def _lists_added(before: ReservedDomains, after: ReservedDomains, domain: str) -> list[str]:
+    """Return the lists of the reserved domains a domain was added to, by their keys."""
+    return [
+        key
+        for key in ("builtin_providers", "moving")
+        if domain in getattr(after, key) and domain not in getattr(before, key)
+    ]
 
 
 def _delete_unused_branches(
@@ -581,6 +744,37 @@ def _proposal_verdict(
             f"resolves a conflict with [another pull request]({proposal.url})."
         )
     return _NOT_PROPOSED.get(outcome, "Every check passed.")
+
+
+def _proposed(report: AdmissionReport, provider: ProviderFile, lists: list[str]) -> str:
+    """
+    Return what the pull request of a submission does, as its text starts.
+
+    :param report: The report of the run.
+    :param provider: The provider.json the pull request adds.
+    :param lists: The lists of reserved_domains.json the pull request adds the domain to.
+    """
+    path = f"{PROVIDERS_FOLDER}/{provider.domain}/{PROVIDER_FILE}"
+    adds = (
+        f"Adds {code_span(path)}: {code_span(report.name or provider.domain)} from "
+        f"{github_link(provider.repository, provider.repository)}."
+    )
+    if not report.moving:
+        return adds
+    move = f"Admits {code_span(provider.domain)} as a move out of the Music Assistant server"
+    if lists:
+        names = " and ".join(code_span(key) for key in lists)
+        move += f", and adds it to {names} in {code_span(RESERVED_DOMAINS_FILE)}"
+    return f"{move}.\n\n{adds}"
+
+
+def _move_note(domain: str) -> str:
+    """Return what a move of a provider out of the server means, and what happens after it."""
+    return (
+        f"This admits {code_span(domain)} as a move out of the Music Assistant server. Once its "
+        "pull request is merged, the team removes the provider from the server in the release "
+        "whose catalog index offers it; the server's CI refuses the removal before that."
+    )
 
 
 def _what(report: AdmissionReport) -> str:

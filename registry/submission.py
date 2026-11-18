@@ -17,8 +17,10 @@ if TYPE_CHECKING:
 
 # the label the form gives an issue; only an issue with it is a submission
 SUBMISSION_LABEL = "submission"
+# the field of the form whose box makes the submission a move of a provider the server ships
+MOVE_FIELD = "Moving from the server"
 # the fields of the form, as GitHub writes them into the issue: a heading each, in this order
-FIELDS = ("Repository", "Folder", "Tag prefix", "Before you submit")
+FIELDS = ("Repository", "Folder", "Tag prefix", MOVE_FIELD, "Before you submit")
 # the boxes of the last field, each one required
 CONFIRMATIONS = 2
 # far more than the form gives; a longer issue is refused
@@ -38,6 +40,7 @@ _REPOSITORY_URL = re.compile(
     r"(?:https?://)?(?:www\.)?github\.com/([^/]+/[^/]+?)(?:\.git)?/?", re.IGNORECASE
 )
 _TICKED = re.compile(r"- \[[xX]\] \S.*")
+_BOX = re.compile(r"- \[[ xX]\] \S.*")
 
 
 class SubmissionError(Exception):
@@ -53,6 +56,8 @@ class Submission:
     # the provider folder in the repository, None to find it
     folder: str | None
     tag_prefix: str
+    # whether it moves a provider the server ships into the community catalog
+    move: bool = False
 
 
 def parse_submission(body: str) -> Submission:
@@ -89,11 +94,20 @@ def parse_submission(body: str) -> Submission:
     if not formats.is_tag_prefix(tag_prefix):
         msg = f"Tag prefix: {tag_prefix!r} cannot start a tag"
         raise SubmissionError(msg)
+    move = values[MOVE_FIELD]
+    if move != _NO_RESPONSE and not _BOX.fullmatch(move):
+        msg = f"{MOVE_FIELD}: holds something else than the box of the form"
+        raise SubmissionError(msg)
     ticked = values[FIELDS[-1]].splitlines()
     if len(ticked) != CONFIRMATIONS or not all(_TICKED.fullmatch(line) for line in ticked):
         msg = f"{FIELDS[-1]}: every box is to be ticked"
         raise SubmissionError(msg)
-    return Submission(repository=repository, folder=folder, tag_prefix=tag_prefix)
+    return Submission(
+        repository=repository,
+        folder=folder,
+        tag_prefix=tag_prefix,
+        move=bool(_TICKED.fullmatch(move)),
+    )
 
 
 def find_provider(archive: Path, folder: str | None) -> tuple[str, str]:

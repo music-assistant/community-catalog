@@ -20,6 +20,7 @@
     "bookorbit",
     "bose_soundtouch",
     "builtin",
+    "cbc_listen",
     "chromecast",
     "coverartarchive",
     "deezer",
@@ -33,7 +34,9 @@
     "filesystem_cloud",
     "filesystem_google_drive",
     "filesystem_local",
+    "filesystem_nfs",
     "filesystem_onedrive",
+    "filesystem_smb",
     "filesystem_yandex_disk",
     "fip",
     "fully_kiosk",
@@ -101,6 +104,7 @@
     "sendspin",
     "sendspin_lights",
     "sendspin_source",
+    "share_provider",
     "siriusxm",
     "smart_fades",
     "smart_playlist",
@@ -143,6 +147,7 @@
     "zvuk_music"
   ],
   "core_controllers": [
+    "ai",
     "cache",
     "community_catalog",
     "config",

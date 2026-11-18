@@ -66,6 +66,11 @@ Report a risk to users privately: "Report a vulnerability" on the
 5. **Submit the provider** with the form
    [Submit a provider](https://github.com/music-assistant/community-catalog/issues/new?template=submit-provider.yml).
 
+A provider you maintain as a code owner in the Music Assistant server can move here under its own
+domain: submit it with the box "Moving from the server" ticked. After the merge, the team removes
+it from the server in the release whose catalog index offers it, and servers that use it install
+your version and keep their settings.
+
 The result of the checks appears as a comment on your issue. When a check fails, fix it, then
 edit the issue, or close and reopen it after a new release. When every check passes, a registry
 maintainer reviews the provider against the rules and decides once about what it does. Closing

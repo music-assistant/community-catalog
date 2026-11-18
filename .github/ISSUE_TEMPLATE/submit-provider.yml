@@ -36,6 +36,13 @@ body:
         of this provider start with.
       placeholder: sample_music-
   - type: checkboxes
+    id: move
+    attributes:
+      label: Moving from the server
+      description: Only for a code owner of the provider in the Music Assistant server.
+      options:
+        - label: This provider ships with the Music Assistant server today, and I want to move it here.
+  - type: checkboxes
     id: confirmations
     attributes:
       label: Before you submit
