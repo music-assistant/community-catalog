@@ -1,7 +1,7 @@
 {
   "checks": {
     "nightly": {
-      "checked": "2026-11-19T03:24:14Z",
+      "checked": "2026-11-19T12:25:06Z",
       "passed": true,
       "reason": null
     }
@@ -24,6 +24,11 @@
     ],
     "stage": "experimental",
     "type": "audio_analysis"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-19T12:26:00Z",
+    "verdict": "hold"
   },
   "released": "2026-11-18T14:57:15Z",
   "requirements": [

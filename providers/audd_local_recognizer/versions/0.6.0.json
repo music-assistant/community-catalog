@@ -25,6 +25,11 @@
     "stage": "experimental",
     "type": "audio_analysis"
   },
+  "reading": {
+    "base": null,
+    "read": "2026-11-19T12:26:06Z",
+    "verdict": "pass"
+  },
   "released": "2026-11-17T18:49:50Z",
   "requirements": [
     "audalign==1.3.2"
