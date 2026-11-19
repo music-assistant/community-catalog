@@ -383,7 +383,8 @@ class ProviderReport(StrictModel):
     """`issues/<domain>.json`: what the issue of a provider on the registry says and settles."""
 
     domain: str
-    title: str
+    # what the title of an issue names: the provider with its name, or its domain
+    subject: str
     # the GitHub handles mentioned in a new issue
     maintainers: list[str]
     # the failures of this run that are not settled

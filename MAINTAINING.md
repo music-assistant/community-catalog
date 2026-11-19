@@ -581,6 +581,11 @@ failures it tells, and only those lines of `github-actions[bot]` count. Everythi
 controls (reasons, output, manifest values) is shown as code; the title shows the name of the
 manifest only when it is plain text.
 
+The title is set when the issue is opened and a later comment never changes it. An issue that
+opens with only holds is titled `<name> (<domain>): a release needs a closer look`, because the
+checks passed. Any other issue is titled `<name> (<domain>): release checks failed`. The pipeline
+finds its issues by label, author and the first line, never by title.
+
 A failure is settled when the newest version of the provider (the highest with a version file or
 a refusal) passed on a channel that is tested, and:
 
