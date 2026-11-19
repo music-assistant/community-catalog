@@ -230,7 +230,7 @@ def test_every_secret_and_variable_is_one_that_is_set() -> None:
 
 
 def test_no_workflow_holds_a_key_of_the_api() -> None:
-    """The reading authenticates by federation: a key or token of the API would win over it."""
+    """The reading authenticates by federation alone: no workflow holds a key of the API."""
     for path in WORKFLOWS:
         text = path.read_text()
         assert "ANTHROPIC_API_KEY" not in text, path.name
