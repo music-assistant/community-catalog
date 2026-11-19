@@ -9,8 +9,7 @@ body:
         Use this form to report a provider in the community catalog, to make a copyright or
         takedown request, or to change or remove a provider you maintain. A registry maintainer
         reads it. For a bug or a question, ask the maintainer of the provider: the Get help
-        button in the app, or the repository of the provider. Report a risk to users privately,
-        on the [Security tab](https://github.com/music-assistant/community-catalog/security).
+        button in the app, or the repository of the provider.
   - type: input
     id: provider
     attributes:

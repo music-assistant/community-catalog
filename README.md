@@ -28,8 +28,6 @@ To report a provider that breaks the
 [rules of the community catalog](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md),
 or to make a copyright or takedown request, use the form
 [Report or change a provider](https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml).
-Report a risk to users privately: "Report a vulnerability" on the
-[Security tab](https://github.com/music-assistant/community-catalog/security).
 
 <a name="admission"></a><a name="for-provider-maintainers"></a>
 
