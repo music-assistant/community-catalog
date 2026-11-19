@@ -2,8 +2,9 @@ name: Releases
 
 # Turns the releases of the providers into version files with check results. The jobs share only
 # files: fetch reads GitHub and plans the checks, check runs provider code in the server image of
-# each channel without any token, apply records the results and pushes, report keeps one issue per
-# provider with failures on this repository. Only a run on main records or reports anything.
+# each channel without any token, apply records the results, reads the new versions against the
+# catalog rules with Claude and pushes, report keeps one issue per provider with failures on this
+# repository. Only a run on main records or reports anything.
 
 on:
   schedule:
@@ -94,20 +95,18 @@ jobs:
     # also when a channel could not be checked: new version files and refusals are kept
     if: ${{ !cancelled() && needs.fetch.result == 'success' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # holds the key of the app, which only a run on main gets
+    # the read step stops after four hours at the latest; the other steps take minutes
+    timeout-minutes: 270
+    # holds the key of the app and the ids of the reading, which only a run on main gets
     environment: releases
     permissions:
       contents: read
+      # the identity token of the job, which the reading exchanges for a token of the Claude API
+      id-token: write
+    outputs:
+      # the version files of this run are on main, also when the reading failed
+      recorded: ${{ steps.push.outputs.recorded }}
     steps:
-      - id: token
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
-          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
-          owner: ${{ github.repository_owner }}
-          repositories: ${{ github.event.repository.name }}
-          permission-contents: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -119,16 +118,15 @@ jobs:
         with:
           name: fetched
           path: ${{ runner.temp }}/fetched
-      # only the files of the providers and the plan; the code that runs here is the checked out
-      # code
-      - name: Take the version files, refusals and plan of the fetch step
+      # only the files of the providers, the plan and the archives, which are read as data only;
+      # the code that runs here is the checked out code
+      - name: Take the version files, refusals, plan and archives of the fetch step
         run: |
           if [ -d "$RUNNER_TEMP/fetched/providers" ]; then
             rm -rf providers
             cp -R "$RUNNER_TEMP/fetched/providers" providers
           fi
-          mkdir work
-          cp "$RUNNER_TEMP/fetched/work/plan.json" work/plan.json
+          cp -R "$RUNNER_TEMP/fetched/work" work
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: results-*
@@ -137,9 +135,31 @@ jobs:
       # the results files are data from containers that ran provider code; only those the plan
       # names are read, and only as data
       - run: uv run --no-dev python -m registry apply-results results
+      # on trial: a reading that does not finish fails the run at its end, after the push, so the
+      # check results are recorded and reported all the same
+      - id: read
+        name: Read the new versions against the catalog rules
+        continue-on-error: true
+        timeout-minutes: 240
+        env:
+          ANTHROPIC_ORGANIZATION_ID: ${{ vars.ANTHROPIC_ORGANIZATION_ID }}
+          ANTHROPIC_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_FEDERATION_RULE_ID }}
+          ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
+        run: uv run --no-dev python -m registry read
       - run: uv run --no-dev python -m registry validate
+      # the token of the app lives an hour, so it is made once the reading is done
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.MUSIC_ASSISTANT_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+          permission-contents: write
       # the push of the app starts the Publish workflow when an index changed
-      - name: Commit and push
+      - id: push
+        name: Commit and push
         env:
           APP_SLUG: ${{ steps.token.outputs.app-slug }}
           GH_TOKEN: ${{ steps.token.outputs.token }}
@@ -153,18 +173,31 @@ jobs:
           done
           if git diff --cached --quiet; then
             echo "Nothing changed"
-            exit 0
+          else
+            user_id=$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq '.id')
+            git config user.name "${APP_SLUG}[bot]"
+            git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
+            git commit -m "Record new releases and check results"
+            git push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" HEAD:main
           fi
-          user_id=$(gh api "/users/$APP_SLUG%5Bbot%5D" --jq '.id')
-          git config user.name "${APP_SLUG}[bot]"
-          git config user.email "${user_id}+${APP_SLUG}[bot]@users.noreply.github.com"
-          git commit -m "Record new releases and check results"
-          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" HEAD:main
+          echo "recorded=true" >> "$GITHUB_OUTPUT"
+      # what the reading found, for the issues of the report; only counts reach the log
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: readings
+          path: work/readings.json
+          if-no-files-found: ignore
+          retention-days: 30
+      - name: Fail when the reading did not finish
+        if: steps.read.outcome != 'success'
+        run: |
+          echo "::error::The reading of the new versions did not finish; its step says why."
+          exit 1
 
   report:
     name: Report failures
     needs: [fetch, check, apply]
-    if: ${{ !cancelled() && needs.apply.result == 'success' && github.ref == 'refs/heads/main' }}
+    if: ${{ !cancelled() && needs.apply.outputs.recorded == 'true' && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -197,6 +230,12 @@ jobs:
           pattern: results-*
           merge-multiple: true
           path: results
+      # the readings of the apply job, when it read anything
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: readings
+          merge-multiple: true
+          path: work
       - run: uv run --no-dev python -m registry report results
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

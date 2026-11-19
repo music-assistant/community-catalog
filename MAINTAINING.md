@@ -99,7 +99,7 @@ owner alone.
     "nightly": {"passed": true, "checked": "2026-11-15T03:00:00Z", "reason": null},
     "beta": {"passed": false, "checked": "2026-11-15T03:00:00Z", "reason": "dependencies: some-package==1.0 clashes with the server"}
   },
-  "reading": {"verdict": "hold", "read": "2026-11-15T03:41:12Z", "base": "1.1.0", "advisory": "GHSA-2c4m-59x8-p8cg"}
+  "reading": {"verdict": "hold", "read": "2026-11-15T03:41:12Z", "base": "1.1.0"}
 }
 ```
 
@@ -115,7 +115,7 @@ owner alone.
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
 | `checks` | The result per channel in `channels.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
-| `reading` | Absent until the version is read against the rules. `verdict` is `pass` or `hold` (waits for a person), `read` when. `base` is the lower version whose change was read, or `null` when the version was read in full; it has a version file, and when the version was read it was accepted: a pass recorded no later, or a clearance. A block of the base after that changes nothing. `advisory` is the GHSA id of the draft security advisory with the findings of a hold, or `null`: always for a pass. The index does not use it yet. |
+| `reading` | Absent until the version is read against the rules. `verdict` is `pass` or `hold` (waits for a person), `read` when. `base` is the lower version whose change was read, or `null` when the version was read in full; it has a version file, and when the version was read it was accepted: a pass recorded no later, or a clearance. A block of the base after that changes nothing. The index does not use it yet. |
 
 ### refused/\<version\>.json
 
@@ -225,11 +225,12 @@ The commands of the release pipeline, which the workflows run:
 
 | Command | What it does |
 |---|---|
-| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step needs into the work folder and writes `plan.json` (what to check on each channel) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
+| `fetch` | Reads the releases of every provider that is not blocked and writes the version file of the newest new one, or its refused file. Downloads the archives the check step and the read step need into the work folder and writes `plan.json` (what to check on each channel) and `fetch.json` there. Needs `GITHUB_TOKEN`. |
 | `check --channel <channel> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the channel. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
 | `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. A check that could not run in the server image removes a failed result of its version on that channel. |
-| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, a repository that is not the admitted one), and what settles them. Also the report of every channel with results: whether its checks could run. |
+| `read` | Reads the new versions against the rules, at most 25 a run, records each verdict in its version file and writes the index files (see [In the release pipeline](#in-the-release-pipeline)). Writes `readings.json` into the work folder, with what the reading found, for the report. Needs the identity token of the workflow job and the ids of the federation. |
+| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, versions the reading held, a repository that is not the admitted one), and what settles them. Also the report of every channel with results: whether its checks could run. |
 | `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider and of each channel whose checks cannot run on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
@@ -347,17 +348,20 @@ reports anything. Its jobs share only files:
    lacks), the load stage runs no provider code and gives a result that says so: no version
    fails because of it, and the channel gets an issue for the registry maintainers instead (see
    [Release issues](#release-issues)). The provider's own tests are not run.
-3. **Apply** records the results with the rules of `record-check`, writes the index files,
-   validates and pushes to `main` with the token of the Music Assistant Bot app. A version that
-   stops passing on a channel leaves that channel's index: the newest version that still passes
-   there becomes `latest`. A check that could not run removes a failed result of its version on that
-   channel and keeps a passed one, so the version is not offered there until it passes. The push
-   starts the Publish workflow.
+3. **Apply** records the results with the rules of `record-check`, writes the index files, reads
+   the new versions against the rules (see [In the release pipeline](#in-the-release-pipeline)),
+   validates and pushes to `main` with the token of the Music Assistant Bot app, which it makes
+   once the reading is done: the token lives an hour. A version that stops passing on a channel
+   leaves that channel's index: the newest version that still passes there becomes `latest`. A
+   check that could not run removes a failed result of its version on that channel and keeps a
+   passed one, so the version is not offered there until it passes. The push starts the Publish
+   workflow.
 4. **Report** tells the maintainers of a provider about every version that failed a check on a
-   channel (first checks and versions that stopped passing), every release refused in this run and
-   a repository that is not the admitted one, in one issue per provider on this repository (see
-   [Release issues](#release-issues)). It writes the issues with the workflow's own token, which
-   may write issues and nothing else.
+   channel (first checks and versions that stopped passing), every release refused in this run,
+   every version the reading held in this run and a repository that is not the admitted one, in
+   one issue per provider on this repository (see [Release issues](#release-issues)). It runs once
+   the results are on `main`, also when the reading failed. It writes the issues with the
+   workflow's own token, which may write issues and nothing else.
 
 ### Provider code runs without secrets
 
@@ -389,7 +393,7 @@ CI runs the same checks on the provider's checkout, in one container.
 `registry/reading.py` reads a release against the
 [rules](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md) with
 one request to the Claude API (`claude-opus-5-5`): in full, or as its change since an earlier
-version. It is not part of the release pipeline yet; `read-archive` runs it by hand.
+version. The release pipeline reads every new version this way; `read-archive` runs it by hand.
 
 - The model gets the instructions and rules in `registry/reading/` and one message with the
   release: a header from the manifest, a table of the files that were added, changed or removed,
@@ -404,11 +408,53 @@ version. It is not part of the release pipeline yet; `read-archive` runs it by h
 - The code holds a release with binary code or data that is added or changed, or whose request
   (instructions, header, file table and content together) would hold more than 400 kB, without
   asking the model; no text is numbered or diffed beyond that size. It also holds one the model
-  refused, whose answer was cut off or is not valid. A failure of the API (no connection, a
-  time-out, an error status other than 413) gives no verdict: the release is read again later.
+  refused, whose answer was cut off or is not valid. A failure of the API for now (no
+  connection, a time-out, 408, 409, 429 or an error from 500 on) gives no verdict: the release is
+  read again later. A token exchange that fails, and any other error status but 413 (such as 400,
+  401, 402, 403 or 404), is a fault of the credentials or the configuration, which stops the
+  reading.
 - `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
   is allowed" of the rules; a change to those sections is copied in the same week, with the
   command in `test_rules_are_the_two_sections_of_the_rules_page` (`tests/test_reading.py`).
+
+### In the release pipeline
+
+The apply job runs `read` after the results are recorded and before `validate`. It reads the
+versions without a reading that are neither cleared nor blocked, of a provider that is not
+blocked, and that did not fail on every channel they were checked on: at most 25 a night, the
+most recently released first, and the others the next night. Each is read against the highest
+lower version that is accepted (the reading passed it, or a registry maintainer cleared it) and
+not blocked, or in full when there is none. The fetch step downloads both archives, and the read
+step reads them only when they hold the content of their version files.
+
+The verdict goes into the version file, and what the reading found into `readings.json`, which the
+report gets as an artifact; the log shows only counts. A version the API could not read for now
+is read on another night. A fault of the credentials or the configuration stops the reading: the
+version it was reading gets no verdict, those before keep theirs, and the run fails once the
+results are pushed and reported. So does a reading that takes more than four hours.
+
+**On trial.** The index does not use the verdict yet, so a held version is offered as before. A
+hold goes into the release issue of the provider (see [Release issues](#release-issues)): the
+version, each finding with the rule in plain words, its file and line, and the explanation and
+summary of the reading as code, or, for a hold the code decided, its reason. The issue says that
+the reading is on trial and that a person of the Music Assistant team looks at the release. If a
+finding is wrong, the maintainer says so in the issue. That person reads the release, and then
+accepts the version with `clear-version <domain> <version> --reason <issue>` or blocks it with
+`block-version`, in a pull request, and closes the issue when nothing else in it waits.
+
+**Authentication.** The reading has no key of the API: it uses workload identity federation. The
+apply job has the permission `id-token: write`, and the environment `releases` holds four
+variables: `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_FEDERATION_RULE_ID`,
+`ANTHROPIC_SERVICE_ACCOUNT_ID` and `ANTHROPIC_WORKSPACE_ID`. For each token of the API, the
+client requests a new identity token of the job from GitHub, for the audience
+`https://api.anthropic.com`, and exchanges it under the federation rule: an identity token lives
+about five minutes and works once. The rule takes the subject
+`repo:music-assistant@71128003/community-catalog@1457741033:environment:releases`, with the claims
+`ref` = `refs/heads/main` and `repository_owner` = `music-assistant`. The repository is newer than
+2026-07-15, so GitHub puts its ids and those of its owner in the subject: a repository made
+again under the same name does not match. The workspace has a spend limit, which caps what the
+reading costs. No workflow sets `ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`; a test refuses
+them.
 
 ## Admission
 
@@ -540,11 +586,13 @@ a refusal) passed on a channel that is tested, and:
 
 - for a failed check, also on the channel of the check, unless that channel is not tested in this
   run (no longer tested, or its checks could not run);
+- for a version the reading held, the reading also passed the newest version;
 - for a repository that was not the admitted one, GitHub gives the admitted one again.
 
-A failure that is settled when it happens is not told. Once every failure an issue tells is
-settled, the pipeline comments that the newest version passed and closes the issue as completed;
-a failure after that opens a new issue.
+A failure that is settled when it happens is not told. A hold is told only in the run that read
+the version, so a later run does not open a closed issue for it again. Once every failure an
+issue tells is settled, the pipeline comments that the newest version passed and closes the issue
+as completed; a failure after that opens a new issue.
 
 An issue that stays open without a reaction of the provider's maintainer is a reason to withdraw
 the provider: `set-status <domain> withdrawn --reason <text> --reason-url <issue>`. Nothing does
@@ -562,7 +610,7 @@ cannot run, and the pipeline closes it once they run on that channel again.
   same app pushes the commits of the release pipeline to `main`. A separate app for the pull
   requests would remove that.
 - Running the provider's own tests in the check step.
-- Running the reading of every release in the release pipeline, and using its verdict in the
-  index.
+- Using the verdict of the reading in the index: the reading runs on trial, and holds no release
+  back yet.
 - A summary by a review bot of Music Assistant on the pull request of a submission.
 - Making the changes a maintainer asks for with the form "Report or change a provider" by the bot.

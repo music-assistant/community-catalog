@@ -88,6 +88,12 @@ reaches the servers on that channel without review. A release that is refused or
 issue on this repository that mentions you, with the reason; it closes by itself when a later
 release passes. A refused release is not tried again; publish a new version.
 
+Each new release is also read by Claude, an AI model, against the
+[rules of the community catalog](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md).
+This reading is on trial: it holds no release back yet. When it finds something, the issue tells
+you what and where, and a person of the Music Assistant team looks at it. If a finding is wrong,
+say so in the issue.
+
 ## Changing or leaving
 
 To move your provider to another repository, folder or tag prefix, to withdraw it, or to have it

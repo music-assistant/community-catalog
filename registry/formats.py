@@ -20,7 +20,6 @@ _CHANNEL = re.compile(r"nightly|beta|[0-9]+\.[0-9]+")
 _DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z")
 _COMMIT = re.compile(r"[0-9a-f]{40}")
 _CONTENT_HASH = re.compile(r"[0-9a-f]{64}")
-_ADVISORY = re.compile(r"GHSA(?:-[23456789cfghjmpqrvwx]{4}){3}")
 # GitHub: letters, digits and single hyphens, not at the start or the end
 _GITHUB_HANDLE = re.compile(r"[A-Za-z0-9](?:-?[A-Za-z0-9])*")
 _GITHUB_HANDLE_MAX = 39
@@ -124,15 +123,6 @@ def is_content_hash(value: str) -> bool:
     :param value: The value to check.
     """
     return bool(_CONTENT_HASH.fullmatch(value))
-
-
-def is_advisory(value: str) -> bool:
-    """
-    Return whether a value is the id of a GitHub security advisory, such as GHSA-2c4m-59x8-p8cg.
-
-    :param value: The value to check.
-    """
-    return bool(_ADVISORY.fullmatch(value))
 
 
 def is_github_handle(value: str) -> bool:

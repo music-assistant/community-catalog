@@ -56,6 +56,7 @@ from registry.pipeline import (
     apply_results,
     archive_path,
     read_plan,
+    read_readings,
     read_results,
 )
 from registry.registry import (
@@ -78,6 +79,16 @@ from registry.reserved import add_server_domains
 # the token the commands that talk to GitHub read from the environment
 TOKEN_VARIABLE = "GITHUB_TOKEN"  # noqa: S105 - the name, not a token
 _PULL_REQUEST_URL = re.compile(r"https://github\.com/[A-Za-z0-9-]+/[A-Za-z0-9._-]+/pull/[0-9]+")
+# where a workflow job with the permission id-token: write requests its identity tokens, and with
+# what token
+_ID_TOKEN_VARIABLES = ("ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN")
+# the ids the read command exchanges an identity token with, for a token of the Claude API
+_FEDERATION_VARIABLES = (
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -212,7 +223,12 @@ def _read_archive(args: argparse.Namespace) -> int:
     # the server image the check step runs in has no client of the API
     import anthropic  # noqa: PLC0415
 
-    from registry.reading import ReadingUnavailableError, Side, read_release  # noqa: PLC0415
+    from registry.reading import (  # noqa: PLC0415
+        ReadingConfigurationError,
+        ReadingUnavailableError,
+        Side,
+        read_release,
+    )
 
     with tempfile.TemporaryDirectory() as workdir:
         release = Side(Path(workdir, "release"))
@@ -225,10 +241,38 @@ def _read_archive(args: argparse.Namespace) -> int:
         except ReadingUnavailableError as err:
             print(f"pending: {err}", file=sys.stderr)
             return 1
-        except (ValueError, tarfile.TarError, EOFError) as err:
+        except (ReadingConfigurationError, ValueError, tarfile.TarError, EOFError) as err:
             raise CommandError(str(err)) from err
     print(dumps(reading.to_dict()).decode(), end="")
     return 0
+
+
+def _read(args: argparse.Namespace) -> None:
+    """Read the new versions against the rules of the community catalog, and record the verdicts."""
+    # the server image the check step runs in has no client of the API
+    from registry.read import read_versions  # noqa: PLC0415
+    from registry.reading import (  # noqa: PLC0415
+        ReadingConfigurationError,
+        federated_client,
+        identity_token_provider,
+    )
+
+    request_url, request_token, organization, rule, account, workspace = _environment(
+        *_ID_TOKEN_VARIABLES, *_FEDERATION_VARIABLES
+    )
+    client = federated_client(
+        identity_token_provider(GitHub(request_token), request_url),
+        organization_id=organization,
+        federation_rule_id=rule,
+        service_account_id=account,
+        workspace_id=workspace,
+    )
+    try:
+        counts = read_versions(load_registry(args.root), client, args.work)
+    except ReadingConfigurationError as err:
+        msg = f"the reading cannot run: {err}"
+        raise CommandError(msg) from err
+    print(f"{counts.passed} passed, {counts.held} held, {counts.pending} left for another night")
 
 
 def _check_folder(args: argparse.Namespace) -> int:
@@ -259,7 +303,7 @@ def _report(args: argparse.Namespace) -> None:
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
     results = read_results(args.results, read_plan(args.work))
     registry = load_registry(args.root)
-    reports = build_reports(registry, fetched, results)
+    reports = build_reports(registry, fetched, results, read_readings(args.work))
     folder = args.work / ISSUES_FOLDER
     (folder / CHANNELS_FOLDER).mkdir(parents=True, exist_ok=True)
     for report in reports:
@@ -458,6 +502,19 @@ def _token() -> str:
     return token
 
 
+def _environment(*names: str) -> list[str]:
+    """
+    Return the values of variables of the environment, in their order.
+
+    :param names: The names of the variables.
+    :raises CommandError: A variable is not set, or empty.
+    """
+    if missing := [name for name in names if not os.environ.get(name)]:
+        msg = f"set {', '.join(missing)}"
+        raise CommandError(msg)
+    return [os.environ[name] for name in names]
+
+
 def _load[T: (FetchReport, ProviderReport, ChannelReport, AdmissionReport)](
     path: Path, model: type[T]
 ) -> T:
@@ -588,6 +645,9 @@ def _parser() -> argparse.ArgumentParser:  # noqa: PLR0915 - a statement per arg
     command = commands.add_parser("apply-results", help=_apply_results.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")
     command.set_defaults(run=_apply_results)
+
+    command = commands.add_parser("read", help=_read.__doc__, parents=[work])
+    command.set_defaults(run=_read)
 
     command = commands.add_parser("report", help=_report.__doc__, parents=[work])
     command.add_argument("results", type=Path, help="the folder with the results files")

@@ -1,4 +1,8 @@
-"""The requests the registry makes to GitHub: releases, archives, issues and pull requests."""
+"""
+The requests the registry makes to GitHub: releases, archives, issues and pull requests.
+
+Also the identity token of a workflow job, which the reading exchanges for a token of the API.
+"""
 
 from __future__ import annotations
 
@@ -572,6 +576,27 @@ class GitHub:
         content = json.dumps({"state": "closed", "state_reason": "completed"}).encode()
         url = f"{API_URL}/repos/{repository}/issues/{number}"
         self._json(self._request(url, content, method="PATCH"))
+
+    def id_token(self, request_url: str, audience: str) -> str:
+        """
+        Return a new OpenID Connect token of the workflow job, for an audience.
+
+        The token of the client is the one the job requests its identity tokens with.
+
+        :param request_url: The address the job requests its identity tokens at.
+        :param audience: Who the identity token is for.
+        :raises GitHubError: GitHub answered no identity token.
+        :raises OSError: The request could not be sent.
+        """
+        request = self._request(f"{request_url}&{urllib.parse.urlencode({'audience': audience})}")
+        # the token service answers plain JSON
+        request.add_header("Accept", "application/json")
+        found = self._answer(request)
+        token = found.get("value") if isinstance(found, dict) else None
+        if not isinstance(token, str) or not token:
+            msg = f"{request.full_url} answered no identity token"
+            raise GitHubError(msg)
+        return token
 
     def _graphql(
         self, query: str, variables: dict[str, str]
