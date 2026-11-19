@@ -124,8 +124,6 @@ class VersionReading(StrictModel):
     read: str
     # the version the change was read against; None when the version was read in full
     base: str | None = None
-    # the draft security advisory with the findings of a hold
-    advisory: str | None = None
 
 
 @dataclass
@@ -267,6 +265,68 @@ class CheckPlan(StrictModel):
     channels: dict[str, list[ProviderVersion]]
 
 
+class Rule(StrEnum):
+    """The line of the rules a finding of the reading is about."""
+
+    # music the user has no right to: an account, tier or region bypass, or an unlicensed source
+    NO_RIGHTS = "no_rights"
+    COPY_PROTECTION = "copy_protection"
+    # downloads or exports music to keep it
+    KEEPS_MUSIC = "keeps_music"
+    # sends data elsewhere, loads code while it runs, or does what its description does not say
+    HARMS_USER = "harms_user"
+    # offers AI assistants tools whose texts do more than describe the tool and report what it did
+    STEERS_ASSISTANT = "steers_assistant"
+    # mainly exists to load providers or lists of sources from outside the catalog
+    LOADS_PROVIDERS = "loads_providers"
+    # text addressed to whoever or whatever reads the release
+    ADDRESSES_READER = "addresses_reader"
+    # what the change does cannot be told
+    UNCLEAR = "unclear"
+
+
+@dataclass
+class ReadingFinding(StrictModel):
+    """Where a release crosses, or may cross, a line of the rules."""
+
+    rule: Rule
+    # as in the file table of the reading
+    file: str
+    # in the release, or in the base for a removed file; None for the file as a whole
+    line: int | None
+    explanation: str
+
+
+@dataclass
+class Reading(StrictModel):
+    """The outcome of the reading of a release."""
+
+    verdict: Verdict
+    # why the code held the release; None when the model decided
+    reason: str | None = None
+    findings: list[ReadingFinding] = field(default_factory=list)
+    # what the change does, in the words of the model
+    summary: str | None = None
+
+
+@dataclass
+class ReadingResult(StrictModel):
+    """The reading of one version in a run of the read step."""
+
+    domain: str
+    version: str
+    # the version the change was read against; None when the version was read in full
+    base: str | None
+    reading: Reading
+
+
+@dataclass
+class ReadingResults(StrictModel):
+    """`readings.json`: what the read step read in this run, for the report."""
+
+    results: list[ReadingResult]
+
+
 @dataclass
 class Finding(StrictModel):
     """The outcome of one admission check."""
@@ -335,6 +395,8 @@ class ProviderReport(StrictModel):
     passed: list[str]
     # whether GitHub gives the repository the ids of provider.json
     admitted: bool
+    # whether the newest version passed the reading
+    reading_passed: bool
 
 
 @dataclass

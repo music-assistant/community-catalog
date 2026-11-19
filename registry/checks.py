@@ -312,11 +312,6 @@ def _reading_problems(reading: VersionReading, version: str) -> list[str]:
         and formats.version_key(reading.base) < formats.version_key(version)
     ):
         problems.append(f"reading.base: {reading.base!r} is not a version below {version}")
-    if reading.advisory is not None:
-        if reading.verdict is Verdict.PASS:
-            problems.append("reading.advisory: a version that passed has no advisory")
-        elif not formats.is_advisory(reading.advisory):
-            problems.append(f"reading.advisory: {reading.advisory!r} is not a GHSA id")
     return problems
 
 

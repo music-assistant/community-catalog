@@ -216,12 +216,14 @@ def test_blocked_and_missing_repositories(
 def test_archives_of_the_versions_to_check(files: Files, github: FakeGitHub) -> None:
     """The latest version of each channel and versions without a result are downloaded too."""
     files.provider()
+    # read already, so the read step needs none of them
+    read = {"verdict": "pass", "read": "2026-11-02T03:00:00Z"}
     # the latest on nightly, without a result for beta
-    files.version("1.2.0", commit=COMMIT_3, channels={"nightly": True})
+    files.version("1.2.0", commit=COMMIT_3, channels={"nightly": True}, reading=read)
     # the latest on beta
-    files.version("1.1.0", commit=COMMIT_2, channels={"nightly": True, "beta": True})
+    files.version("1.1.0", commit=COMMIT_2, channels={"nightly": True, "beta": True}, reading=read)
     # below the latest on both channels
-    files.version("1.0.0", commit=COMMIT_1, channels={"nightly": True, "beta": False})
+    files.version("1.0.0", commit=COMMIT_1, channels={"nightly": True, "beta": False}, reading=read)
     github.repository(REPOSITORY, [release("v1.2.0", COMMIT_3)])
     for commit in (COMMIT_1, COMMIT_2, COMMIT_3):
         github.archives[REPOSITORY, commit] = provider_archive()
@@ -239,6 +241,29 @@ def test_archives_of_the_versions_to_check(files: Files, github: FakeGitHub) -> 
         "beta": [(DOMAIN, "1.1.0"), (DOMAIN, "1.2.0")],
         "nightly": [(DOMAIN, "1.2.0")],
     }
+
+
+def test_archives_of_the_versions_to_read(files: Files, github: FakeGitHub) -> None:
+    """Each version the read step reads is downloaded, and the version it is read against."""
+    files.provider()
+    passed = {"nightly": True, "beta": True}
+    read = {"verdict": "pass", "read": "2026-11-02T03:00:00Z"}
+    # the base of 1.2.0, which the check step does not need: below the latest, read already
+    files.version("1.0.0", commit=COMMIT_1, channels=passed, reading=read)
+    # a hold is no base, and needs nothing
+    files.version("1.1.0", commit=COMMIT_2, channels=passed, reading={**read, "verdict": "hold"})
+    # the latest, without a reading
+    files.version("1.2.0", commit=COMMIT_3, channels=passed)
+    github.repository(REPOSITORY, [release("v1.2.0", COMMIT_3)])
+    for commit in (COMMIT_1, COMMIT_2, COMMIT_3):
+        github.archives[REPOSITORY, commit] = provider_archive()
+
+    _fetch(files, github)
+
+    work = files.root / "work"
+    assert archive_path(work, DOMAIN, "1.0.0").is_file()
+    assert not archive_path(work, DOMAIN, "1.1.0").exists()
+    assert archive_path(work, DOMAIN, "1.2.0").is_file()
 
 
 def test_repositories_are_read_in_batches(files: Files, github: FakeGitHub) -> None:

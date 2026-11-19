@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 PROVIDER = f"providers/{DOMAIN}/provider.json"
 VERSION = f"providers/{DOMAIN}/versions/1.0.0.json"
 ISSUE = "https://github.com/music-assistant/community-catalog/issues/31"
-ADVISORY = "GHSA-2c4m-59x8-p8cg"
 READ = "2026-11-03T03:00:00Z"
 
 
@@ -354,14 +353,6 @@ def test_provider_folder_without_provider_file(files: Files) -> None:
             {"reading": {"verdict": "pass", "read": READ, "base": "1.0"}},
             "reading.base: '1.0' is not a version below 1.0.0",
         ),
-        (
-            {"reading": {"verdict": "pass", "read": READ, "advisory": ADVISORY}},
-            "reading.advisory: a version that passed has no advisory",
-        ),
-        (
-            {"reading": {"verdict": "hold", "read": READ, "advisory": "CVE-2026-1"}},
-            "reading.advisory: 'CVE-2026-1' is not a GHSA id",
-        ),
     ],
 )
 def test_version_file_rules(files: Files, changes: dict[str, Any], problem: str) -> None:
@@ -409,7 +400,7 @@ def test_tag_with_prefix(files: Files) -> None:
 
 def test_a_version_with_its_reading(files: Files) -> None:
     """A version keeps the reading of its change against a lower version."""
-    reading = {"verdict": "hold", "read": READ, "base": "1.0.0", "advisory": ADVISORY}
+    reading = {"verdict": "hold", "read": READ, "base": "1.0.0"}
     files.provider(cleared_versions={"1.1.0": ISSUE})
     files.version("1.0.0", reading={"verdict": "pass", "read": READ})
     files.version("1.1.0", reading=reading)
@@ -417,7 +408,7 @@ def test_a_version_with_its_reading(files: Files) -> None:
     versions = load_registry(files.root).providers[DOMAIN].versions
 
     assert versions["1.0.0"].reading == VersionReading(Verdict.PASS, READ)
-    assert versions["1.1.0"].reading == VersionReading(Verdict.HOLD, READ, "1.0.0", ADVISORY)
+    assert versions["1.1.0"].reading == VersionReading(Verdict.HOLD, READ, "1.0.0")
 
 
 def test_a_version_file_without_a_reading_has_no_reading_key() -> None:
@@ -426,12 +417,7 @@ def test_a_version_file_without_a_reading_has_no_reading_key() -> None:
     read = VersionFile.from_dict(version_file(reading={"verdict": "pass", "read": READ}))
 
     assert "reading" not in unread.to_dict()
-    assert read.to_dict()["reading"] == {
-        "verdict": "pass",
-        "read": READ,
-        "base": None,
-        "advisory": None,
-    }
+    assert read.to_dict()["reading"] == {"verdict": "pass", "read": READ, "base": None}
 
 
 def test_the_base_of_a_reading_needs_a_version_file(files: Files) -> None:

@@ -22,6 +22,7 @@ from registry.pipeline import (
     archive_path,
     make_plan,
     versions_to_check,
+    versions_to_read,
     write_plan,
 )
 from registry.registry import InvalidRegistryError, load_registry
@@ -42,8 +43,8 @@ def fetch(registry: Registry, github: GitHub, work: Path) -> FetchReport:
     file nor a refusal yet; a release that cannot become a version is recorded as refused.
     Nothing is fetched of a provider whose repository is not the one that was admitted (its
     ids differ), or could not be read; the others are fetched all the same. The archives of
-    every version the check step needs are downloaded into the work folder, the plan of the
-    check step and what was found are written there.
+    every version the check step and the read step need are downloaded into the work folder,
+    the plan of the check step and what was found are written there.
 
     :param registry: The registry.
     :param github: The GitHub client.
@@ -173,10 +174,11 @@ def download_archives(
     registry: Registry, github: GitHub, work: Path, domains: Collection[str]
 ) -> None:
     """
-    Download the archive of every version of some providers the check step needs.
+    Download the archive of every version of some providers the check step or the read step needs.
 
-    An archive in the work folder already is kept; one that cannot be downloaded is left out,
-    and its version is checked on another night.
+    The read step needs each version it reads and the version it is read against. An archive in
+    the work folder already is kept; one that cannot be downloaded is left out, and its version
+    is checked or read on another night.
 
     :param registry: The registry.
     :param github: The GitHub client.
@@ -188,6 +190,13 @@ def download_archives(
         for channel in registry.channels
         for domain, version in versions_to_check(registry, channel)
         if domain in domains
+    }
+    needed |= {
+        (planned.domain, version)
+        for planned in versions_to_read(registry)
+        if planned.domain in domains
+        for version in (planned.version, planned.base)
+        if version is not None
     }
     for domain, version in sorted(needed):
         if (path := archive_path(work, domain, version)).is_file():

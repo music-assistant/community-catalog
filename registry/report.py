@@ -13,13 +13,13 @@ from typing import TYPE_CHECKING
 from registry.formats import channel_name, version_key
 from registry.github import ACTIONS_LOGIN
 from registry.markdown import code_block, code_span
-from registry.models import ChannelReport, Failure, ProviderReport
+from registry.models import ChannelReport, Failure, ProviderReport, Rule, Verdict
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable, Sequence
 
     from registry.github import GitHub, IssueInfo
-    from registry.models import ChannelResults, FetchReport, VersionResult
+    from registry.models import ChannelResults, FetchReport, ReadingResult, VersionResult
     from registry.registry import Provider, Registry
 
 # the label of the issues of the release pipeline
@@ -28,8 +28,34 @@ README_URL = "https://github.com/music-assistant/community-catalog#releasing-upd
 CHANGE_FORM_URL = (
     "https://github.com/music-assistant/community-catalog/issues/new?template=report-provider.yml"
 )
+RULES_URL = "https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md"
 # the most maintainers a new issue mentions
 MAX_MENTIONS = 10
+# the most findings, or files, of one reading a post shows
+MAX_FINDINGS = 10
+# each line of the rules in the words of the rules page, following "it may"
+RULES = {
+    Rule.NO_RIGHTS: "give access to music the user has no right to",
+    Rule.COPY_PROTECTION: (
+        "get around copy protection to give more than the service's own app gives the user's "
+        "account"
+    ),
+    Rule.KEEPS_MUSIC: "download or export music to keep it",
+    Rule.HARMS_USER: (
+        "harm the user, by sending their data elsewhere, by loading code while it runs, or by "
+        "doing what its description does not mention"
+    ),
+    Rule.STEERS_ASSISTANT: (
+        "offer AI assistants tools whose description or results do more than describe the tool "
+        "and report what it did"
+    ),
+    Rule.LOADS_PROVIDERS: (
+        "mainly exist to load other providers, or lists of sources, from outside the community "
+        "catalog"
+    ),
+    Rule.ADDRESSES_READER: "address whoever reads the release, such as a reviewer or an AI",
+    Rule.UNCLEAR: "do what the reading cannot tell from the code, such as obfuscated code",
+}
 # GitHub takes 65536 characters in an issue or a comment, counted as UTF-16
 _MAX_TEXT = 65_536
 # the failures of one post share at most this much of the end of their output
@@ -53,18 +79,23 @@ class OpenIssue:
 
 
 def build_reports(
-    registry: Registry, fetched: FetchReport, results: list[ChannelResults]
+    registry: Registry,
+    fetched: FetchReport,
+    results: list[ChannelResults],
+    readings: Sequence[ReadingResult] = (),
 ) -> list[ProviderReport]:
     """
     Return the report of every provider: its failures in this run not settled, and its state.
 
-    The failures are the releases refused in this run, the versions that failed a check and a
-    repository that is not the admitted one. A failure is settled when is_settled says so. A channel
-    whose checks could not run in this run counts as not tested.
+    The failures are the releases refused in this run, the versions that failed a check, the
+    versions the reading held in this run and a repository that is not the admitted one. A failure
+    is settled when is_settled says so. A channel whose checks could not run in this run counts as
+    not tested.
 
     :param registry: The registry, with the refused releases of the fetch step.
     :param fetched: What the fetch step found.
     :param results: The results of the check step, as read_results returns them.
+    :param readings: The readings of the read step in this run, as read_readings returns them.
     """
     unavailable = {
         channel.channel
@@ -82,6 +113,12 @@ def build_reports(
         for version, file in provider.versions.items()
         for channel, check in file.checks.items()
     }
+    verdicts: dict[tuple[str, str], Verdict] = {
+        (domain, version): file.reading.verdict
+        for domain, provider in registry.providers.items()
+        for version, file in provider.versions.items()
+        if file.reading is not None
+    }
     failures: dict[str, list[Failure]] = {}
     for refused in fetched.refused:
         if refused.domain in registry.providers:
@@ -96,6 +133,11 @@ def build_reports(
                 provider = registry.providers[result.domain]
                 failure = _check_failure(provider, file.channel, result)
                 failures.setdefault(result.domain, []).append(failure)
+    for read in readings:
+        verdicts[read.domain, read.version] = read.reading.verdict
+        if read.reading.verdict is Verdict.HOLD and read.domain in registry.providers:
+            provider = registry.providers[read.domain]
+            failures.setdefault(read.domain, []).append(_hold(provider, read))
     reports: list[ProviderReport] = []
     for domain, provider in sorted(registry.providers.items()):
         newest = max([*provider.versions, *provider.refused], key=version_key, default=None)
@@ -110,6 +152,7 @@ def build_reports(
             tested=tested,
             passed=[channel for channel in tested if passed.get((domain, newest or "", channel))],
             admitted=state is not None and (state.repository_id, state.owner_id) == ids,
+            reading_passed=verdicts.get((domain, newest or "")) is Verdict.PASS,
         )
         found = failures.get(domain, [])
         if state is not None and not report.admitted:
@@ -124,7 +167,8 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     Return whether a failure of a provider no longer needs its maintainers.
 
     That is when the newest version passed on a tested channel, and also on the channel of a failed
-    check, unless that channel is not tested in this run; for a repository that was not the admitted
+    check, unless that channel is not tested in this run; for a version the reading held, the
+    newest version must also have passed the reading; for a repository that was not the admitted
     one, GitHub must give the admitted one again.
 
     :param report: The report of the provider.
@@ -138,6 +182,8 @@ def is_settled(report: ProviderReport, key: str) -> bool:
             return channel in report.passed or channel not in report.tested
         case "refused", [_]:
             return True
+        case "hold", [_]:
+            return report.reading_passed
         case "repository", [_, _]:
             return report.admitted
     return False
@@ -213,18 +259,20 @@ def post_report(
         if not new:
             return None
         mentions = " ".join(f"@{handle}" for handle in report.maintainers)
+        # a hold waits for a person of the team, who says what is needed
         fix = (
             "Publish a new release that fixes this. A refused release is not tried again. "
-            if any(not failure.key.startswith("repository ") for failure in new)
+            if any(failure.key.split(" ", 1)[0] in {"check", "refused"} for failure in new)
             else ""
         )
+        passes = _passes([failure.key for failure in new])
         body = _fit(
             lambda room: (
                 f"{_marker_line(report.domain, new)}\n"
                 f"The Music Assistant community catalog checks the releases of `{report.domain}`. "
                 f"This needs the attention of its maintainers:\n\n{_failures(new, room)}"
                 f"### What to do\n\n{fix}[Releasing updates]({README_URL}) tells how releases are "
-                "checked. This issue closes by itself once the newest release passes the checks."
+                f"checked. This issue closes by itself once the newest release passes {passes}."
                 f"\n\n{mentions}\n"
             )
         )
@@ -234,7 +282,7 @@ def post_report(
         github.add_comment(repository, issue.number, body)
         return f"#{issue.number}: {len(new)} new failure(s)"
     if all(is_settled(report, key) for key in told):
-        line = f"Version {report.newest} passed the checks, so this issue is closed."
+        line = f"Version {report.newest} passed {_passes(told)}, so this issue is closed."
         github.add_comment(repository, issue.number, line)
         github.close_issue(repository, issue.number)
         return f"#{issue.number}: closed"
@@ -354,6 +402,53 @@ def _refusal(provider: Provider, version: str) -> Failure:
     return Failure(key=f"refused {version}", heading=f"Release {version} was refused", text=text)
 
 
+def _hold(provider: Provider, result: ReadingResult) -> Failure:
+    """Return the failure of a version the reading held in this run, its findings shown as code."""
+    version, reading = result.version, result.reading
+    commit = provider.versions[version].commit
+    read = f"its change since version {result.base}" if result.base is not None else "in full"
+    intro = (
+        f"Each new release is read by Claude, an AI model, against the [rules of the community "
+        f"catalog]({RULES_URL}). The reading of version {version} (commit `{commit}`, {read})"
+    )
+    shown = reading.findings[:MAX_FINDINGS]
+    more = len(reading.findings) - len(shown)
+    trial = (
+        "The reading is on trial: nothing changes for this release, and a person of the Music "
+        "Assistant team looks at it."
+    )
+    if reading.reason is not None:
+        files = ", ".join(code_span(finding.file) for finding in shown)
+        files += f" and {more} more" if more else ""
+        return Failure(
+            key=f"hold {version}",
+            heading=f"Version {version} could not be read against the catalog rules",
+            text=(
+                f"{intro} could not judge it, because {reading.reason}"
+                f"{': ' if files else ''}{files}.\n\n{trial}"
+            ),
+        )
+    items = []
+    for finding in shown:
+        line = f", line {finding.line}" if finding.line is not None else ""
+        items.append(
+            f"- In {code_span(finding.file)}{line}, it may {RULES[finding.rule]}:\n\n"
+            f"{code_block(finding.explanation, '  ')}"
+        )
+    if more:
+        items.append(f"- And {more} more findings.\n")
+    return Failure(
+        key=f"hold {version}",
+        heading=f"Version {version} may cross a line of the catalog rules",
+        text=(
+            f"{intro} found what may cross a line of the rules:\n\n{''.join(items)}\n"
+            f"What the change does, in the words of the reading:\n\n"
+            f"{code_block(reading.summary or '')}\n"
+            f"{trial} If a finding is wrong, say so in this issue."
+        ),
+    )
+
+
 def _repository_failure(provider: Provider, repository_id: int, owner_id: int) -> Failure:
     """Return the failure of a repository that has other ids than when it was admitted."""
     file = provider.file
@@ -411,6 +506,13 @@ def _failures(failures: list[Failure], room: int) -> str:
             output = code_block(shown)
             text += f"<details><summary>{summary}</summary>\n\n{output}\n</details>\n\n"
     return text
+
+
+def _passes(keys: Iterable[str]) -> str:
+    """Return what the newest version passes to settle failures: the checks, and the reading."""
+    if any(key.startswith("hold ") for key in keys):
+        return "the checks and the reading"
+    return "the checks"
 
 
 def _marker_line(domain: str, failures: list[Failure]) -> str:

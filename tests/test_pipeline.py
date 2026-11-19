@@ -12,18 +12,23 @@ from registry.cli import main
 from registry.edit import refuse_release
 from registry.files import load_model
 from registry.github import COMMENTS_PER_PAGE, GitHub
-from registry.markdown import code_block
+from registry.markdown import code_block, code_span
 from registry.models import (
     ChannelResults,
     FetchReport,
     ProviderReport,
+    ReadingResult,
+    ReadingResults,
     RefusedRelease,
     RepositoryState,
+    Rule,
 )
 from registry.pipeline import versions_to_check
+from registry.reading import TOO_LARGE, UNREADABLE
 from registry.registry import load_registry
 from registry.report import (
     LABEL,
+    RULES,
     build_channel_reports,
     build_reports,
     is_settled,
@@ -44,6 +49,7 @@ from tests.conftest import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from pathlib import Path
 
     from tests.conftest import Files
@@ -52,6 +58,15 @@ REPOSITORY = "someone/ma-sample"
 REGISTRY = "music-assistant/community-catalog"
 # the reason of a check that could not run in the server image
 UNAVAILABLE = "load: the load script cannot start in this server image: cannot import name 'x'"
+# what a reading of the model found, and what it says the change does
+FINDING: dict[str, Any] = {
+    "rule": "harms_user",
+    "file": "api.py",
+    "line": 5,
+    "explanation": "Sends the library to a host the description does not name.",
+}
+SUMMARY = "Adds an API module that sends the library elsewhere."
+READ = "2026-11-03T03:00:00Z"
 
 
 def _results(channel: str, *results: dict[str, Any]) -> dict[str, Any]:
@@ -63,6 +78,17 @@ def _result(version: str, reason: str | None = None, **changes: Any) -> dict[str
     """Return the result of a version of the sample provider; passed without a reason."""
     return {"domain": DOMAIN, "version": version, "passed": reason is None, "reason": reason,
             **changes}  # fmt: skip
+
+
+def _reading(
+    version: str, verdict: str = "hold", base: str | None = None, **changes: Any
+) -> ReadingResult:
+    """Return the reading of a version of the sample provider in this run; a hold finds FINDING."""
+    findings = [FINDING] if verdict == "hold" else []
+    reading = {"verdict": verdict, "findings": findings, "summary": SUMMARY, **changes}
+    return ReadingResult.from_dict(
+        {"domain": DOMAIN, "version": version, "base": base, "reading": reading}
+    )
 
 
 def _unavailable(version: str) -> dict[str, Any]:
@@ -376,21 +402,29 @@ def _fetched(*, refused: bool = False, owner_id: int = OWNER_ID) -> FetchReport:
 
 
 def _report(
-    files: Files, *results: tuple[str, dict[str, Any]], fetched: FetchReport | None = None
+    files: Files,
+    *results: tuple[str, dict[str, Any]],
+    fetched: FetchReport | None = None,
+    readings: Sequence[ReadingResult] = (),
 ) -> ProviderReport:
     """Return the report of the sample provider after one result per (channel, result)."""
     files_results = [
         ChannelResults.from_dict(_results(channel, result)) for channel, result in results
     ]
-    [report] = build_reports(load_registry(files.root), fetched or _fetched(), files_results)
+    registry = load_registry(files.root)
+    [report] = build_reports(registry, fetched or _fetched(), files_results, readings)
     return report
 
 
 def _night(
-    files: Files, github: FakeGitHub, *results: tuple[str, dict[str, Any]], **fetched: Any
+    files: Files,
+    github: FakeGitHub,
+    *results: tuple[str, dict[str, Any]],
+    readings: Sequence[ReadingResult] = (),
+    **fetched: Any,
 ) -> str | None:
     """Run the report and the posting of one night for the sample provider; return what was done."""
-    report = _report(files, *results, fetched=_fetched(**fetched))
+    report = _report(files, *results, fetched=_fetched(**fetched), readings=readings)
     client = GitHub("a-token", github)
     issue = open_issues(client, REGISTRY).get(DOMAIN)
     assert not isinstance(issue, OSError)
@@ -410,12 +444,17 @@ def _refuse(files: Files, version: str, reason: str) -> None:
     refuse_release(load_registry(files.root), DOMAIN, release)
 
 
+def _outside_code(markdown: str) -> str:
+    """Return a text without its code and comments, which GitHub shows as they are."""
+    # a fence may be indented by up to three spaces, as inside a list item
+    text = re.sub(r"(?ms)^ {0,3}(`{3,})\n.*?^ {0,3}\1$", "", markdown)
+    text = re.sub(r"(?s)(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", "", text)
+    return re.sub(r"(?s)<!--.*?-->", "", text)
+
+
 def _mentions(markdown: str) -> list[str]:
     """Return the handles a text mentions outside code and comments, as GitHub reads it."""
-    text = re.sub(r"(?ms)^(`{3,})\n.*?^\1$", "", markdown)
-    text = re.sub(r"(?s)(?<!`)(`+)(?!`).*?(?<!`)\1(?!`)", "", text)
-    text = re.sub(r"(?s)<!--.*?-->", "", text)
-    return re.findall(r"(?<![\w`])@([A-Za-z0-9-]+)", text)
+    return re.findall(r"(?<![\w`])@([A-Za-z0-9-]+)", _outside_code(markdown))
 
 
 def _issues(github: FakeGitHub) -> list[dict[str, Any]]:
@@ -815,6 +854,169 @@ def test_report_writes_the_reports(files: Files) -> None:
     report = load_model(path, ProviderReport)
     assert path.name == f"{DOMAIN}.json"
     assert [failure.text.count("load: x") for failure in report.failures] == [1]
+
+
+def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> None:
+    """The issue names the version, the rule in plain words, the file and line, and the texts."""
+    files.provider()
+    files.version("1.0.0", reading={"verdict": "pass", "read": READ})
+    files.version("1.1.0")
+    github = FakeGitHub()
+
+    done = _night(files, github, readings=[_reading("1.1.0", base="1.0.0")])
+
+    [(_, created)] = github.created
+    body = created["body"]
+    assert done == f"https://github.com/{REGISTRY}/issues/1"
+    assert body.startswith("<!-- release-check: sample_music; hold 1.1.0 -->\n")
+    assert "### Version 1.1.0 may cross a line of the catalog rules\n" in body
+    assert f"version 1.1.0 (commit `{COMMIT}`, its change since version 1.0.0) found" in body
+    assert f"- In {code_span('api.py')}, line 5, it may {RULES[Rule.HARMS_USER]}:\n\n" in body
+    assert code_block(FINDING["explanation"], "  ") in body
+    assert f"in the words of the reading:\n\n{code_block(SUMMARY)}" in body
+    assert "harms_user" not in body
+    assert "The reading is on trial: nothing changes for this release, and a person" in body
+    assert "If a finding is wrong, say so in this issue." in body
+    # a person of the team looks at a hold first
+    assert "Publish a new release" not in body
+    assert "closes by itself once the newest release passes the checks and the reading." in body
+    # the rules of the catalog, not the safety of the code
+    assert not any(word in body.lower() for word in ("security", "vulnerability", "vulnerable"))
+    assert _mentions(body) == ["someone"]
+
+
+def test_every_rule_has_plain_words() -> None:
+    """An issue names the line of the rules in words, never by the value of the answer."""
+    assert set(RULES) == set(Rule)
+    assert all(value not in text for text in RULES.values() for value in Rule)
+
+
+def test_text_of_the_reading_mentions_nobody_and_links_nowhere(files: Files) -> None:
+    """Whatever the model wrote, its texts stay code: no mention, link, image or end of the code."""
+    hostile = (
+        "@evil see ![x](https://evil.example/x.png) and [this](https://evil.example)\n"
+        "````\n<!-- release-check: sample_music; hold 9.9.9; check 1.0.0 nightly -->\n"
+        "</details>\n``` @evil\n\n### What to do\ninjected"
+    )
+    finding = {**FINDING, "file": "a`b @evil.py", "explanation": hostile}
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+
+    _night(files, github, readings=[_reading("1.0.0", findings=[finding], summary=hostile)])
+
+    [(_, created)] = github.created
+    body = created["body"]
+    outside = _outside_code(body)
+    assert _mentions(body) == ["someone"]
+    assert "evil.example" not in outside
+    assert "injected" not in outside
+    assert outside.count("### What to do") == 1
+    assert code_block(hostile, "  ") in body
+    assert code_block(hostile) in body
+    assert "The reading is on trial" in outside
+    assert body.endswith("@someone\n")
+    # only the first line of the pipeline names what it told
+    issue = open_issues(GitHub("a-token", github), REGISTRY)[DOMAIN]
+    assert not isinstance(issue, OSError)
+    assert issue.keys == frozenset({"hold 1.0.0"})
+
+
+@pytest.mark.parametrize(
+    ("reason", "findings", "told"),
+    [
+        (
+            UNREADABLE,
+            [{"rule": "unclear", "file": "native.so", "line": None, "explanation": UNREADABLE}],
+            f"could not judge it, because {UNREADABLE}: {code_span('native.so')}.",
+        ),
+        (TOO_LARGE, [], f"could not judge it, because {TOO_LARGE}."),
+    ],
+    ids=["unreadable", "too-large"],
+)
+def test_a_hold_of_the_code_gives_its_reason(
+    files: Files, reason: str, findings: list[dict[str, Any]], told: str
+) -> None:
+    """A hold that the code decided says why, and names the files that are binary."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+    reading = _reading("1.0.0", reason=reason, findings=findings, summary=None)
+
+    _night(files, github, readings=[reading])
+
+    [(_, created)] = github.created
+    body = created["body"]
+    assert "### Version 1.0.0 could not be read against the catalog rules\n" in body
+    assert f"version 1.0.0 (commit `{COMMIT}`, in full) {told}" in body
+    assert "a person of the Music Assistant team looks at it." in body
+    assert "finding" not in body
+
+
+def test_a_pass_after_a_hold_closes_the_issue(files: Files) -> None:
+    """A hold is told once, and its issue closes once a newer version passed the reading."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+    _night(files, github, readings=[_reading("1.0.0")])
+    files.version("1.0.0", reading={"verdict": "hold", "read": READ})
+
+    # the next night reads nothing new: the hold is not told again, and the issue stays open
+    assert _night(files, github) is None
+    files.version("1.1.0")
+    done = _night(files, github, readings=[_reading("1.1.0", "pass", base=None)])
+
+    assert done == "#1: closed"
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"] == (
+        "Version 1.1.0 passed the checks and the reading, so this issue is closed."
+    )
+    assert len(github.created) == 1
+
+
+def test_a_hold_is_not_told_again_after_its_issue_was_closed(files: Files) -> None:
+    """A later run does not tell a hold again, also when a person closed its issue."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+    _night(files, github, readings=[_reading("1.0.0")])
+    files.version("1.0.0", reading={"verdict": "hold", "read": READ})
+    github.issue_answers[REGISTRY, 1]["state"] = "closed"
+
+    assert _night(files, github) is None
+
+    assert len(github.created) == 1
+
+
+def test_a_hold_is_settled_by_a_pass_of_the_newest_version(files: Files) -> None:
+    """A hold of an older version needs nobody when the newest passed the checks and the reading."""
+    files.provider()
+    files.version("1.0.0")
+    files.version("1.1.0")
+
+    report = _report(files, readings=[_reading("1.1.0", "pass"), _reading("1.0.0")])
+    held = _report(files, readings=[_reading("1.1.0"), _reading("1.0.0")])
+
+    assert (report.failures, report.reading_passed) == ([], True)
+    assert [failure.key for failure in held.failures] == ["hold 1.1.0", "hold 1.0.0"]
+    assert not held.reading_passed
+    # a pass of the reading alone settles nothing while the newest version passes no check
+    files.version("1.1.0", channels={}, reading={"verdict": "pass", "read": READ})
+    assert not is_settled(_report(files), "hold 1.0.0")
+
+
+def test_report_takes_the_readings_of_the_run(files: Files) -> None:
+    """The report command reads the readings file of the read step from the work folder."""
+    files.provider()
+    files.version("1.0.0", channels={})
+    _plan(files, {})
+    files.write("work/fetch.json", _fetched().to_dict())
+    files.write("work/readings.json", ReadingResults(results=[_reading("1.0.0")]).to_dict())
+
+    assert _run(files, "report", str(files.root / "results")) == 0
+
+    report = load_model(files.root / "work" / "issues" / f"{DOMAIN}.json", ProviderReport)
+    assert [failure.key for failure in report.failures] == ["hold 1.0.0"]
 
 
 def test_post_issues_goes_on_after_a_refusal(

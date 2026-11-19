@@ -1,26 +1,36 @@
-"""What the steps of the release pipeline share: the work folder, what to check, the results."""
+"""What the steps of the release pipeline share: the work folder, what to check or read, results."""
 
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from registry.edit import CommandError, clear_failed_check, record_check, write_indexes
 from registry.files import dumps, load_model
 from registry.formats import is_reason, version_key
 from registry.index import build_index
-from registry.models import ChannelResults, CheckPlan, ProviderStatus, ProviderVersion
+from registry.models import (
+    ChannelResults,
+    CheckPlan,
+    ProviderStatus,
+    ProviderVersion,
+    ReadingResults,
+    Verdict,
+)
 from registry.registry import InvalidRegistryError
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from registry.registry import Registry
+    from registry.models import ReadingResult, VersionFile
+    from registry.registry import Provider, Registry
 
 # the files in the work folder
 FETCH_REPORT = "fetch.json"
 ADMISSION_REPORT = "admission.json"
 PLAN_FILE = "plan.json"
+READINGS_FILE = "readings.json"
 ISSUES_FOLDER = "issues"
 # the reports of the channels, in the issues folder
 CHANNELS_FOLDER = "channels"
@@ -29,6 +39,18 @@ _ARCHIVES_FOLDER = "archives"
 RECHECKED_ABOVE_LATEST = 3
 # a results file holds a reason of one line and at most 50 kB of output
 MAX_RESULTS_SIZE = 200_000
+# the most versions the read step reads in one run; the others wait for the next night
+MAX_READINGS_PER_RUN = 25
+
+
+@dataclass(frozen=True, slots=True)
+class PlannedReading:
+    """A version the read step reads, and the version it is read against."""
+
+    domain: str
+    version: str
+    # None to read the version in full
+    base: str | None
 
 
 def archive_path(work: Path, domain: str, version: str) -> Path:
@@ -195,6 +217,61 @@ def apply_results(registry: Registry, results: list[ChannelResults]) -> None:
     write_indexes(registry.root)
 
 
+def versions_to_read(registry: Registry) -> list[PlannedReading]:
+    """
+    Return the versions the read step reads in a run, the most recently released first.
+
+    Those are the versions without a reading that are neither cleared nor blocked, of a provider
+    that is not blocked, and that did not fail on every channel they were checked on: at most
+    MAX_READINGS_PER_RUN of them. Each is read against the highest lower version that is accepted
+    (the reading passed it, or a registry maintainer cleared it) and not blocked, or in full when
+    there is none.
+
+    :param registry: The registry.
+    """
+    unread = [
+        (provider, file)
+        for _, provider in sorted(registry.providers.items())
+        if provider.file.status != ProviderStatus.BLOCKED
+        for file in provider.versions.values()
+        if _readable(provider, file)
+    ]
+    unread.sort(key=lambda item: (item[1].released, version_key(item[1].version)), reverse=True)
+    return [
+        PlannedReading(provider.file.domain, file.version, _reading_base(provider, file.version))
+        for provider, file in unread[:MAX_READINGS_PER_RUN]
+    ]
+
+
+def write_readings(results: list[ReadingResult], work: Path) -> None:
+    """
+    Write what the read step read in this run into the work folder, for the report.
+
+    :param results: The reading of each version, in the order they were read.
+    :param work: The work folder.
+    """
+    path = work / READINGS_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(dumps(ReadingResults(results=results).to_dict()))
+
+
+def read_readings(work: Path) -> list[ReadingResult]:
+    """
+    Return what the read step read in this run; nothing when it wrote no readings file.
+
+    :param work: The work folder.
+    :raises CommandError: The readings file is not exactly a readings file.
+    """
+    path = work / READINGS_FILE
+    if not path.exists():
+        return []
+    try:
+        return load_model(path, ReadingResults).results
+    except (ValueError, OSError) as err:
+        msg = f"{path}: {err}"
+        raise CommandError(msg) from err
+
+
 def _read_result(path: Path, channel: str, entry: ProviderVersion) -> ChannelResults | None:
     """
     Return the results file of a version, or None after a warning when it does not count.
@@ -225,6 +302,33 @@ def _read_result(path: Path, channel: str, entry: ProviderVersion) -> ChannelRes
         _warn(f"{path}: ignored, a failed check has one line of reason and a pass none")
         return None
     return file
+
+
+def _readable(provider: Provider, file: VersionFile) -> bool:
+    """Return whether a version waits for its reading, as versions_to_read says."""
+    kept = provider.file
+    return (
+        file.reading is None
+        and file.version not in kept.cleared_versions
+        and file.version not in kept.blocked_versions
+        and (not file.checks or any(check.passed for check in file.checks.values()))
+    )
+
+
+def _reading_base(provider: Provider, version: str) -> str | None:
+    """Return the highest version below a version that is accepted and not blocked, or None."""
+    kept = provider.file
+    accepted = [
+        other
+        for other, file in provider.versions.items()
+        if version_key(other) < version_key(version)
+        and other not in kept.blocked_versions
+        and (
+            other in kept.cleared_versions
+            or (file.reading is not None and file.reading.verdict is Verdict.PASS)
+        )
+    ]
+    return max(accepted, key=version_key, default=None)
 
 
 def _warn(text: str) -> None:

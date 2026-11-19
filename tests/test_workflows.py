@@ -43,6 +43,13 @@ PULL_REQUEST_EVENTS = frozenset(
     {"pull_request", "pull_request_target", "pull_request_review", "workflow_call"}
 )
 APP_TOKEN = "actions/create-github-app-token@"  # noqa: S105 - an action, not a token
+# the ids of the workload identity federation the reading authenticates with
+FEDERATION_VARIABLES = (
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_WORKSPACE_ID",
+)
 
 
 def _load(path: Path) -> dict[Any, Any]:
@@ -208,14 +215,96 @@ def test_the_report_job_writes_only_issues() -> None:
 
 
 def test_every_secret_and_variable_is_one_that_is_set() -> None:
-    """The workflows read only the key and the client id of the app, no other secret or variable."""
+    """The workflows read the key and client id of the app and the ids of the reading, no more."""
     used = {
         found
         for path in WORKFLOWS
         for found in re.findall(r"\b(?:secrets|vars)\.[A-Za-z_]+", path.read_text())
     }
 
-    assert used == {"secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY", "vars.MUSIC_ASSISTANT_BOT_CLIENT_ID"}
+    assert used == {
+        "secrets.MUSIC_ASSISTANT_BOT_PRIVATE_KEY",
+        "vars.MUSIC_ASSISTANT_BOT_CLIENT_ID",
+        *(f"vars.{name}" for name in FEDERATION_VARIABLES),
+    }
+
+
+def test_no_workflow_holds_a_key_of_the_api() -> None:
+    """The reading authenticates by federation alone: no workflow holds a key of the API."""
+    for path in WORKFLOWS:
+        text = path.read_text()
+        assert "ANTHROPIC_API_KEY" not in text, path.name
+        assert "ANTHROPIC_AUTH_TOKEN" not in text, path.name
+
+
+def test_only_the_apply_job_gets_an_identity_token_for_the_reading() -> None:
+    """
+    Of the jobs that run registry code, only apply may request an identity token.
+
+    The federation rule of the reading accepts only a token of the environment releases. The
+    other job with the permission publishes to GitHub Pages, which needs it, and runs nothing but
+    deploy-pages, in the environment github-pages.
+    """
+    grants = {
+        f"{path.name}:{job}": _effective(workflow, job).get("id-token")
+        for path in WORKFLOWS
+        for workflow in [_load(path)]
+        for job in workflow["jobs"]
+    }
+
+    assert {job: access for job, access in grants.items() if access} == {
+        "publish.yml:deploy": "write",
+        "releases.yml:apply": "write",
+    }
+    assert _effective(RELEASES, "apply") == {"contents": "read", "id-token": "write"}
+    assert RELEASES["jobs"]["apply"]["environment"] == "releases"
+    deploy = _load(ROOT / ".github" / "workflows" / "publish.yml")["jobs"]["deploy"]
+    assert deploy["environment"]["name"] == "github-pages"
+    assert [step["uses"].split("@")[0] for step in _steps(deploy)] == ["actions/deploy-pages"]
+
+
+def test_the_apply_job_reads_before_it_makes_the_token_of_the_app() -> None:
+    """The reading runs between apply-results and validate, then the app token is made and used."""
+    job = RELEASES["jobs"]["apply"]
+    steps = _steps(job)
+    order = [
+        _step(steps, run="registry apply-results"),
+        read := _step(steps, run="registry read"),
+        _step(steps, run="registry validate"),
+        token := _step(steps, uses=APP_TOKEN),
+        push := _step(steps, run="git push"),
+        _step(steps, uses="actions/upload-artifact@"),
+        fail := _step(steps, run="exit 1"),
+    ]
+
+    assert [steps.index(step) for step in order] == sorted(steps.index(step) for step in order)
+    assert read["env"] == {name: f"${{{{ vars.{name} }}}}" for name in FEDERATION_VARIABLES}
+    # the reading has no token of the app, and nothing else gets the ids of the reading
+    assert "steps.token" not in json.dumps(read)
+    assert all("ANTHROPIC" not in json.dumps(step) for step in steps if step is not read)
+    assert token["id"] == "token"
+    assert push["env"]["GH_TOKEN"] == "${{ steps.token.outputs.token }}"  # noqa: S105
+    # a reading that does not finish fails the run once the results are pushed
+    assert read["continue-on-error"] is True
+    assert read["timeout-minutes"] < job["timeout-minutes"]
+    assert fail["if"] == "steps.read.outcome != 'success'"
+
+
+def test_the_report_runs_once_the_results_are_on_main() -> None:
+    """The report follows the push, also when the reading failed, and gets the readings."""
+    apply, report = RELEASES["jobs"]["apply"], RELEASES["jobs"]["report"]
+    push = _step(_steps(apply), run="git push")
+
+    assert apply["outputs"] == {"recorded": "${{ steps.push.outputs.recorded }}"}
+    assert push["id"] == "push"
+    assert push["run"].rstrip().endswith('echo "recorded=true" >> "$GITHUB_OUTPUT"')
+    assert "exit 0" not in push["run"]
+    assert "needs.apply.outputs.recorded == 'true'" in report["if"]
+    assert "needs.apply.result" not in report["if"]
+    upload = _step(_steps(apply), uses="actions/upload-artifact@")
+    download = _step(_steps(report), uses="actions/download-artifact@", pattern="readings")
+    assert (upload["with"]["name"], upload["with"]["path"]) == ("readings", "work/readings.json")
+    assert (download["with"]["merge-multiple"], download["with"]["path"]) == (True, "work")
 
 
 def test_admission_ignores_every_issue_but_a_submission() -> None:
@@ -385,3 +474,24 @@ def _writes(workflow: dict[str, Any], job: str) -> set[str]:
 def _app_tokens(job: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the steps of a job that make a token of an app."""
     return [step for step in _steps(job) if step.get("uses", "").startswith(APP_TOKEN)]
+
+
+def _step(
+    steps: list[dict[str, Any]], *, run: str = "", uses: str = "", pattern: str = ""
+) -> dict[str, Any]:
+    """
+    Return the one step that runs a command, or uses an action, and downloads a pattern.
+
+    :param steps: The steps of a job.
+    :param run: What its script holds.
+    :param uses: What the action it uses starts with.
+    :param pattern: The pattern of the artifacts it downloads.
+    """
+    [found] = [
+        step
+        for step in steps
+        if run in step.get("run", "")
+        and step.get("uses", "").startswith(uses)
+        and step.get("with", {}).get("pattern", "") == pattern
+    ]
+    return found

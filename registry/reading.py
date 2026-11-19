@@ -16,7 +16,7 @@ import re
 import secrets
 import stat
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, NoReturn
@@ -25,13 +25,16 @@ import anthropic
 
 from registry.content import read_folder
 from registry.files import parse_model
-from registry.models import StrictModel, Verdict
+from registry.models import Reading, ReadingFinding, Rule, StrictModel, Verdict
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
+    import httpx2
     from anthropic.types import Message
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+
+    from registry.github import GitHub
 
 MODEL: Final = "claude-opus-5-5"
 EFFORT: Final = "high"
@@ -60,26 +63,12 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SFNT_VERSIONS = (b"\x00\x01\x00\x00", b"true", b"OTTO")
 # the API refuses a request that is too large, which says the change is
 _TOO_LARGE_STATUS = 413
-
-
-class Rule(StrEnum):
-    """The line of the rules a finding is about."""
-
-    # music the user has no right to: an account, tier or region bypass, or an unlicensed source
-    NO_RIGHTS = "no_rights"
-    COPY_PROTECTION = "copy_protection"
-    # downloads or exports music to keep it
-    KEEPS_MUSIC = "keeps_music"
-    # sends data elsewhere, loads code while it runs, or does what its description does not say
-    HARMS_USER = "harms_user"
-    # offers AI assistants tools whose texts do more than describe the tool and report what it did
-    STEERS_ASSISTANT = "steers_assistant"
-    # mainly exists to load providers or lists of sources from outside the catalog
-    LOADS_PROVIDERS = "loads_providers"
-    # text addressed to whoever or whatever reads the release
-    ADDRESSES_READER = "addresses_reader"
-    # what the change does cannot be told
-    UNCLEAR = "unclear"
+# what the API answers for a while, and the client tries again: a time-out, a conflict, too many
+# requests, and its own failures from 500 on; any other error status is the request's own
+_TRANSIENT_STATUSES = frozenset({408, 409, 429})
+_SERVER_ERRORS = 500
+# who the identity token of the workflow job is for, as the federation rule of the API expects
+AUDIENCE: Final = "https://api.anthropic.com"
 
 
 class Status(StrEnum):
@@ -91,18 +80,6 @@ class Status(StrEnum):
 
 
 @dataclass
-class ReadingFinding(StrictModel):
-    """Where a release crosses, or may cross, a line of the rules."""
-
-    rule: Rule
-    # as in the file table of the reading
-    file: str
-    # in the release, or in the base for a removed file; None for the file as a whole
-    line: int | None
-    explanation: str
-
-
-@dataclass
 class ReadingAnswer(StrictModel):
     """The answer of the model, in the shape of ANSWER_SCHEMA."""
 
@@ -111,20 +88,12 @@ class ReadingAnswer(StrictModel):
     summary: str
 
 
-@dataclass
-class Reading(StrictModel):
-    """The outcome of the reading of a release."""
-
-    verdict: Verdict
-    # why the code held the release; None when the model decided
-    reason: str | None = None
-    findings: list[ReadingFinding] = field(default_factory=list)
-    # what the change does, in the words of the model
-    summary: str | None = None
-
-
 class ReadingUnavailableError(Exception):
     """The reading could not run, for a reason that says nothing about the release."""
+
+
+class ReadingConfigurationError(Exception):
+    """The credentials or the configuration of the reading are wrong, so no release can be read."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +164,10 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
     :param client: The client of the Claude API.
     :param release: The release.
     :param base: The accepted version it is read against; None for a full read.
-    :raises ReadingUnavailableError: The API could not be used; the release is read again later.
+    :raises ReadingUnavailableError: The API could not be used for now; the release is read again
+        later.
+    :raises ReadingConfigurationError: The credentials could not be exchanged, or the API refused
+        the request for another reason than its size or its load.
     :raises ValueError: A provider folder holds no valid manifest.
     :raises OSError: A provider folder cannot be read.
     """
@@ -225,11 +197,17 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
         return Reading(Verdict.HOLD, reason=TOO_LARGE)
     try:
         response = client.messages.create(**request)
+    except (anthropic.WorkloadIdentityError, anthropic.CredentialsError) as err:
+        msg = f"the credentials of the API could not be exchanged: {err}"
+        raise ReadingConfigurationError(msg) from err
     except anthropic.APIStatusError as err:
         if err.status_code == _TOO_LARGE_STATUS:
             return Reading(Verdict.HOLD, reason=TOO_LARGE)
-        msg = f"the API answered {err.status_code}"
-        raise ReadingUnavailableError(msg) from err
+        if err.status_code in _TRANSIENT_STATUSES or err.status_code >= _SERVER_ERRORS:
+            msg = f"the API answered {err.status_code}"
+            raise ReadingUnavailableError(msg) from err
+        msg = f"the API refused the request: {err.message}"
+        raise ReadingConfigurationError(msg) from err
     except anthropic.APIConnectionError as err:
         msg = "the API could not be reached"
         raise ReadingUnavailableError(msg) from err
@@ -337,6 +315,60 @@ def system_prompt() -> str:
     instructions = (INSTRUCTIONS_FOLDER / "instructions.md").read_text(encoding="utf-8")
     rules = (INSTRUCTIONS_FOLDER / "rules.md").read_text(encoding="utf-8")
     return f"{instructions}\n# The rules of the community catalog\n\n{rules}"
+
+
+def identity_token_provider(github: GitHub, request_url: str) -> Callable[[], str]:
+    """
+    Return what fetches a new identity token of the workflow job for the API, at every call.
+
+    An identity token of GitHub lives about five minutes and can be exchanged once, while the
+    client exchanges one for every token of the API it needs, so none is kept.
+
+    :param github: A client with the token the job requests its identity tokens with.
+    :param request_url: The address the job requests its identity tokens at.
+    """
+
+    def fetch() -> str:
+        try:
+            return github.id_token(request_url, AUDIENCE)
+        except OSError as err:
+            # an error of the credentials: the client would take any other error for a lost
+            # connection, which leaves the release pending
+            msg = f"no identity token of the workflow job: {err}"
+            raise anthropic.CredentialsError(msg) from err
+
+    return fetch
+
+
+def federated_client(
+    identity_token: Callable[[], str],
+    *,
+    organization_id: str,
+    federation_rule_id: str,
+    service_account_id: str,
+    workspace_id: str,
+    http_client: httpx2.Client | None = None,
+) -> anthropic.Anthropic:
+    """
+    Return a client of the API that authenticates by workload identity federation, without a key.
+
+    :param identity_token: Returns a new identity token of the workflow job at every call.
+    :param organization_id: The organization of the API.
+    :param federation_rule_id: The federation rule that accepts the identity token.
+    :param service_account_id: The service account the client acts as.
+    :param workspace_id: The workspace the requests are billed to.
+    :param http_client: What sends the requests, also those that exchange the identity token; the
+        client's own when None.
+    """
+    credentials = anthropic.WorkloadIdentityCredentials(
+        identity_token_provider=identity_token,
+        federation_rule_id=federation_rule_id,
+        organization_id=organization_id,
+        service_account_id=service_account_id,
+        workspace_id=workspace_id,
+        http_client=http_client,
+    )
+    return anthropic.Anthropic(credentials=credentials, http_client=http_client)
 
 
 def _verdict(response: Message, changes: list[FileChange]) -> Reading:

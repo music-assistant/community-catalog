@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
+import urllib.request
 import zlib
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, cast
 
 import anthropic
 import httpx2
@@ -15,9 +17,11 @@ from anthropic.types import Message
 from registry import reading as reading_module
 from registry.cli import main
 from registry.content import unpack
-from registry.models import Verdict
+from registry.github import GitHub
+from registry.models import Reading, ReadingFinding, Rule, Verdict
 from registry.reading import (
     ANSWER_SCHEMA,
+    AUDIENCE,
     CUT_OFF,
     EFFORT,
     INSTRUCTIONS_FOLDER,
@@ -28,13 +32,13 @@ from registry.reading import (
     REFUSED,
     TOO_LARGE,
     UNREADABLE,
-    Reading,
-    ReadingFinding,
+    ReadingConfigurationError,
     ReadingUnavailableError,
-    Rule,
     Side,
     Status,
     compare_folders,
+    federated_client,
+    identity_token_provider,
     read_release,
     system_prompt,
 )
@@ -45,6 +49,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 FOLDER = f"providers/{DOMAIN}"
+# where a workflow job requests its identity tokens
+REQUEST_URL = "https://pipelines.actions.githubusercontent.com/abc/idtoken?api-version=2.0"
 
 
 def _png(data: bytes = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02\x00\x00\x00") -> bytes:
@@ -149,6 +155,75 @@ class FakeClient:
         return self.answer
 
 
+class FakeTokenService:
+    """Where a workflow job requests its identity tokens, as a transport of the GitHub client."""
+
+    def __init__(self, status: int = 200, answer: Any = None) -> None:
+        """
+        Return a service that answers every request the same, or with a new token each.
+
+        :param status: The status of each answer.
+        :param answer: The JSON of each answer; None for a new identity token each time.
+        """
+        self.status = status
+        self.answer = answer
+        self.requests: list[urllib.request.Request] = []
+
+    def __call__(self, request: urllib.request.Request) -> tuple[int, BinaryIO]:
+        """Answer a request."""
+        self.requests.append(request)
+        answer = self.answer if self.answer is not None else {"value": f"jwt-{len(self.requests)}"}
+        return self.status, io.BytesIO(json.dumps(answer).encode())
+
+
+class FakeAPI:
+    """The token exchange and the messages of the Claude API, as a transport of httpx2."""
+
+    def __init__(self, exchange: int = 200, messages: int = 200, lifetime: int = 600) -> None:
+        """
+        Return an API that answers with these statuses, and a pass to each message.
+
+        :param exchange: The status of each token exchange.
+        :param messages: The status of each request for a message.
+        :param lifetime: How many seconds a token of the API lives.
+        """
+        self.exchange = exchange
+        self.messages = messages
+        self.lifetime = lifetime
+        self.exchanges: list[dict[str, Any]] = []
+        self.requests: list[httpx2.Request] = []
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        """Answer a request."""
+        if request.url.path == "/v1/oauth/token":
+            self.exchanges.append(json.loads(request.content))
+            if self.exchange != 200:
+                return httpx2.Response(self.exchange, json={"error": "invalid_grant"})
+            token = {
+                "access_token": f"token-{len(self.exchanges)}",
+                "expires_in": self.lifetime,
+                "token_type": "Bearer",
+            }
+            return httpx2.Response(200, json=token)
+        self.requests.append(request)
+        if self.messages != 200:
+            # tried again by the client at once
+            error = {"type": "error", "error": {"type": "authentication_error", "message": "no"}}
+            return httpx2.Response(self.messages, headers={"retry-after-ms": "1"}, json=error)
+        return httpx2.Response(200, json=_message(PASS).model_dump(mode="json"))
+
+    def client(self, service: FakeTokenService) -> anthropic.Anthropic:
+        """Return the client of the read step, with the identity tokens of a token service."""
+        return federated_client(
+            identity_token_provider(GitHub("request-token", service), REQUEST_URL),
+            organization_id="organization",
+            federation_rule_id="fdrl_rule",
+            service_account_id="svac_account",
+            workspace_id="wrkspc_workspace",
+            http_client=httpx2.Client(transport=httpx2.MockTransport(self)),
+        )
+
+
 def _message(
     text: str | dict[str, Any], stop_reason: str = "end_turn", extra: Sequence[dict[str, Any]] = ()
 ) -> Message:
@@ -188,11 +263,11 @@ def _folder(tmp_path: Path, name: str, files: dict[str, bytes]) -> Path:
 
 def _read(
     tmp_path: Path,
-    client: FakeClient,
+    client: FakeClient | anthropic.Anthropic,
     release: dict[str, bytes] = RELEASE,
     base: dict[str, bytes] | None = BASE,
 ) -> Reading:
-    """Read a release against a base with the fake client."""
+    """Read a release against a base with a client, the fake one or one with a fake API."""
     return read_release(
         cast("anthropic.Anthropic", client),
         Side(_folder(tmp_path, "release", release), "1.1.0", "https://github.com/a/b/commit/2"),
@@ -598,19 +673,119 @@ def test_a_finding_on_a_whole_file_not_shown(tmp_path: Path) -> None:
         anthropic.APITimeoutError(
             request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
         ),
+        _status_error(anthropic.RequestTimeoutError, 408),
+        _status_error(anthropic.ConflictError, 409),
         _status_error(anthropic.RateLimitError, 429),
         _status_error(anthropic.InternalServerError, 500),
         _status_error(anthropic.OverloadedError, 529),
-        _status_error(anthropic.AuthenticationError, 401),
-        _status_error(anthropic.PaymentRequiredError, 402),
-        _status_error(anthropic.BadRequestError, 400),
     ],
-    ids=["connection", "timeout", "429", "500", "529", "401", "402", "400"],
+    ids=["connection", "timeout", "408", "409", "429", "500", "529"],
 )
 def test_a_failure_of_the_api_leaves_the_release_pending(tmp_path: Path, error: Exception) -> None:
     """A failure that says nothing about the release gives no verdict: it is read again later."""
     with pytest.raises(ReadingUnavailableError):
         _read(tmp_path, FakeClient(error))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        anthropic.WorkloadIdentityError("Token exchange failed (HTTP 401)", status_code=401),
+        anthropic.CredentialsError("no identity token of the workflow job"),
+        _status_error(anthropic.BadRequestError, 400),
+        _status_error(anthropic.AuthenticationError, 401),
+        _status_error(anthropic.PaymentRequiredError, 402),
+        _status_error(anthropic.PermissionDeniedError, 403),
+        _status_error(anthropic.NotFoundError, 404),
+        _status_error(anthropic.UnprocessableEntityError, 422),
+    ],
+    ids=["exchange", "identity-token", "400", "401", "402", "403", "404", "422"],
+)
+def test_a_fault_of_the_credentials_or_the_request_gives_no_verdict(
+    tmp_path: Path, error: Exception
+) -> None:
+    """A failed exchange, or a request the API refuses for its own sake, is a fault, no pending."""
+    with pytest.raises(ReadingConfigurationError):
+        _read(tmp_path, FakeClient(error))
+
+
+def test_every_call_requests_a_new_identity_token() -> None:
+    """An identity token of the job can be exchanged once, so each call requests a new one."""
+    service = FakeTokenService()
+    fetch = identity_token_provider(GitHub("request-token", service), REQUEST_URL)
+
+    assert [fetch(), fetch()] == ["jwt-1", "jwt-2"]
+
+    assert AUDIENCE == "https://api.anthropic.com"
+    for request in service.requests:
+        assert request.full_url == f"{REQUEST_URL}&audience=https%3A%2F%2Fapi.anthropic.com"
+        assert request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer request-token"
+        assert request.get_header("Accept") == "application/json"
+
+
+@pytest.mark.parametrize(
+    ("status", "answer"),
+    [(500, {"message": "down"}), (200, {"count": 1}), (200, {"value": ""}), (200, ["jwt"])],
+    ids=["error", "no-value", "empty", "no-object"],
+)
+def test_no_identity_token_is_a_fault_of_the_credentials(status: int, answer: Any) -> None:
+    """Without an identity token the client gets an error of the credentials, no lost connection."""
+    fetch = identity_token_provider(
+        GitHub("request-token", FakeTokenService(status, answer)), REQUEST_URL
+    )
+
+    with pytest.raises(anthropic.CredentialsError, match="no identity token of the workflow job"):
+        fetch()
+
+
+def test_the_client_exchanges_a_new_identity_token_for_each_token(tmp_path: Path) -> None:
+    """Each token of the API costs one new identity token, and no key of the API is sent."""
+    api, service = FakeAPI(lifetime=10), FakeTokenService()
+    client = api.client(service)
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+
+    readings = [_read(tmp_path / "one", client), _read(tmp_path / "two", client)]
+
+    assert [reading.verdict for reading in readings] == [Verdict.PASS, Verdict.PASS]
+    # a token of ten seconds is exchanged again before the next request
+    assert [exchange["assertion"] for exchange in api.exchanges] == ["jwt-1", "jwt-2"]
+    assert {key: api.exchanges[0][key] for key in api.exchanges[0] if key != "assertion"} == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "federation_rule_id": "fdrl_rule",
+        "organization_id": "organization",
+        "service_account_id": "svac_account",
+        "workspace_id": "wrkspc_workspace",
+    }
+    assert [request.headers["authorization"] for request in api.requests] == [
+        "Bearer token-1",
+        "Bearer token-2",
+    ]
+    assert not any("x-api-key" in request.headers for request in api.requests)
+
+
+def test_a_failed_exchange_stops_the_reading(tmp_path: Path) -> None:
+    """The client tries a refused exchange once more, with a new identity token, then fails."""
+    api, service = FakeAPI(exchange=401), FakeTokenService()
+
+    with pytest.raises(ReadingConfigurationError, match="could not be exchanged"):
+        _read(tmp_path, api.client(service))
+
+    assert [exchange["assertion"] for exchange in api.exchanges] == ["jwt-1", "jwt-2"]
+    assert api.requests == []
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_token_the_api_refuses_stops_the_reading(tmp_path: Path, status: int) -> None:
+    """A refused token is exchanged again once; a token the API still refuses is a fault."""
+    api, service = FakeAPI(messages=status), FakeTokenService()
+
+    with pytest.raises(ReadingConfigurationError, match=f"Error code: {status}"):
+        _read(tmp_path, api.client(service))
+
+    assert len(api.exchanges) == (2 if status == 401 else 1)
+    assert len(service.requests) == len(api.exchanges)
 
 
 def test_a_request_too_large_for_the_api_is_a_hold(tmp_path: Path) -> None:
