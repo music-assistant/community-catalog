@@ -145,7 +145,7 @@ def build_reports(
         ids = (provider.file.repository_id, provider.file.owner_id)
         report = ProviderReport(
             domain=domain,
-            title=_title(provider),
+            subject=_subject(provider),
             maintainers=provider.maintainers()[:MAX_MENTIONS],
             failures=[],
             newest=newest,
@@ -276,7 +276,10 @@ def post_report(
                 f"\n\n{mentions}\n"
             )
         )
-        return github.create_issue(repository, report.title, body, [LABEL])
+        # the checks did not fail when only the reading held a release
+        held = all(failure.key.startswith("hold ") for failure in new)
+        outcome = "a release needs a closer look" if held else "release checks failed"
+        return github.create_issue(repository, f"{report.subject}: {outcome}", body, [LABEL])
     if new:
         body = _fit(lambda room: f"{_marker_line(report.domain, new)}\n{_failures(new, room)}")
         github.add_comment(repository, issue.number, body)
@@ -467,14 +470,14 @@ def _repository_failure(provider: Provider, repository_id: int, owner_id: int) -
     )
 
 
-def _title(provider: Provider) -> str:
-    """Return the title of an issue: the name of the newest manifest when plain, and the domain."""
+def _subject(provider: Provider) -> str:
+    """Return what a title names: the name of the newest manifest when plain, and the domain."""
     domain = provider.file.domain
     highest = max(provider.versions, key=version_key, default=None)
     name = provider.versions[highest].manifest.get("name") if highest is not None else None
     if isinstance(name, str) and name == name.strip() and _TITLE_NAME.fullmatch(name):
-        return f"{name} ({domain}): release checks failed"
-    return f"{domain}: release checks failed"
+        return f"{name} ({domain})"
+    return domain
 
 
 def _fit(render: Callable[[int], str]) -> str:

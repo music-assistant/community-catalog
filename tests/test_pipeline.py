@@ -478,7 +478,7 @@ def test_reports_for_failures_and_refusals(files: Files) -> None:
         fetched=_fetched(refused=True),
     )
 
-    assert report.title == "Sample music (sample_music): release checks failed"
+    assert report.subject == "Sample music (sample_music)"
     assert [failure.key for failure in report.failures] == [
         "refused 2.0.0",
         "check 1.0.0 nightly",
@@ -883,6 +883,50 @@ def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> No
     # the rules of the catalog, not the safety of the code
     assert not any(word in body.lower() for word in ("security", "vulnerability", "vulnerable"))
     assert _mentions(body) == ["someone"]
+
+
+def test_an_issue_of_only_holds_says_a_release_needs_a_closer_look(files: Files) -> None:
+    """The checks did not fail when only the reading held a release: the title says so."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+
+    _night(files, github, readings=[_reading("1.0.0")])
+
+    [(_, created)] = github.created
+    assert created["title"] == "Sample music (sample_music): a release needs a closer look"
+
+
+def test_an_issue_of_a_hold_and_a_failed_check_says_the_checks_failed(files: Files) -> None:
+    """A hold next to another failure keeps the title of failed checks."""
+    files.provider()
+    files.version("1.0.0", channels={})
+    github = FakeGitHub()
+
+    _night(
+        files,
+        github,
+        ("nightly", _result("1.0.0", "load: broken")),
+        readings=[_reading("1.0.0")],
+    )
+
+    [(_, created)] = github.created
+    assert "hold 1.0.0" in created["body"].split("\n", 1)[0]
+    assert created["title"] == "Sample music (sample_music): release checks failed"
+
+
+def test_the_title_of_only_holds_names_the_domain_for_a_name_that_is_not_plain(
+    files: Files,
+) -> None:
+    """A manifest name with a mention, as for failed checks, leaves the domain alone."""
+    files.provider()
+    files.version("1.0.0", manifest={**manifest(DOMAIN, ["some-package==1.0"]), "name": "@evil"})
+    github = FakeGitHub()
+
+    _night(files, github, readings=[_reading("1.0.0")])
+
+    [(_, created)] = github.created
+    assert created["title"] == "sample_music: a release needs a closer look"
 
 
 def test_every_rule_has_plain_words() -> None:
