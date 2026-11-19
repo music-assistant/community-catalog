@@ -1,12 +1,12 @@
 {
   "channel": "nightly",
-  "generated": "2026-11-17T21:19:30Z",
+  "generated": "2026-11-19T03:24:33Z",
   "providers": {
     "audd_local_recognizer": {
       "added": "2026-11-17T18:53:40Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#1f2937\" stroke-width=\"1.5\" stroke-linecap=\"round\">\n  <circle cx=\"9\" cy=\"12\" r=\"7.5\"/>\n  <circle cx=\"9\" cy=\"12\" r=\"4.5\" stroke-opacity=\"0.45\"/>\n  <circle cx=\"9\" cy=\"12\" r=\"1.4\" fill=\"#1f2937\"/>\n  <path d=\"M18.5 10v4M21 7.5v9M23 10.5v3\" stroke=\"#2563eb\" stroke-width=\"1.6\"/>\n</svg>\n",
-      "latest": "0.6.0",
+      "latest": "0.8.0",
       "maintainers": [
         "ChrisMisker"
       ],
@@ -35,6 +35,15 @@
           "content_hash": "85204aab14785b2c04329ab4e2eb046f707c945876d533aae2980327a6a004d1",
           "folder": "audd_local_recognizer",
           "released": "2026-11-17T18:49:50Z",
+          "requirements": [
+            "audalign==1.3.2"
+          ]
+        },
+        "0.8.0": {
+          "commit": "5f5f71d4b8bc1972059029175776602823219199",
+          "content_hash": "339ac099685addc13416d346a5f90e68f996830d96c06d2d92f43db9cf9eb790",
+          "folder": "audd_local_recognizer",
+          "released": "2026-11-18T14:57:15Z",
           "requirements": [
             "audalign==1.3.2"
           ]
