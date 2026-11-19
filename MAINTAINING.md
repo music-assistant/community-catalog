@@ -21,8 +21,7 @@ The exact rules a provider and its releases meet; the checks name the one that f
 
 - The repository is public, not archived, and has an open source licence GitHub recognises.
 - The provider is in a folder named after its domain, named `provider`, or `providers/<domain>`.
-  The domain folder is what lets a server in development mode, the test fixture and the Dev app
-  import it.
+  A server in development mode, the test fixture and the Dev app load all three.
 - The domain is free: not in `reserved_domains.json` (see [Reserved domains](#reserved-domains))
   and not a folder in `providers/`.
 - The `manifest.json` is plain JSON the server reads (no `NaN` or `Infinity`, no key twice), at
