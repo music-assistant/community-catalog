@@ -344,7 +344,7 @@ def test_read_authenticates_by_federation(files: Files, monkeypatch: pytest.Monk
     for name, value in ENVIRONMENT.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(anthropic, "WorkloadIdentityCredentials", credentials)
-    monkeypatch.setattr(anthropic, "Anthropic", lambda **kwargs: VersionClient({}))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda **_: VersionClient({}))
     monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, service))
 
     assert main(["--root", str(files.root), "read"]) == 0
