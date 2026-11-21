@@ -1,0 +1,53 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-21T00:08:56Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-21T00:08:43Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-21T00:08:42Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "ab5e3f99e8060c892c325ac546c4ee618df9d95b",
+  "content_hash": "ca77d99225d51a070eb004b3a22c5ea93a1c0c38ad8ae1836ca8b146974638bc",
+  "folder": "mynoise",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" id=\"logos\" viewBox=\"0 0 250 250\" width=\"250\" height=\"250\"><defs>\n    <style>\n      .cls-1 {\n        fill: #fff;\n      }\n\n      .cls-2 {\n        fill: #ff5532;\n      }\n    </style>\n  </defs><circle class=\"cls-2\" cx=\"125\" cy=\"125\" r=\"125\"></circle><rect class=\"cls-1\" x=\"55\" y=\"112\" width=\"20\" height=\"80\" rx=\"10\" ry=\"10\"></rect><rect class=\"cls-1\" x=\"95\" y=\"77\" width=\"20\" height=\"115\" rx=\"10\" ry=\"10\"></rect><rect class=\"cls-1\" x=\"135\" y=\"40\" width=\"20\" height=\"152\" rx=\"10\" ry=\"10\"></rect><rect class=\"cls-1\" x=\"175\" y=\"94\" width=\"20\" height=\"98\" rx=\"10\" ry=\"10\"></rect></svg>\n",
+  "manifest": {
+    "codeowners": [
+      "@eyecreate"
+    ],
+    "credits": [
+      "Please support myNoise and [donate](https://mynoise.net/donate.php)"
+    ],
+    "description": "Stream the noise machines of myNoise.net as endless, looping soundscapes.",
+    "documentation": "https://github.com/eyecreate/music-assistant-mynoise#readme",
+    "domain": "mynoise",
+    "icon": "mdi-waves",
+    "multi_instance": false,
+    "name": "myNoise",
+    "provides": [
+      "radio"
+    ],
+    "requirements": [],
+    "stage": "beta",
+    "support_url": "https://github.com/eyecreate/music-assistant-mynoise/issues",
+    "type": "music"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-21T00:09:32Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-20T16:29:11Z",
+  "requirements": [],
+  "tag": "1.0.0",
+  "version": "1.0.0"
+}

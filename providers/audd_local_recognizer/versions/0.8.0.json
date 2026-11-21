@@ -1,7 +1,17 @@
 {
   "checks": {
+    "2.11": {
+      "checked": "2026-11-21T00:08:42Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-21T00:08:26Z",
+      "passed": true,
+      "reason": null
+    },
     "nightly": {
-      "checked": "2026-11-20T03:24:23Z",
+      "checked": "2026-11-21T00:08:26Z",
       "passed": true,
       "reason": null
     }

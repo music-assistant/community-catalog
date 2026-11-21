@@ -1,0 +1,49 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-21T00:08:50Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-21T00:08:36Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-21T00:08:35Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "9b0927b3c718486d9bfe4750c97d064894591f05",
+  "content_hash": "48947e120298eb91ba4ddeefe06aefd5457b7ca887b6fbeeaaba3b85a9ca1ab1",
+  "folder": "multichannel_audio",
+  "icon_svg": null,
+  "manifest": {
+    "codeowners": [
+      "@iVolt1"
+    ],
+    "description": "Play 5.1/7.1 surround audio through a multichannel PulseAudio sink (e.g. Creative X-Fi, HD Audio surround cards).",
+    "documentation": "https://github.com/iVolt1/ma-multichannel-audio#readme",
+    "domain": "multichannel_audio",
+    "multi_instance": false,
+    "name": "Multichannel Audio Out",
+    "requirements": [
+      "numpy==2.3.5"
+    ],
+    "stage": "experimental",
+    "type": "player"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-21T00:09:26Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-20T17:37:10Z",
+  "requirements": [
+    "numpy==2.3.5"
+  ],
+  "tag": "v0.1.0",
+  "version": "0.1.0"
+}
