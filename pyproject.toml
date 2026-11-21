@@ -9,7 +9,7 @@ license = "Apache-2.0"
 requires-python = ">=3.14"
 dependencies = [
   "anthropic==2.10.0",
-  "mashumaro==3.22",
+  "mashumaro==3.23",
   "orjson==3.13.0",
 ]
 
