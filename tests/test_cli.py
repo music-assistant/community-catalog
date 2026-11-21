@@ -550,7 +550,7 @@ def test_an_index_beyond_the_limit_is_refused(
     monkeypatch.setattr("registry.index.MAX_INDEX_SIZE", 1000)
 
     assert _run(files, "build") == 1
-    assert "site/v1/nightly.json: 1223 bytes, more than" in capsys.readouterr().err
+    assert "site/v1/nightly.json: 1195 bytes, more than" in capsys.readouterr().err
     assert _run(files, "validate") == 1
     assert "more than the 1000 bytes a server is sure to download" in capsys.readouterr().err
 

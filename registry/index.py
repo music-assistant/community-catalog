@@ -36,7 +36,6 @@ def build_index(registry: Registry, channel: str, generated: str) -> CatalogInde
     return CatalogIndex(
         schema=INDEX_SCHEMA,
         channel=channel,
-        server_line=channel,
         generated=generated,
         providers={
             domain: _index_provider(provider, channel)

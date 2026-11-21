@@ -155,8 +155,6 @@ Each `site/v1/<channel>.json` holds, for every provider with at least one versio
 - the manifest and icon of `latest`; when no version passed for this channel, those of the
   highest version that is not blocked, or of the highest version when all are blocked.
 
-It names its channel twice, as `channel` and as `server_line`: some servers read only the second.
-
 Blocked and withdrawn providers stay in the index with their versions, so a server recognises
 what it has installed. The output is deterministic: an unchanged registry gives byte-identical
 files, and `generated` changes only when the content of that index changes.
