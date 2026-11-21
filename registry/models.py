@@ -449,7 +449,5 @@ class CatalogIndex(DataClassDictMixin):
 
     schema: int
     channel: str
-    # the channel again, for the servers that read it under this name only
-    server_line: str
     generated: str
     providers: dict[str, IndexProvider]

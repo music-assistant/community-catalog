@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 NOW = datetime(2026, 11, 14, 8, 0, tzinfo=UTC)
 # the fields of CatalogIndex, IndexProvider and IndexVersion in
 # music_assistant/controllers/community_catalog/models.py of the server
-SERVER_INDEX_FIELDS = {"schema", "channel", "server_line", "generated", "providers"}
+SERVER_INDEX_FIELDS = {"schema", "channel", "generated", "providers"}
 SERVER_PROVIDER_FIELDS = {
     "status",
     "repository",
@@ -50,7 +50,7 @@ def test_index_has_the_shape_the_server_reads(files: Files) -> None:
 
     assert set(index) == SERVER_INDEX_FIELDS
     assert index["schema"] == 1
-    assert index["channel"] == index["server_line"] == "nightly"
+    assert index["channel"] == "nightly"
     provider = index["providers"][DOMAIN]
     assert set(provider) == SERVER_PROVIDER_FIELDS
     assert set(provider["versions"]["1.0.0"]) == SERVER_VERSION_FIELDS

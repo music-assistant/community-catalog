@@ -1,6 +1,6 @@
 {
   "channel": "2.11",
-  "generated": "2026-11-21T00:09:18Z",
+  "generated": "2026-11-21T13:47:07Z",
   "providers": {
     "audd_local_recognizer": {
       "added": "2026-11-17T18:53:40Z",
@@ -168,6 +168,5 @@
       }
     }
   },
-  "schema": 1,
-  "server_line": "2.11"
+  "schema": 1
 }
