@@ -1,12 +1,12 @@
 {
   "channel": "beta",
-  "generated": "2026-11-21T13:47:07Z",
+  "generated": "2026-11-22T03:24:40Z",
   "providers": {
     "audd_local_recognizer": {
       "added": "2026-11-17T18:53:40Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"#1f2937\" stroke-width=\"1.5\" stroke-linecap=\"round\">\n  <circle cx=\"9\" cy=\"12\" r=\"7.5\"/>\n  <circle cx=\"9\" cy=\"12\" r=\"4.5\" stroke-opacity=\"0.45\"/>\n  <circle cx=\"9\" cy=\"12\" r=\"1.4\" fill=\"#1f2937\"/>\n  <path d=\"M18.5 10v4M21 7.5v9M23 10.5v3\" stroke=\"#2563eb\" stroke-width=\"1.6\"/>\n</svg>\n",
-      "latest": "0.8.0",
+      "latest": "0.9.0",
       "maintainers": [
         "ChrisMisker"
       ],
@@ -14,7 +14,7 @@
         "codeowners": [
           "@ChrisMisker"
         ],
-        "description": "Recognizes music on live audio sources such as a turntable. Known tracks are recognized locally from fingerprints it learns; unknown tracks are identified by sending a short sample to AudD (a paid service, API token required).",
+        "description": "Recognizes music on live audio sources such as a turntable. Known tracks are recognized locally from fingerprints it learns; unknown tracks are identified by sending a short sample to AudD (a paid service with a free trial; API token required).",
         "documentation": "https://github.com/ChrisMisker/music-assistant-audd-local-recognizer#readme",
         "domain": "audd_local_recognizer",
         "multi_instance": false,
@@ -44,6 +44,15 @@
           "content_hash": "339ac099685addc13416d346a5f90e68f996830d96c06d2d92f43db9cf9eb790",
           "folder": "audd_local_recognizer",
           "released": "2026-11-18T14:57:15Z",
+          "requirements": [
+            "audalign==1.3.2"
+          ]
+        },
+        "0.9.0": {
+          "commit": "7995e2c0a9df86ee61798ece37af27192a132164",
+          "content_hash": "f24b8118162afe9cc88ec5adde585d3196e33e8e9781fd753b5642f4d3870a41",
+          "folder": "audd_local_recognizer",
+          "released": "2026-11-21T19:38:22Z",
           "requirements": [
             "audalign==1.3.2"
           ]
