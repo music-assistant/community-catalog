@@ -1,6 +1,6 @@
 {
   "channel": "beta",
-  "generated": "2026-11-22T03:24:40Z",
+  "generated": "2026-11-24T03:25:50Z",
   "providers": {
     "audd_local_recognizer": {
       "added": "2026-11-17T18:53:40Z",
@@ -63,7 +63,7 @@
       "added": "2026-11-20T17:40:56Z",
       "blocked_versions": {},
       "icon_svg": null,
-      "latest": "0.1.0",
+      "latest": "0.1.1",
       "maintainers": [
         "iVolt1"
       ],
@@ -77,7 +77,7 @@
         "multi_instance": false,
         "name": "Multichannel Audio Out",
         "requirements": [
-          "numpy==2.3.5"
+          "numpy>=2.3"
         ],
         "stage": "experimental",
         "type": "player"
@@ -94,6 +94,15 @@
           "released": "2026-11-20T17:37:10Z",
           "requirements": [
             "numpy==2.3.5"
+          ]
+        },
+        "0.1.1": {
+          "commit": "902195ae6b66a413ecfd98f3cd7fd1e2d3098b1b",
+          "content_hash": "010f99d8b0a279cb6e5d9decf1dd372c6907b8b327c3afb1726040a634594210",
+          "folder": "multichannel_audio",
+          "released": "2026-11-23T13:35:07Z",
+          "requirements": [
+            "numpy>=2.3"
           ]
         }
       }
