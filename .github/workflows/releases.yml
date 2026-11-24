@@ -8,7 +8,9 @@ name: Releases
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    # after the nightly of the server, so the nightly channel is checked on tonight's image
+    - cron: "17 6 * * *"
+      timezone: "Europe/Amsterdam"
   workflow_dispatch:
 
 permissions: {}
