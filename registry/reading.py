@@ -2,7 +2,7 @@
 The reading of a release against the rules of the community catalog, by Claude.
 
 The provider's files are a stranger's data. The model gets them in one message, without tools,
-and answers in a fixed shape that the code checks; anything unexpected is a hold.
+and answers in a fixed shape that the code checks; an answer that does not fit it is not used.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ UNREADABLE = "it holds binary code or data the reading cannot read"
 TOO_LARGE = "the change is larger than the reading takes"
 REFUSED = "the reading was refused"
 CUT_OFF = "the answer of the reading was cut off"
-INVALID_ANSWER = "the answer of the reading is invalid"
 
 _CODE_SUFFIXES = frozenset({".so", ".pyd", ".dll", ".dylib", ".exe", ".whl", ".jar", ".zip"})
 # built web assets, which run in the browser and not in the server
@@ -164,8 +163,8 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
     :param client: The client of the Claude API.
     :param release: The release.
     :param base: The accepted version it is read against; None for a full read.
-    :raises ReadingUnavailableError: The API could not be used for now; the release is read again
-        later.
+    :raises ReadingUnavailableError: The API could not be used for now, or its answer is not
+        valid; the release is read again later.
     :raises ReadingConfigurationError: The credentials could not be exchanged, or the API refused
         the request for another reason than its size or its load.
     :raises ValueError: A provider folder holds no valid manifest.
@@ -373,51 +372,73 @@ def federated_client(
 
 def _verdict(response: Message, changes: list[FileChange]) -> Reading:
     """
-    Return the reading the answer of the model gives, or a hold when the answer is not valid.
+    Return the reading the answer of the model gives.
 
     :param response: The answer of the API.
     :param changes: The files the model was shown.
+    :raises ReadingUnavailableError: The answer is not valid, which says nothing about the release.
     """
     if response.stop_reason == "refusal":
         return Reading(Verdict.HOLD, reason=REFUSED)
     if response.stop_reason in {"max_tokens", "model_context_window_exceeded"}:
         return Reading(Verdict.HOLD, reason=CUT_OFF)
+    if response.stop_reason != "end_turn":
+        raise _invalid("it did not end")
     texts = [block.text for block in response.content if block.type == "text"]
     others = [block for block in response.content if block.type not in {"text", "thinking"}]
-    if response.stop_reason != "end_turn" or len(texts) != 1 or others:
-        return Reading(Verdict.HOLD, reason=INVALID_ANSWER)
+    if len(texts) != 1 or others:
+        raise _invalid("it is not one text")
     try:
         answer = parse_model(texts[0].encode(), ReadingAnswer)
     except ValueError:
-        return Reading(Verdict.HOLD, reason=INVALID_ANSWER)
-    if not _consistent(answer, {change.path: change for change in changes}):
-        return Reading(Verdict.HOLD, reason=INVALID_ANSWER)
+        raise _invalid("it is not in the answer format") from None
+    if flaw := _flaw(answer, {change.path: change for change in changes}):
+        raise _invalid(flaw)
     return Reading(answer.verdict, findings=answer.findings, summary=answer.summary)
 
 
-def _consistent(answer: ReadingAnswer, changes: dict[str, FileChange]) -> bool:
-    """
-    Return whether an answer holds together: a pass without findings, a hold with them.
+def _invalid(flaw: str) -> ReadingUnavailableError:
+    """Return the error for an answer that is not valid, naming its flaw."""
+    return ReadingUnavailableError(f"the answer of the reading is not valid: {flaw}")
 
-    Every finding names a file of the file table, and a line the model was shown of it.
+
+def _flaw(answer: ReadingAnswer, changes: dict[str, FileChange]) -> str | None:
+    """
+    Return what keeps an answer from holding together, or None when it does.
+
+    A pass has no findings and a hold has some. Every finding names a file of the file table,
+    and a line the model was shown of it. The flaw is in words of our own, with nothing of the
+    answer.
 
     :param answer: The answer of the model.
     :param changes: The files the model was shown, by path.
     """
-    if (answer.verdict is Verdict.PASS) != (not answer.findings):
-        return False
+    if answer.verdict is Verdict.PASS and answer.findings:
+        return "a pass with findings"
+    if answer.verdict is not Verdict.PASS and not answer.findings:
+        return "a hold without findings"
     if len(answer.summary) > MAX_SUMMARY:
-        return False
+        return "the summary is too long"
     for finding in answer.findings:
-        if (change := changes.get(finding.file)) is None:
-            return False
-        if finding.line is not None and not any(
-            finding.line in lines for lines in change.shown_lines
-        ):
-            return False
-        if len(finding.explanation) > MAX_EXPLANATION:
-            return False
-    return True
+        if flaw := _finding_flaw(finding, changes):
+            return flaw
+    return None
+
+
+def _finding_flaw(finding: ReadingFinding, changes: dict[str, FileChange]) -> str | None:
+    """
+    Return what is wrong with a finding of the model, or None when it is sound.
+
+    :param finding: The finding.
+    :param changes: The files the model was shown, by path.
+    """
+    if len(finding.explanation) > MAX_EXPLANATION:
+        return "an explanation is too long"
+    if (change := changes.get(finding.file)) is None:
+        return "a finding is on a file that is not in the file table"
+    if finding.line is not None and not any(finding.line in lines for lines in change.shown_lines):
+        return "a finding is on a line that was not shown"
+    return None
 
 
 def _files(folder: Path) -> dict[str, bytes]:

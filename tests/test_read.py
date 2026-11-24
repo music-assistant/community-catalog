@@ -264,26 +264,28 @@ def test_a_fault_fails_the_command_and_records_nothing_for_its_version(
 
 
 @pytest.mark.parametrize(
-    "error",
+    "answer",
     [
         anthropic.APIConnectionError(request=_REQUEST),
         anthropic.APITimeoutError(request=_REQUEST),
         _status_error(anthropic.RateLimitError, 429),
         _status_error(anthropic.InternalServerError, 500),
+        _message("not JSON"),
+        _message({**HOLD, "summary": "x" * 601}),
     ],
-    ids=["connection", "timeout", "429", "500"],
+    ids=["connection", "timeout", "429", "500", "malformed-answer", "inconsistent-answer"],
 )
-def test_a_failure_of_the_api_leaves_the_version_for_another_night(
+def test_a_failure_of_the_api_or_an_invalid_answer_leaves_the_version_for_another_night(
     files: Files,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    error: Exception,
+    answer: Message | Exception,
 ) -> None:
     """The version stays without a verdict, and the next one is read all the same."""
     files.provider()
     _version(files, "1.0.0", "2026-11-01T12:00:00Z")
     _version(files, "1.1.0", "2026-11-02T12:00:00Z")
-    client = VersionClient({"1.1.0": error, "1.0.0": _message(HOLD)})
+    client = VersionClient({"1.1.0": answer, "1.0.0": _message(HOLD)})
 
     assert _read(files, monkeypatch, client) == 0
 
