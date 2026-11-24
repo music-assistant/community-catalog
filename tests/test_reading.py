@@ -25,7 +25,6 @@ from registry.reading import (
     CUT_OFF,
     EFFORT,
     INSTRUCTIONS_FOLDER,
-    INVALID_ANSWER,
     MAX_REQUEST,
     MAX_TOKENS,
     MODEL,
@@ -283,6 +282,27 @@ def _status_error(kind: type[anthropic.APIStatusError], status: int) -> anthropi
     return kind("error", response=httpx2.Response(status, request=request), body=None)
 
 
+def _assert_not_valid(tmp_path: Path, message: Message, flaw: str) -> None:
+    """Assert that reading with this answer leaves the release pending, for this flaw."""
+    with pytest.raises(ReadingUnavailableError) as raised:
+        _read(tmp_path, FakeClient(message))
+
+    assert str(raised.value) == f"the answer of the reading is not valid: {flaw}"
+
+
+def _read_long_file(tmp_path: Path, line: int | None) -> Reading:
+    """Read a file changed on line 15, with a finding on a line of it."""
+    code = [f"line_{number} = {number}\n".encode() for number in range(1, 21)]
+    changed = [*code[:14], b"line_15 = 'changed'\n", *code[15:]]
+    answer = {**HOLD, "findings": [{**FINDING, "file": "long.py", "line": line}]}
+    return _read(
+        tmp_path,
+        FakeClient(_message(answer)),
+        release={**RELEASE, "long.py": b"".join(changed)},
+        base={**BASE, "long.py": b"".join(code)},
+    )
+
+
 def test_changes_between_two_archives(tmp_path: Path) -> None:
     """Added, changed and removed files are listed; only text written by people is shown."""
     changes = {
@@ -535,16 +555,23 @@ def test_a_hold(tmp_path: Path) -> None:
         ("refusal", REFUSED),
         ("max_tokens", CUT_OFF),
         ("model_context_window_exceeded", CUT_OFF),
-        ("pause_turn", INVALID_ANSWER),
     ],
 )
-def test_an_answer_that_did_not_finish_is_a_hold(
+def test_a_refused_or_cut_off_answer_is_a_hold(
     tmp_path: Path, stop_reason: str, reason: str
 ) -> None:
-    """A refusal or an answer that stopped early is a hold, whatever text it holds."""
+    """A refusal or an answer that was cut off is a hold, whatever text it holds."""
     reading = _read(tmp_path, FakeClient(_message(PASS, stop_reason)))
 
     assert reading == Reading(Verdict.HOLD, reason=reason)
+
+
+@pytest.mark.parametrize("stop_reason", ["pause_turn", "tool_use"])
+def test_an_answer_that_stopped_for_another_reason_leaves_the_release_pending(
+    tmp_path: Path, stop_reason: str
+) -> None:
+    """An answer that did not end its turn is not valid, whatever text it holds."""
+    _assert_not_valid(tmp_path, _message(PASS, stop_reason), "it did not end")
 
 
 @pytest.mark.parametrize(
@@ -570,13 +597,11 @@ def test_an_answer_that_did_not_finish_is_a_hold(
         "not-an-object",
     ],
 )
-def test_a_malformed_answer_is_a_hold(tmp_path: Path, answer: Any) -> None:
-    """An answer that is not exactly the answer format is a hold."""
+def test_a_malformed_answer_leaves_the_release_pending(tmp_path: Path, answer: Any) -> None:
+    """An answer that is not exactly the answer format is not valid."""
     text = answer if isinstance(answer, str) else json.dumps(answer)
 
-    reading = _read(tmp_path, FakeClient(_message(text)))
-
-    assert reading == Reading(Verdict.HOLD, reason=INVALID_ANSWER)
+    _assert_not_valid(tmp_path, _message(text), "it is not in the answer format")
 
 
 @pytest.mark.parametrize(
@@ -587,71 +612,103 @@ def test_a_malformed_answer_is_a_hold(tmp_path: Path, answer: Any) -> None:
     ],
     ids=["two-texts", "tool-use"],
 )
-def test_an_answer_with_other_blocks_is_a_hold(tmp_path: Path, extra: list[dict[str, Any]]) -> None:
-    """An answer of more than one text, or with a block of another kind, is a hold."""
-    reading = _read(tmp_path, FakeClient(_message(PASS, extra=extra)))
-
-    assert reading == Reading(Verdict.HOLD, reason=INVALID_ANSWER)
+def test_an_answer_with_other_blocks_leaves_the_release_pending(
+    tmp_path: Path, extra: list[dict[str, Any]]
+) -> None:
+    """An answer of more than one text, or with a block of another kind, is not valid."""
+    _assert_not_valid(tmp_path, _message(PASS, extra=extra), "it is not one text")
 
 
 @pytest.mark.parametrize(
-    "answer",
+    ("answer", "flaw"),
     [
-        {**PASS, "findings": [FINDING]},
-        {**HOLD, "findings": []},
-        {**HOLD, "findings": [{**FINDING, "line": 6}]},
-        {**HOLD, "findings": [{**FINDING, "line": 0}]},
-        {**HOLD, "findings": [{**FINDING, "file": "logo.png", "line": 1}]},
-        {**HOLD, "findings": [{**FINDING, "explanation": "x" * 401}]},
-        {**PASS, "summary": "x" * 601},
+        ({**PASS, "findings": [FINDING]}, "a pass with findings"),
+        ({**HOLD, "findings": []}, "a hold without findings"),
+        ({**PASS, "summary": "x" * 601}, "the summary is too long"),
+        (
+            {**HOLD, "findings": [{**FINDING, "explanation": "x" * 401}]},
+            "an explanation is too long",
+        ),
+        (
+            {**HOLD, "findings": [{**FINDING, "file": "elsewhere.py"}]},
+            "a finding is on a file that is not in the file table",
+        ),
+        (
+            {**HOLD, "findings": [{**FINDING, "line": 6}]},
+            "a finding is on a line that was not shown",
+        ),
+        (
+            {**HOLD, "findings": [{**FINDING, "line": 0}]},
+            "a finding is on a line that was not shown",
+        ),
+        (
+            {**HOLD, "findings": [{**FINDING, "file": "logo.png", "line": 1}]},
+            "a finding is on a line that was not shown",
+        ),
     ],
     ids=[
         "pass-with-findings",
         "hold-without-findings",
+        "long-summary",
+        "long-explanation",
+        "file-not-in-the-table",
         "line-past-the-end",
         "line-zero",
         "line-of-a-file-not-shown",
-        "long-explanation",
-        "long-summary",
     ],
 )
-def test_an_inconsistent_answer_is_a_hold(tmp_path: Path, answer: dict[str, Any]) -> None:
-    """An answer whose verdict, findings, lines or lengths do not hold together is a hold."""
-    reading = _read(tmp_path, FakeClient(_message(answer)))
-
-    assert reading == Reading(Verdict.HOLD, reason=INVALID_ANSWER)
-
-
-@pytest.mark.parametrize(
-    ("line", "valid"),
-    [(None, True), (11, False), (12, True), (15, True), (18, True), (19, False), (5, False)],
-)
-def test_a_finding_cites_only_a_line_that_was_shown(
-    tmp_path: Path, line: int | None, valid: bool
+def test_an_inconsistent_answer_leaves_the_release_pending(
+    tmp_path: Path, answer: dict[str, Any], flaw: str
 ) -> None:
-    """A line of a changed file outside the hunks the diff shows is no evidence: a hold."""
-    code = [f"line_{number} = {number}\n".encode() for number in range(1, 21)]
-    changed = [*code[:14], b"line_15 = 'changed'\n", *code[15:]]
-    answer = {**HOLD, "findings": [{**FINDING, "file": "long.py", "line": line}]}
+    """An answer whose verdict, findings, lines or lengths do not hold together is not valid."""
+    _assert_not_valid(tmp_path, _message(answer), flaw)
 
-    reading = _read(
-        tmp_path,
-        FakeClient(_message(answer)),
-        release={**RELEASE, "long.py": b"".join(changed)},
-        base={**BASE, "long.py": b"".join(code)},
+
+def test_the_flaw_of_an_answer_holds_nothing_of_it(tmp_path: Path) -> None:
+    """The error names the check that failed in our own words, so a public log leaks no detail."""
+    finding = {**FINDING, "file": "secret_name.py", "explanation": "secret explanation"}
+    answer = {**HOLD, "findings": [finding], "summary": "secret summary"}
+
+    with pytest.raises(ReadingUnavailableError) as raised:
+        _read(tmp_path, FakeClient(_message(answer)))
+
+    message = str(raised.value)
+    assert message.endswith("a finding is on a file that is not in the file table")
+    assert not any(
+        secret in message for secret in ("secret_name", "secret explanation", "secret summary")
     )
 
-    assert (reading.reason is None) is valid
+
+@pytest.mark.parametrize("line", [None, 12, 15, 18])
+def test_a_finding_may_cite_a_line_that_was_shown(tmp_path: Path, line: int | None) -> None:
+    """A line inside a hunk the diff shows, or no line at all, is evidence."""
+    reading = _read_long_file(tmp_path, line)
+
+    assert reading.reason is None
+    assert [finding.line for finding in reading.findings] == [line]
+
+
+@pytest.mark.parametrize("line", [11, 19, 5])
+def test_a_finding_on_a_line_outside_the_hunks_leaves_the_release_pending(
+    tmp_path: Path, line: int
+) -> None:
+    """A line of a changed file outside the hunks the diff shows is no evidence."""
+    with pytest.raises(ReadingUnavailableError) as raised:
+        _read_long_file(tmp_path, line)
+
+    assert str(raised.value).endswith("a finding is on a line that was not shown")
 
 
 @pytest.mark.parametrize("file", ["unchanged.py", "elsewhere.py", "API.PY"])
-def test_a_finding_on_a_file_not_in_the_input_is_a_hold(tmp_path: Path, file: str) -> None:
+def test_a_finding_on_a_file_not_in_the_input_leaves_the_release_pending(
+    tmp_path: Path, file: str
+) -> None:
     """A finding may only name a file of the file table: not an unchanged or an unknown one."""
     answer = {**HOLD, "findings": [{**FINDING, "file": file, "line": None}]}
 
-    reading = _read(tmp_path, FakeClient(_message(answer)))
-
-    assert reading == Reading(Verdict.HOLD, reason=INVALID_ANSWER)
+    _assert_not_valid(
+        tmp_path, _message(answer), "a finding is on a file that is not in the file table"
+    )
 
 
 def test_a_finding_on_a_whole_file_not_shown(tmp_path: Path) -> None:
@@ -949,6 +1006,26 @@ def test_read_archive_without_a_verdict(
     output = capsys.readouterr()
     assert output.out == ""
     assert output.err == "pending: the API answered 429\n"
+
+
+def test_read_archive_with_an_answer_that_is_not_valid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An answer that is not valid says the release is pending, and names the failed check."""
+    client = FakeClient(_message("not JSON"))
+    monkeypatch.setattr(anthropic, "Anthropic", lambda: client)
+    (tmp_path / "release.tar.gz").write_bytes(
+        build_archive({f"{FOLDER}/{path}": data for path, data in RELEASE.items()})
+    )
+
+    assert main(["read-archive", str(tmp_path / "release.tar.gz"), "--folder", FOLDER]) == 1
+
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert (
+        output.err
+        == "pending: the answer of the reading is not valid: it is not in the answer format\n"
+    )
 
 
 def test_read_archive_of_another_folder(

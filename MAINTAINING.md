@@ -406,11 +406,13 @@ version. The release pipeline reads every new version this way; `read-archive` r
 - The code holds a release with binary code or data that is added or changed, or whose request
   (instructions, header, file table and content together) would hold more than 400 kB, without
   asking the model; no text is numbered or diffed beyond that size. It also holds one the model
-  refused, whose answer was cut off or is not valid. A failure of the API for now (no
-  connection, a time-out, 408, 409, 429 or an error from 500 on) gives no verdict: the release is
-  read again later. A token exchange that fails, and any other error status but 413 (such as 400,
-  401, 402, 403 or 404), is a fault of the credentials or the configuration, which stops the
-  reading.
+  refused or whose answer was cut off. A failure of the API for now (no connection, a time-out,
+  408, 409, 429 or an error from 500 on) gives no verdict: the release is read again later. So
+  does an answer that is not valid (not in the answer format, a pass with findings, a hold
+  without any, a text that is too long, a finding on a file or line the model was not shown),
+  which says nothing about the release. A token exchange that fails, and any other error status
+  but 413 (such as 400, 401, 402, 403 or 404), is a fault of the credentials or the
+  configuration, which stops the reading.
 - `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
   is allowed" of the rules; a change to those sections is copied in the same week, with the
   command in `test_rules_are_the_two_sections_of_the_rules_page` (`tests/test_reading.py`).
@@ -426,10 +428,12 @@ not blocked, or in full when there is none. The fetch step downloads both archiv
 step reads them only when they hold the content of their version files.
 
 The verdict goes into the version file, and what the reading found into `readings.json`, which the
-report gets as an artifact; the log shows only counts. A version the API could not read for now
-is read on another night. A fault of the credentials or the configuration stops the reading: the
-version it was reading gets no verdict, those before keep theirs, and the run fails once the
-results are pushed and reported. So does a reading that takes more than four hours.
+report gets as an artifact; the log shows counts, and a warning with the reason for each version
+left for another night. A version the API could not read for now, or whose answer was not valid
+(the warning names the check that failed, without the answer), is read on another night. A fault
+of the credentials or the configuration stops the reading: the version it was reading gets no
+verdict, those before keep theirs, and the run fails once the results are pushed and reported. So
+does a reading that takes more than four hours.
 
 **On trial.** The index does not use the verdict yet, so a held version is offered as before. A
 hold goes into the release issue of the provider (see [Release issues](#release-issues)): the
