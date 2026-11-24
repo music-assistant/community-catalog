@@ -303,8 +303,8 @@ branch of the server; a domain leaves the list by hand, once no supported channe
 
 ## The release pipeline
 
-The workflow `releases.yml` runs every night and on request; only a run on `main` records or
-reports anything. Its jobs share only files:
+The workflow `releases.yml` runs every night, after the nightly of the server, and on request;
+only a run on `main` records or reports anything. Its jobs share only files:
 
 1. **Fetch** reads the releases of every provider that is not blocked, many repositories per
    GraphQL request, with the ids of each repository and its owner. A provider whose repository
