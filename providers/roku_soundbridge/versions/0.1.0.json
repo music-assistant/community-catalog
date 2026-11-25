@@ -1,0 +1,44 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-25T05:23:47Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-25T05:23:38Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "1f5bbeb47c14bad4eec5a33a5938e871bd1eb8e8",
+  "content_hash": "3dd0b7cab1f1af214e3be1240cdbbae5a0324c1055eae058b10559de9f93660c",
+  "folder": "roku_soundbridge",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">\n  <rect x=\"1.5\" y=\"7\" width=\"21\" height=\"10\" rx=\"5\" fill=\"#37474f\"/>\n  <rect x=\"1.5\" y=\"7\" width=\"2.5\" height=\"10\" rx=\"1.25\" fill=\"#1c262b\"/>\n  <rect x=\"20\" y=\"7\" width=\"2.5\" height=\"10\" rx=\"1.25\" fill=\"#1c262b\"/>\n  <rect x=\"5\" y=\"9\" width=\"14\" height=\"6\" rx=\"1.5\" fill=\"#0d171a\"/>\n  <rect x=\"6.5\" y=\"10.6\" width=\"8.5\" height=\"1.2\" rx=\"0.6\" fill=\"#26e6d0\"/>\n  <rect x=\"6.5\" y=\"12.6\" width=\"5.5\" height=\"1\" rx=\"0.5\" fill=\"#26e6d0\" opacity=\"0.75\"/>\n  <circle cx=\"17.2\" cy=\"12\" r=\"0.9\" fill=\"#26e6d0\"/>\n</svg>\n",
+  "manifest": {
+    "builtin": false,
+    "codeowners": [
+      "@pgenera"
+    ],
+    "description": "Stream music to Roku and Pinnacle SoundBridge network music players over the RCP protocol.",
+    "documentation": "https://github.com/pgenera/ma-roku-soundbridge#readme",
+    "domain": "roku_soundbridge",
+    "mdns_discovery": [
+      "_roku-rcp._tcp.local."
+    ],
+    "multi_instance": false,
+    "name": "Roku SoundBridge",
+    "requirements": [],
+    "stage": "beta",
+    "type": "player"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-25T05:24:54Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-23T16:53:28Z",
+  "requirements": [],
+  "tag": "v0.1.0",
+  "version": "0.1.0"
+}

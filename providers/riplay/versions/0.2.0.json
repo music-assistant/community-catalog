@@ -1,0 +1,50 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-25T05:23:39Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-25T05:23:32Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "eb962fe9754ac9316d0fd747507e478828a0e5ad",
+  "content_hash": "b607b24c2f4706a780212ecfaa87a33dc4be5ce0f2794546de2d6e5b22ef29a6",
+  "folder": "riplay",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">\n  <title>RiPlay</title>\n  <defs>\n    <linearGradient id=\"rp-bg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\n      <stop offset=\"0\" stop-color=\"#3aa0ff\"/>\n      <stop offset=\"1\" stop-color=\"#1668d9\"/>\n    </linearGradient>\n  </defs>\n  <rect x=\"32\" y=\"32\" width=\"448\" height=\"448\" rx=\"96\" fill=\"url(#rp-bg)\"/>\n  <path d=\"M204 168 L352 256 L204 344 Z\" fill=\"#ffffff\"/>\n  <path d=\"M148 176 q22 44 0 88\" fill=\"none\" stroke=\"#ffffff\" stroke-width=\"20\" stroke-linecap=\"round\" opacity=\"0.85\"/>\n  <path d=\"M112 160 q34 76 0 152\" fill=\"none\" stroke=\"#ffffff\" stroke-width=\"20\" stroke-linecap=\"round\" opacity=\"0.55\"/>\n</svg>\n",
+  "manifest": {
+    "codeowners": [
+      "@fast4x"
+    ],
+    "description": "Your RiPlay library (local and on-device files, direct URLs) streamed through the RiPlay bridge: multi-room playback stays on Music Assistant, the audio comes straight from your own device. Requires the FOSS edition of RiPlay.",
+    "documentation": "https://github.com/fast4x/riplay-music-assistant#readme",
+    "domain": "riplay",
+    "multi_instance": true,
+    "name": "RiPlay",
+    "provides": [
+      "artist",
+      "album",
+      "track",
+      "playlist"
+    ],
+    "requirements": [
+      "aiohttp>=3.9.0"
+    ],
+    "stage": "beta",
+    "type": "music"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-25T05:24:49Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-24T15:31:34Z",
+  "requirements": [
+    "aiohttp>=3.9.0"
+  ],
+  "tag": "v0.2.0",
+  "version": "0.2.0"
+}

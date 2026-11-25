@@ -1,0 +1,43 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-25T05:24:01Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-25T05:23:50Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "5984fce9c10c74ba37a125d3a4bb54968726cbc8",
+  "content_hash": "d2f2cbaba86c2d3971e908104bd4f714f794adbe78c42a4c6071c596c48d88ec",
+  "folder": "vban",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 128 128\"><title>Music Assistant + VBAN Protocol</title><g transform=\"translate(32 0) scale(.26666667)\"><path fill=\"#f2f4f9\" d=\"m109.394,4.3814c5.848,-5.84187 15.394,-5.84187 21.212,0l98.788,98.8876c5.848,5.842 10.606,17.374 10.606,25.638v90.11l-0.005,0.356c-0.206,8.086-6.881,14.628-14.995,14.628H15C6.75759,234.001 2.40473e-5,227.22 0,218.987v-90.11c1.20331e-4,-8.264 4.78834,-19.796 10.6064,-25.638z\"/><path fill=\"#18bcf2\" d=\"m109.394,4.3814c5.848,-5.84187 15.394,-5.84187 21.212,0l98.788,98.8876c5.848,5.842 10.606,17.374 10.606,25.638v90.11l-0.005,0.356c-0.206,8.086-6.881,14.628-14.995,14.628H15C6.75759,234.001 2.40473e-5,227.22 0,218.987v-90.11c1.20331e-4,-8.264 4.78834,-19.796 10.6064,-25.638zM36,120.001c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.5817,-8-8,-8zm32,0c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.5817,-8-8,-8zm32,0c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.582,-8-8,-8zm58.393,0.426c-4.193,-1.395-8.722,0.873-10.118,5.065l-26.796,80.509h16.863l25.114,-75.457c1.395,-4.192-0.872,-8.721-5.063,-10.117zm30.315,5.065c-1.395,-4.192-5.925,-6.46-10.117,-5.065-4.192,1.396-6.46,5.925-5.065,10.117l25.116,75.457h16.862z\"/></g><image x=\"0\" y=\"67.2\" width=\"128\" height=\"60.8\" href=\"data:image/png;base64,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\"/></svg>\n",
+  "manifest": {
+    "builtin": false,
+    "codeowners": [
+      "@Extrunder"
+    ],
+    "description": "Send audio to a VBAN receiver over UDP (PCM 16/24-bit).",
+    "documentation": "https://github.com/Extrunder/ma-vban-player-provider#readme",
+    "domain": "vban",
+    "icon": "speaker-wireless",
+    "multi_instance": true,
+    "name": "VBAN Player",
+    "requirements": [],
+    "stage": "beta",
+    "support_url": "https://github.com/Extrunder/ma-vban-player-provider/issues",
+    "type": "player"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-25T05:24:57Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-21T20:26:33Z",
+  "requirements": [],
+  "tag": "v0.2.0",
+  "version": "0.2.0"
+}
