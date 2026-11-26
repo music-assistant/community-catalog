@@ -1,6 +1,6 @@
 {
   "channel": "beta",
-  "generated": "2026-11-25T05:24:27Z",
+  "generated": "2026-11-26T05:24:05Z",
   "providers": {
     "audd_local_recognizer": {
       "added": "2026-11-17T18:53:40Z",
@@ -63,7 +63,7 @@
       "added": "2026-11-23T22:20:43Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#241a45\"/><path d=\"M5 19.5v-8.2L12 5l7 6.3v8.2z\" fill=\"none\" stroke=\"#b9a8ff\" stroke-width=\"1.2\" stroke-linejoin=\"round\"/><g fill=\"#5eead4\"><circle cx=\"7\" cy=\"13\" r=\".7\"/><circle cx=\"8.6\" cy=\"16.8\" r=\".6\"/><circle cx=\"7.4\" cy=\"17.9\" r=\".5\"/><circle cx=\"9.4\" cy=\"12.6\" r=\".55\"/><circle cx=\"10.2\" cy=\"15.3\" r=\".65\"/><circle cx=\"8.2\" cy=\"14.8\" r=\".45\"/></g><path d=\"M11.2 15c.8 0 1.1-2.6 1.9-2.6s1.1 5.2 1.9 5.2 1.1-5.2 1.9-5.2.9 2.6 1.4 2.6\" fill=\"none\" stroke=\"#5eead4\" stroke-width=\"1.3\" stroke-linecap=\"round\"/></svg>\n",
-      "latest": null,
+      "latest": "1.0.1",
       "maintainers": [
         "jozefKruszynski"
       ],
@@ -87,13 +87,24 @@
       "reason_url": null,
       "repository": "jozefKruszynski/ma-entropy-fm",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "1.0.1": {
+          "commit": "bd4c6faa8c45cfc9ae4df9276b6c5d3a0724b1a6",
+          "content_hash": "0db384ce4e53afc9501f510f8108154c2d9756c2b27932db1300a4e180337cef",
+          "folder": "entropy_fm",
+          "released": "2026-11-24T18:15:46Z",
+          "requirements": [
+            "numpy>=2.3",
+            "pedalboard==0.9.26"
+          ]
+        }
+      }
     },
     "fabel": {
       "added": "2026-11-22T19:41:28Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#03a9f4\"/><path fill=\"#fff\" d=\"M10 5h7v3h-4v8.5a3 3 0 1 1-3-3z\"/></svg>\n",
-      "latest": null,
+      "latest": "0.2.0",
       "maintainers": [
         "pissten"
       ],
@@ -110,14 +121,29 @@
           "audiobook"
         ],
         "requirements": [],
-        "stage": "alpha",
+        "stage": "beta",
         "type": "music"
       },
       "reason": null,
       "reason_url": null,
       "repository": "pissten/music-assistant-fabel",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "0.1.9": {
+          "commit": "27150062b886c6d1fdf43906fce60bd5d4236f18",
+          "content_hash": "92dee3894d562f0f79246c057806dc9a4ce30b93af829376b5c490dfd545a3b2",
+          "folder": "fabel",
+          "released": "2026-11-24T20:03:28Z",
+          "requirements": []
+        },
+        "0.2.0": {
+          "commit": "3e0fc73e75283c99bed224b00928e03e0c35e416",
+          "content_hash": "e0868cd6f713f118ff756ed12d79024e7aa18a4359d2f5c195cdf2756ca73e61",
+          "folder": "fabel",
+          "released": "2026-11-25T08:06:35Z",
+          "requirements": []
+        }
+      }
     },
     "multichannel_audio": {
       "added": "2026-11-20T17:40:56Z",
@@ -214,7 +240,7 @@
       "added": "2026-11-22T20:25:41Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#0f766e\"/><path fill=\"none\" stroke=\"#fff\" stroke-width=\"1.8\" stroke-linecap=\"round\" d=\"M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a8.5 8.5 0 0 0 0 12M18 6a8.5 8.5 0 0 1 0 12\"/><circle cx=\"12\" cy=\"12\" r=\"2\" fill=\"#fff\"/></svg>\n",
-      "latest": null,
+      "latest": "0.5.1",
       "maintainers": [
         "riqiu"
       ],
@@ -222,7 +248,7 @@
         "codeowners": [
           "@riqiu"
         ],
-        "description": "Radio stations from Radioplayer, found by search or listed by you, showing the artist, title and cover of what plays now, and the songs they played last, from the public Radioplayer feed; a song opens the matching tracks of your other music providers.",
+        "description": "Radio stations from Radioplayer, found by search, browsed by letter or listed by you, showing the artist, title and cover of what plays now, and the songs they played last, from the public Radioplayer feed; a song opens the matching tracks of your other music providers.",
         "documentation": "https://github.com/riqiu/ma-radioplayer#readme",
         "domain": "radioplayer",
         "multi_instance": false,
@@ -238,13 +264,28 @@
       "reason_url": null,
       "repository": "riqiu/ma-radioplayer",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "0.4.1": {
+          "commit": "a55d67fda8a51a02f666965c97fb89fb6dfa3110",
+          "content_hash": "cbf22459446c50a9b71a72d28a15fcb906fc99789fad5c1b0e3b0aee1c05c68c",
+          "folder": "radioplayer",
+          "released": "2026-11-24T19:07:37Z",
+          "requirements": []
+        },
+        "0.5.1": {
+          "commit": "0e094cc6ea8588d1279ccfc8ba6656b63f2b95bd",
+          "content_hash": "06e995a73f04726d8791c9834faf92e4e50afcf778d542e52bfbcc50c3accd79",
+          "folder": "radioplayer",
+          "released": "2026-11-25T17:47:06Z",
+          "requirements": []
+        }
+      }
     },
     "riplay": {
       "added": "2026-11-24T16:05:09Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 512 512\" width=\"512\" height=\"512\">\n  <title>RiPlay</title>\n  <defs>\n    <linearGradient id=\"rp-bg\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\">\n      <stop offset=\"0\" stop-color=\"#3aa0ff\"/>\n      <stop offset=\"1\" stop-color=\"#1668d9\"/>\n    </linearGradient>\n  </defs>\n  <rect x=\"32\" y=\"32\" width=\"448\" height=\"448\" rx=\"96\" fill=\"url(#rp-bg)\"/>\n  <path d=\"M204 168 L352 256 L204 344 Z\" fill=\"#ffffff\"/>\n  <path d=\"M148 176 q22 44 0 88\" fill=\"none\" stroke=\"#ffffff\" stroke-width=\"20\" stroke-linecap=\"round\" opacity=\"0.85\"/>\n  <path d=\"M112 160 q34 76 0 152\" fill=\"none\" stroke=\"#ffffff\" stroke-width=\"20\" stroke-linecap=\"round\" opacity=\"0.55\"/>\n</svg>\n",
-      "latest": null,
+      "latest": "0.2.0",
       "maintainers": [
         "fast4x"
       ],
@@ -273,13 +314,23 @@
       "reason_url": null,
       "repository": "fast4x/riplay-music-assistant",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "0.2.0": {
+          "commit": "eb962fe9754ac9316d0fd747507e478828a0e5ad",
+          "content_hash": "b607b24c2f4706a780212ecfaa87a33dc4be5ce0f2794546de2d6e5b22ef29a6",
+          "folder": "riplay",
+          "released": "2026-11-24T15:31:34Z",
+          "requirements": [
+            "aiohttp>=3.9.0"
+          ]
+        }
+      }
     },
     "roku_soundbridge": {
       "added": "2026-11-23T17:27:08Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\">\n  <rect x=\"1.5\" y=\"7\" width=\"21\" height=\"10\" rx=\"5\" fill=\"#37474f\"/>\n  <rect x=\"1.5\" y=\"7\" width=\"2.5\" height=\"10\" rx=\"1.25\" fill=\"#1c262b\"/>\n  <rect x=\"20\" y=\"7\" width=\"2.5\" height=\"10\" rx=\"1.25\" fill=\"#1c262b\"/>\n  <rect x=\"5\" y=\"9\" width=\"14\" height=\"6\" rx=\"1.5\" fill=\"#0d171a\"/>\n  <rect x=\"6.5\" y=\"10.6\" width=\"8.5\" height=\"1.2\" rx=\"0.6\" fill=\"#26e6d0\"/>\n  <rect x=\"6.5\" y=\"12.6\" width=\"5.5\" height=\"1\" rx=\"0.5\" fill=\"#26e6d0\" opacity=\"0.75\"/>\n  <circle cx=\"17.2\" cy=\"12\" r=\"0.9\" fill=\"#26e6d0\"/>\n</svg>\n",
-      "latest": null,
+      "latest": "0.1.0",
       "maintainers": [
         "pgenera"
       ],
@@ -304,7 +355,15 @@
       "reason_url": null,
       "repository": "pgenera/ma-roku-soundbridge",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "0.1.0": {
+          "commit": "1f5bbeb47c14bad4eec5a33a5938e871bd1eb8e8",
+          "content_hash": "3dd0b7cab1f1af214e3be1240cdbbae5a0324c1055eae058b10559de9f93660c",
+          "folder": "roku_soundbridge",
+          "released": "2026-11-23T16:53:28Z",
+          "requirements": []
+        }
+      }
     },
     "test_tones": {
       "added": "2026-11-15T11:21:01Z",
@@ -345,7 +404,7 @@
       "added": "2026-11-21T20:28:51Z",
       "blocked_versions": {},
       "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 128 128\"><title>Music Assistant + VBAN Protocol</title><g transform=\"translate(32 0) scale(.26666667)\"><path fill=\"#f2f4f9\" d=\"m109.394,4.3814c5.848,-5.84187 15.394,-5.84187 21.212,0l98.788,98.8876c5.848,5.842 10.606,17.374 10.606,25.638v90.11l-0.005,0.356c-0.206,8.086-6.881,14.628-14.995,14.628H15C6.75759,234.001 2.40473e-5,227.22 0,218.987v-90.11c1.20331e-4,-8.264 4.78834,-19.796 10.6064,-25.638z\"/><path fill=\"#18bcf2\" d=\"m109.394,4.3814c5.848,-5.84187 15.394,-5.84187 21.212,0l98.788,98.8876c5.848,5.842 10.606,17.374 10.606,25.638v90.11l-0.005,0.356c-0.206,8.086-6.881,14.628-14.995,14.628H15C6.75759,234.001 2.40473e-5,227.22 0,218.987v-90.11c1.20331e-4,-8.264 4.78834,-19.796 10.6064,-25.638zM36,120.001c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.5817,-8-8,-8zm32,0c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.5817,-8-8,-8zm32,0c-4.4183,0-8,3.581-8,8v78h16v-78c0,-4.419-3.582,-8-8,-8zm58.393,0.426c-4.193,-1.395-8.722,0.873-10.118,5.065l-26.796,80.509h16.863l25.114,-75.457c1.395,-4.192-0.872,-8.721-5.063,-10.117zm30.315,5.065c-1.395,-4.192-5.925,-6.46-10.117,-5.065-4.192,1.396-6.46,5.925-5.065,10.117l25.116,75.457h16.862z\"/></g><image x=\"0\" y=\"67.2\" width=\"128\" height=\"60.8\" href=\"data:image/png;base64,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\"/></svg>\n",
-      "latest": null,
+      "latest": "0.2.0",
       "maintainers": [
         "Extrunder"
       ],
@@ -369,13 +428,21 @@
       "reason_url": null,
       "repository": "Extrunder/ma-vban-player-provider",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "0.2.0": {
+          "commit": "5984fce9c10c74ba37a125d3a4bb54968726cbc8",
+          "content_hash": "d2f2cbaba86c2d3971e908104bd4f714f794adbe78c42a4c6071c596c48d88ec",
+          "folder": "vban",
+          "released": "2026-11-21T20:26:33Z",
+          "requirements": []
+        }
+      }
     },
     "wyoming_tts": {
       "added": "2026-11-25T01:40:06Z",
       "blocked_versions": {},
       "icon_svg": "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<!-- Created with Inkscape (http://www.inkscape.org/) -->\n\n<svg\n   version=\"1.1\"\n   id=\"svg1\"\n   width=\"163.84\"\n   height=\"163.84\"\n   viewBox=\"0 0 163.84 163.84\"\n   xmlns=\"http://www.w3.org/2000/svg\"\n   xmlns:svg=\"http://www.w3.org/2000/svg\">\n  <defs\n     id=\"defs1\" />\n  <g\n     id=\"g1\">\n    <rect\n       style=\"fill:#ffffff;stroke-width:1.88242\"\n       id=\"rect1\"\n       width=\"163.84\"\n       height=\"163.84\"\n       x=\"0\"\n       y=\"0\" />\n  </g>\n  <path\n     style=\"fill:#000000;fill-opacity:1\"\n     d=\"m 68.892875,119.78928 c 0,-0.0647 0.41923,-1.3967 0.93162,-2.96001 1.0494,-3.2017 1.56613,-6.48167 1.07097,-6.79794 -0.17602,-0.11244 -0.78313,-1.14042 -1.34913,-2.28443 -0.56599,-1.144 -1.69271,-3.18362 -2.50381,-4.53251 -1.50905,-2.5096 -1.96603,-2.82748 -4.06454,-2.82748 -0.66747,0 -0.7269,-0.17516 -0.89589,-2.639997 -0.23944,-3.49251 -1.263,-6.39379 -2.79684,-7.92762 -1.16477,-1.16477 -4.13156,-2.55238 -5.45713,-2.55238 -1.02241,0 -2.85848,1.10011 -5.02849,3.0129 -1.67102,1.47295 -2.46254,1.91165 -4.65651,2.58085 -1.4538,0.44344 -2.79538,0.80625 -2.98128,0.80625 -0.1859,0 -0.86999,-0.86189 -1.5202,-1.91531 -1.75306,-2.84019 -2.60227,-3.72861 -4.77944,-5.00009 -1.08313,-0.63256 -1.995818,-1.17386 -2.028195,-1.20289 -0.03238,-0.029 -0.217534,-2.21029 -0.411461,-4.84725 -0.5322,-7.23668 -0.898663,-9.20574 -2.496825,-13.41583 -1.853469,-4.88266 -1.972668,-6.76983 -0.55666,-8.81313 1.248107,-1.80102 3.41337,-3.42039 5.337371,-3.99176 1.29357,-0.38415 2.53063,-0.40737 7.3327,-0.1376 l 5.7766,0.32451 2.3664,-2.24785 c 1.93951,-1.84234 2.70053,-2.34371 4.21857,-2.779232 1.01869,-0.292262 3.22585,-1.157514 4.90479,-1.922782 1.67894,-0.765269 4.91894,-1.923655 7.2,-2.574192 3.53788,-1.008971 4.64116,-1.18645 7.50738,-1.207674 3.16813,-0.02346 3.67065,0.06968 8.8,1.631115 3.36457,1.024212 6.90501,1.86179 9.28,2.195408 5.93067,0.833091 8.074335,1.491416 11.749535,3.608287 6.86185,3.95235 7.46698,4.18144 15.87442,6.0097 4.28118,0.93097 8.41485,1.99809 9.18594,2.37136 1.77665,0.86006 3.19872,2.47692 4.34492,4.94005 1.58274,3.40125 1.96541,5.38003 2.12393,10.98263 0.13132,4.64159 0.0711,5.48992 -0.55406,7.80685 -0.4187,1.55171 -0.61584,2.93518 -0.48912,3.43253 0.11674,0.45823 0.32769,2.92115 0.46876,5.47315 0.14108,2.552 0.36686,4.97832 0.50173,5.39182 0.24099,0.73883 0.22923,0.74347 -0.68042,0.26857 -1.15307,-0.60199 -2.45201,-1.98204 -3.12911,-3.3245 -0.8045,-1.59505 -0.63018,-3.84123 0.60347,-7.77589 1.22619,-3.91089 1.47304,-7.30184 0.6639,-9.12 -0.46896,-1.05376 -0.42932,-1.10651 -1.32287,1.76 -0.30175,0.968 -1.10492,3.14968 -1.78483,4.84819 -1.51075,3.77404 -1.53839,4.59649 -0.40711,12.11181 l 0.84298,5.599997 -1.97779,4 c -1.93627,3.91604 -1.97583,4.04838 -1.88474,6.30495 0.0812,2.01222 -0.004,2.43632 -0.67158,3.33918 -0.52034,0.70379 -0.76463,1.46317 -0.76463,2.37678 v 1.34257 l -1.62667,0.19548 c -0.89466,0.10751 -2.16666,0.19673 -2.82666,0.19826 -1.16691,0.003 -1.2,-0.0293 -1.2,-1.15946 0,-0.63922 0.27526,-1.61123 0.61169,-2.15999 0.87625,-1.4293 1.68488,-4.45514 1.5682,-5.8681 l -0.0999,-1.20967 -0.72,1.46103 c -0.42335,0.85906 -0.72,2.05395 -0.72,2.90012 0,1.1822 -0.17187,1.60376 -0.96277,2.3615 -0.81442,0.78026 -0.93221,1.08534 -0.76439,1.97987 l 0.19838,1.05748 -2.19561,-0.005 c -3.06111,-0.007 -3.18716,-0.12851 -2.52273,-2.43519 0.29782,-1.03395 0.87229,-2.74391 1.2766,-3.79991 0.4043,-1.056 1.26429,-3.59378 1.91108,-5.63952 l 1.17598,-3.71951 -1.32513,-4.440487 c -2.52395,-8.45772 -3.10967,-9.72048 -4.50873,-9.72048 -0.84102,0 -4.54778,2.74657 -6.96208,5.15864 -1.16633,1.16525 -2.72649,2.42505 -3.46701,2.79957 l -1.3464,0.68092 -1.818595,-1.27393 c -2.49269,-1.74603 -6.05771,-2.76326 -10.6187,-3.0298 l -3.6101,-0.21096 -0.67305,1.52153 c -0.60504,1.36779 -0.65151,1.88186 -0.45985,5.087487 0.20449,3.42041 0.18028,3.62353 -0.593,4.9763 -0.44681,0.78165 -0.8079,1.92398 -0.81003,2.56259 -0.007,1.97429 -0.59954,3.13213 -1.95918,3.82577 -0.68457,0.34924 -1.24468,0.85128 -1.24468,1.11563 0,0.26436 -0.576,1.10553 -1.28,1.86928 -1.20349,1.30564 -1.28,1.50604 -1.28,3.35285 v 1.96422 h -3.52 c -1.936,0 -3.52,-0.0529 -3.52,-0.11763 z\"\n     id=\"path1-3\" />\n</svg>\n",
-      "latest": null,
+      "latest": "2026.11.0",
       "maintainers": [
         "mill1000"
       ],
@@ -401,7 +468,17 @@
       "reason_url": null,
       "repository": "mill1000/ma-wyoming-tts",
       "status": "listed",
-      "versions": {}
+      "versions": {
+        "2026.11.0": {
+          "commit": "eb3b6d2dcc06a101cf7f3c815906c3968fea3bdc",
+          "content_hash": "c801c817dd0c9a17944d0f37c41de9f16c06dda6b7183c843e0bb0a03564e20d",
+          "folder": "wyoming_tts",
+          "released": "2026-11-25T01:39:14Z",
+          "requirements": [
+            "wyoming>=1.11.0"
+          ]
+        }
+      }
     }
   },
   "schema": 1

@@ -1,0 +1,48 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-26T05:22:45Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-26T05:22:44Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-26T05:22:48Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "3e0fc73e75283c99bed224b00928e03e0c35e416",
+  "content_hash": "e0868cd6f713f118ff756ed12d79024e7aa18a4359d2f5c195cdf2756ca73e61",
+  "folder": "fabel",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#03a9f4\"/><path fill=\"#fff\" d=\"M10 5h7v3h-4v8.5a3 3 0 1 1-3-3z\"/></svg>\n",
+  "manifest": {
+    "codeowners": [
+      "@pissten"
+    ],
+    "description": "Stream audiobooks from a Norwegian Fabel subscription (unofficial community provider).",
+    "documentation": "https://github.com/pissten/music-assistant-fabel#readme",
+    "domain": "fabel",
+    "multi_instance": true,
+    "name": "Fabel",
+    "provides": [
+      "audiobook"
+    ],
+    "requirements": [],
+    "stage": "beta",
+    "type": "music"
+  },
+  "reading": {
+    "base": "0.1.9",
+    "read": "2026-11-26T05:24:19Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-25T08:06:35Z",
+  "requirements": [],
+  "tag": "v0.2.0",
+  "version": "0.2.0"
+}
