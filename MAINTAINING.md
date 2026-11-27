@@ -396,22 +396,29 @@ version. The release pipeline reads every new version this way; `read-archive` r
 - The model gets the instructions and rules in `registry/reading/` and one message with the
   release: a header from the manifest, a table of the files that were added, changed or removed,
   and the numbered lines of each added file or the diff of each changed or removed one, with
-  lines as Python counts them. Built web assets (`*.min.js`, `*.min.css`, `*.map`) and media and
-  fonts are listed but not shown; a media or font file counts as one only when its content is of
-  the format its name says (its first bytes and, where that is cheap, its structure). A finding
-  may cite only a line the model was shown.
-- The model has no tools and gets no credentials. Its answer is a fixed JSON shape, a pass
-  without findings or a hold with at least one, each finding on a file of the table; the code
-  checks it, and is never led by it to run, open or fetch anything.
-- The code holds a release with binary code or data that is added or changed, or whose request
-  (instructions, header, file table and content together) would hold more than 1.5 MB, without
-  asking the model; no text is numbered or diffed beyond that size. It also holds one the model
-  refused or whose answer was cut off. A failure of the API for now (no connection, a time-out,
-  408, 409, 429 or an error from 500 on) gives no verdict: the release is read again later. So
-  does an answer that is not valid (not in the answer format, a pass with findings, a hold
-  without any, a text that is too long, a finding on a file or line the model was not shown),
-  which says nothing about the release. A token exchange that fails, and any other error status
-  but 413 (such as 400, 401, 402, 403 or 404), is a fault of the credentials or the
+  lines as Python counts them. Media and fonts are listed but not shown; a media or font file
+  counts as one only when its content is of the format its name says (its first bytes and, where
+  that is cheap, its structure). Code that decodes, decompresses, unpickles, evaluates, executes
+  or imports a file listed as not shown is a finding of the rule `unclear`. The reading reads the
+  provider folder, not the packages in its requirements, whose names and versions are in the
+  header.
+- The model has no tools and gets no credentials. Its answer is a fixed JSON shape: a verdict,
+  findings and a summary. The code takes it as it is meant: findings make a hold whatever the
+  verdict says, a hold without a finding is held for that reason, a citation of a file or line
+  the model was not shown is left out of its finding, and an explanation or summary that is too
+  long is cut. The code is never led by the answer to run, open or fetch anything.
+- The code holds a release without asking the model when an added or changed file is binary code
+  or data, or text that declares a text encoding other than UTF-8 the way Python reads such a
+  declaration (in which a line shown as a comment can run); and when its request (instructions,
+  header, file table and content together) would hold more than 1.5 MB, or more than 900,000
+  tokens as the token counting endpoint of the API counts them first. No text is numbered or
+  diffed beyond that size. The request is streamed, and its answer may take 64,000 tokens,
+  thinking included: an answer that is cut off is asked for once more, and a second one that is
+  cut off is a hold, as a refusal is. A failure of the API for now (no connection, a time-out, a
+  stream that breaks off, 408, 409, 429 or an error from 500 on) gives no verdict: the release is
+  read again later. So does an answer that is not in the answer format, which says nothing about
+  the release, and a 400, which may be the release's own. A token exchange that fails, and any
+  other error status but 413 (such as 401, 402, 403 or 404), is a fault of the credentials or the
   configuration, which stops the reading.
 - `registry/reading/rules.md` is a verbatim copy of the sections "What is not accepted" and "What
   is allowed" of the rules; a change to those sections is copied in the same week, with the
@@ -421,19 +428,25 @@ version. The release pipeline reads every new version this way; `read-archive` r
 
 The apply job runs `read` after the results are recorded and before `validate`. It reads the
 versions without a reading that are neither cleared nor blocked, of a provider that is not
-blocked, and that did not fail on every channel they were checked on: at most 25 a night, the
-most recently released first, and the others the next night. Each is read against the highest
-lower version that is accepted (the reading passed it, or a registry maintainer cleared it) and
-not blocked, or in full when there is none. The fetch step downloads both archives, and the read
-step reads them only when they hold the content of their version files.
+blocked, and that did not fail on every channel they were checked on: at most 25 a night, and the
+others the next night. The providers take turns, the one with the most recently released version
+first, and the versions of a provider come oldest first. Each is read against the highest lower
+version that is accepted (the reading passed it, or a registry maintainer cleared it) and not
+blocked, chosen when its turn comes, so a version that passed earlier in the run can be it; or in
+full when there is none. The fetch step downloads the archives of each version and of its base
+as planned (a base chosen later is a version read earlier in the run, whose archive is there),
+and the read step reads them only when they hold the content of their version files.
 
 The verdict goes into the version file, and what the reading found into `readings.json`, which the
-report gets as an artifact; the log shows counts, and a warning with the reason for each version
-left for another night. A version the API could not read for now, or whose answer was not valid
-(the warning names the check that failed, without the answer), is read on another night. A fault
-of the credentials or the configuration stops the reading: the version it was reading gets no
-verdict, those before keep theirs, and the run fails once the results are pushed and reported. So
-does a reading that takes more than four hours.
+report gets as an artifact; the log shows counts, the input and output tokens of each reading and
+of the run, and a warning with the reason for each version left for another night. A version the
+API could not read for now, or whose answer was not in the answer format (the warning names the
+check that failed, without the answer), is read on another night. So is a version whose request
+the API refused with 400, and the later versions of its provider in that run; a 400 for three
+providers in one run says the request of the reading is wrong, and stops it as a fault of the
+configuration. A fault of the credentials or the configuration stops the reading: the version it
+was reading gets no verdict, those before keep theirs, and the run fails once the results are
+pushed and reported. So does a reading that takes more than four hours.
 
 **On trial.** The index does not use the verdict yet, so a held version is offered as before. A
 hold goes into the release issue of the provider (see [Release issues](#release-issues)): the

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -45,11 +46,11 @@ MAX_READINGS_PER_RUN = 25
 
 @dataclass(frozen=True, slots=True)
 class PlannedReading:
-    """A version the read step reads, and the version it is read against."""
+    """A version the read step reads, and the version it is read against when it is planned."""
 
     domain: str
     version: str
-    # None to read the version in full
+    # None to read the version in full; the read step takes reading_base again when it reads it
     base: str | None
 
 
@@ -219,28 +220,61 @@ def apply_results(registry: Registry, results: list[ChannelResults]) -> None:
 
 def versions_to_read(registry: Registry) -> list[PlannedReading]:
     """
-    Return the versions the read step reads in a run, the most recently released first.
+    Return the versions the read step reads in a run, in the order it reads them.
 
     Those are the versions without a reading that are neither cleared nor blocked, of a provider
     that is not blocked, and that did not fail on every channel they were checked on: at most
-    MAX_READINGS_PER_RUN of them. Each is read against the highest lower version that is accepted
-    (the reading passed it, or a registry maintainer cleared it) and not blocked, or in full when
-    there is none.
+    MAX_READINGS_PER_RUN of them. The providers take turns, the one with the most recently
+    released version first, and the versions of a provider come oldest first, so a version that
+    passes can be the base of the next.
 
     :param registry: The registry.
     """
-    unread = [
-        (provider, file)
+    queues = [
+        [
+            (provider, file)
+            for file in sorted(
+                provider.versions.values(), key=lambda file: version_key(file.version)
+            )
+            if _readable(provider, file)
+        ]
         for _, provider in sorted(registry.providers.items())
         if provider.file.status != ProviderStatus.BLOCKED
-        for file in provider.versions.values()
-        if _readable(provider, file)
     ]
-    unread.sort(key=lambda item: (item[1].released, version_key(item[1].version)), reverse=True)
+    queues = [queue for queue in queues if queue]
+    queues.sort(
+        key=lambda queue: max((file.released, version_key(file.version)) for _, file in queue),
+        reverse=True,
+    )
+    turns = [item for turn in itertools.zip_longest(*queues) for item in turn if item is not None]
     return [
-        PlannedReading(provider.file.domain, file.version, _reading_base(provider, file.version))
-        for provider, file in unread[:MAX_READINGS_PER_RUN]
+        PlannedReading(provider.file.domain, file.version, reading_base(provider, file.version))
+        for provider, file in turns[:MAX_READINGS_PER_RUN]
     ]
+
+
+def reading_base(provider: Provider, version: str) -> str | None:
+    """
+    Return the version a version is read against, or None to read it in full.
+
+    That is the highest lower version that is accepted (the reading passed it, or a registry
+    maintainer cleared it) and not blocked.
+
+    :param provider: The provider.
+    :param version: The version.
+    """
+    kept = provider.file
+    accepted = [
+        other
+        for other, file in provider.versions.items()
+        if version_key(other) < version_key(version)
+        and other not in kept.blocked_versions
+        and (
+            other in kept.cleared_versions
+            or (file.reading is not None and file.reading.verdict is Verdict.PASS)
+        )
+    ]
+    return max(accepted, key=version_key, default=None)
 
 
 def write_readings(results: list[ReadingResult], work: Path) -> None:
@@ -313,22 +347,6 @@ def _readable(provider: Provider, file: VersionFile) -> bool:
         and file.version not in kept.blocked_versions
         and (not file.checks or any(check.passed for check in file.checks.values()))
     )
-
-
-def _reading_base(provider: Provider, version: str) -> str | None:
-    """Return the highest version below a version that is accepted and not blocked, or None."""
-    kept = provider.file
-    accepted = [
-        other
-        for other, file in provider.versions.items()
-        if version_key(other) < version_key(version)
-        and other not in kept.blocked_versions
-        and (
-            other in kept.cleared_versions
-            or (file.reading is not None and file.reading.verdict is Verdict.PASS)
-        )
-    ]
-    return max(accepted, key=version_key, default=None)
 
 
 def _warn(text: str) -> None:
