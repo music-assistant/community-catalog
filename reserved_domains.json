@@ -166,7 +166,8 @@
     "webserver"
   ],
   "moving": [
-    "fastmcp_server"
+    "fastmcp_server",
+    "qqmusic"
   ],
   "reserved_names": [
     "database",
