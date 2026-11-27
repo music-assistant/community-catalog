@@ -903,6 +903,22 @@ def test_a_finding_on_a_file_the_reading_was_not_shown_names_no_file(files: File
     assert code_span("") not in created["body"]
 
 
+def test_a_hold_without_a_finding_shows_what_the_reading_says(files: Files) -> None:
+    """A hold that names no finding is the model's own; its summary is the clue for a person."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+
+    _night(files, github, readings=[_reading("1.0.0", reason=NO_FINDING, findings=[])])
+
+    [(_, created)] = github.created
+    body = created["body"]
+    assert "### Version 1.0.0 may cross a line of the catalog rules\n" in body
+    assert "in full) held it without naming what may cross a line of the rules." in body
+    assert f"in the words of the reading:\n\n{code_block(SUMMARY)}" in body
+    assert "If the hold is wrong, say so in this issue." in body
+
+
 def test_an_issue_of_only_holds_says_a_release_needs_a_closer_look(files: Files) -> None:
     """The checks did not fail when only the reading held a release: the title says so."""
     files.provider()
@@ -997,9 +1013,8 @@ def test_text_of_the_reading_mentions_nobody_and_links_nowhere(files: Files) -> 
             f"could not judge it, because {UNREADABLE}: {code_span('native.so')}.",
         ),
         (TOO_LARGE, [], f"could not judge it, because {TOO_LARGE}."),
-        (NO_FINDING, [], f"could not judge it, because {NO_FINDING}."),
     ],
-    ids=["unreadable", "too-large", "no-finding"],
+    ids=["unreadable", "too-large"],
 )
 def test_a_hold_of_the_code_gives_its_reason(
     files: Files, reason: str, findings: list[dict[str, Any]], told: str

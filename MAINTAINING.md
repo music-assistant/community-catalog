@@ -399,16 +399,16 @@ version. The release pipeline reads every new version this way; `read-archive` r
   lines as Python counts them. Media and fonts are listed but not shown; a media or font file
   counts as one only when its content is of the format its name says (its first bytes and, where
   that is cheap, its structure). Code that decodes, decompresses, unpickles, evaluates, executes
-  or imports a file the model was not shown is a finding of the rule `unclear`. The reading
-  reads the provider folder, not the packages in its requirements, whose names and versions are
-  in the header.
+  or imports a file listed as not shown is a finding of the rule `unclear`. The reading reads the
+  provider folder, not the packages in its requirements, whose names and versions are in the
+  header.
 - The model has no tools and gets no credentials. Its answer is a fixed JSON shape: a verdict,
   findings and a summary. The code takes it as it is meant: findings make a hold whatever the
   verdict says, a hold without a finding is held for that reason, a citation of a file or line
   the model was not shown is left out of its finding, and an explanation or summary that is too
   long is cut. The code is never led by the answer to run, open or fetch anything.
 - The code holds a release without asking the model when an added or changed file is binary code
-  or data, or text that declares another encoding than UTF-8 the way Python reads such a
+  or data, or text that declares a text encoding other than UTF-8 the way Python reads such a
   declaration (in which a line shown as a comment can run); and when its request (instructions,
   header, file table and content together) would hold more than 1.5 MB, or more than 900,000
   tokens as the token counting endpoint of the API counts them first. No text is numbered or

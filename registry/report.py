@@ -425,7 +425,8 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
         "The reading is on trial: nothing changes for this release, and a person of the Music "
         "Assistant team looks at it."
     )
-    if reading.reason is not None:
+    # without a summary, the code held the release instead of the model
+    if reading.summary is None:
         files = ", ".join(code_span(finding.file) for finding in shown)
         files += f" and {more} more" if more else ""
         return Failure(
@@ -446,14 +447,18 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
         )
     if more:
         items.append(f"- And {more} more findings.\n")
+    found = (
+        f"found what may cross a line of the rules:\n\n{''.join(items)}\n"
+        if items
+        else "held it without naming what may cross a line of the rules.\n\n"
+    )
     return Failure(
         key=f"hold {version}",
         heading=f"Version {version} may cross a line of the catalog rules",
         text=(
-            f"{intro} found what may cross a line of the rules:\n\n{''.join(items)}\n"
-            f"What the change does, in the words of the reading:\n\n"
-            f"{code_block(reading.summary or '')}\n"
-            f"{trial} If a finding is wrong, say so in this issue."
+            f"{intro} {found}What the change does, in the words of the reading:\n\n"
+            f"{code_block(reading.summary)}\n"
+            f"{trial} If {'a finding' if items else 'the hold'} is wrong, say so in this issue."
         ),
     )
 

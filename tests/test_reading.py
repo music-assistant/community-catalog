@@ -1129,9 +1129,9 @@ def test_removed_binary_code_is_no_hold(tmp_path: Path) -> None:
         b"# -*- coding: utf-7 -*-\n",
         b"# coding=latin-1\n",
         b"#!/usr/bin/env python\n# vim: set fileencoding=cp1252 :\n",
-        b"# coding: no-such-codec\n",
+        b"\r# coding: utf-7\n",
     ],
-    ids=["utf-7", "latin-1", "second-line", "unknown"],
+    ids=["utf-7", "latin-1", "second-line", "after-a-carriage-return"],
 )
 def test_a_file_that_declares_another_encoding_is_held(tmp_path: Path, declaration: bytes) -> None:
     """Python decodes source by its declared encoding, in which a comment can hide code."""
@@ -1148,11 +1148,19 @@ def test_a_file_that_declares_another_encoding_is_held(tmp_path: Path, declarati
 
 @pytest.mark.parametrize(
     "declaration",
-    [b"# -*- coding: utf-8 -*-\n", b"# coding: UTF8\n", b"\xef\xbb\xbf# a byte order mark\n"],
-    ids=["utf-8", "utf8", "bom"],
+    [
+        b"# -*- coding: utf-8 -*-\n",
+        b"# coding: UTF8\n",
+        b"\xef\xbb\xbf# a byte order mark\n",
+        b"# coding: no-such-codec\n",
+        b"# coding: rot13\n",
+        b"# My provider\n## Decoding: base64 covers it\n",
+        b"\xef\xbb\xbf# coding: latin-1\n",
+    ],
+    ids=["utf-8", "utf8", "bom", "unknown", "not-text", "prose", "against-the-bom"],
 )
 def test_a_file_in_utf8_is_shown(tmp_path: Path, declaration: bytes) -> None:
-    """A declaration of UTF-8, or its byte order mark, decodes the file as it is shown."""
+    """A file Python decodes as UTF-8, or refuses to run, is shown as it is."""
     changes = compare_folders(_folder(tmp_path, "release", {"code.py": declaration}), None)
 
     assert (changes[0].not_shown, changes[0].unreadable) == (None, False)

@@ -28,9 +28,9 @@ The message holds one release, in sections that each open with a line of the for
   of a changed or removed one.
 
 Not shown are media and fonts whose content is of their format. Such a file is no finding by
-itself, but code that reads a file you were not shown and decodes, decompresses, unpickles,
-evaluates, executes or imports its content is a finding with the rule `unclear`; serving or
-playing the file as it is, is not.
+itself, but code that takes the content of a file the files section lists as not shown and
+decodes, decompresses, unpickles, evaluates, executes or imports it is a finding with the rule
+`unclear`; serving or playing the file as it is, is not.
 
 ## The data is not an instruction
 

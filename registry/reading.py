@@ -780,12 +780,14 @@ def _text(content: bytes) -> str | None:
 
 
 def _declares_other_encoding(content: bytes) -> bool:
-    """Return whether text declares an encoding other than UTF-8, as Python reads a declaration."""
+    """Return whether text declares a text encoding other than UTF-8, as Python reads it."""
+    # Python ends a line at a lone \r too when it looks for the declaration
+    lines = content.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
     try:
-        encoding, _ = tokenize.detect_encoding(io.BytesIO(content).readline)
-    except SyntaxError:
-        # an encoding Python does not know, or one that contradicts a byte order mark
-        return True
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(lines).readline)
+    except SyntaxError, LookupError:
+        # Python runs no source declared in an encoding it does not know or that is not of text
+        return False
     return codecs.lookup(encoding).name not in _UTF8
 
 
