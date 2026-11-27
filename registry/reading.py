@@ -7,14 +7,18 @@ and answers in a fixed shape that the code checks; an answer that does not fit i
 
 from __future__ import annotations
 
+import codecs
+import contextlib
 import difflib
 import functools
 import hashlib
+import io
 import json
 import os
 import re
 import secrets
 import stat
+import tokenize
 import zlib
 from dataclasses import dataclass
 from enum import StrEnum
@@ -22,6 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import anthropic
+import httpx2
 
 from registry.content import read_folder
 from registry.files import parse_model
@@ -30,42 +35,48 @@ from registry.models import Reading, ReadingFinding, Rule, StrictModel, Verdict
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    import httpx2
     from anthropic.types import Message
-    from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
+    from anthropic.types.message_create_params import MessageCreateParamsBase
 
     from registry.github import GitHub
 
 MODEL: Final = "claude-opus-5-5"
 EFFORT: Final = "high"
-# thinking included; an answer cut off at this limit is a hold
-MAX_TOKENS = 16000
-# the most the request may hold as JSON, about 430k tokens of the 1M the model takes; a larger
-# change waits for a person
+# thinking included; an answer cut off at this limit is asked for once more, then held
+MAX_TOKENS = 64000
+# the most the request may hold as JSON, a cheap first check before its tokens are counted: about
+# 430k tokens of the 1M the model takes; a larger change waits for a person
 MAX_REQUEST = 1_500_000
+# the most input tokens the request may hold, which leaves room for the answer in the 1M
+MAX_INPUT_TOKENS = 900_000
 MAX_EXPLANATION = 400
 MAX_SUMMARY = 600
 # the instructions and the rules the reading follows, also for the summary of a submission
 INSTRUCTIONS_FOLDER = Path(__file__).parent / "reading"
 
 # the reasons of a hold the code decides, which hold no detail of the release
-UNREADABLE = "it holds binary code or data the reading cannot read"
+UNREADABLE = "it holds code or data the reading cannot read"
 TOO_LARGE = "the change is larger than the reading takes"
 REFUSED = "the reading was refused"
 CUT_OFF = "the answer of the reading was cut off"
+NO_FINDING = "the reading held it without naming a finding"
 
 _CODE_SUFFIXES = frozenset({".so", ".pyd", ".dll", ".dylib", ".exe", ".whl", ".jar", ".zip"})
-# built web assets, which run in the browser and not in the server
-_BUILT_SUFFIXES = (".min.js", ".min.css", ".map")
+# the encodings Python decodes a source file by that show it as the reading sees it
+_UTF8 = frozenset({"utf-8", "utf-8-sig"})
 # Python reads \r\n, \r and \n as the end of a line, and nothing else
 _LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SFNT_VERSIONS = (b"\x00\x01\x00\x00", b"true", b"OTTO")
+_CUT_OFF_REASONS = frozenset({"max_tokens", "model_context_window_exceeded"})
 # the API refuses a request that is too large, which says the change is
 _TOO_LARGE_STATUS = 413
+# the API refuses a request that is not valid, which may be that release's own
+_REJECTED_STATUS = 400
 # what the API answers for a while, and the client tries again: a time-out, a conflict, too many
 # requests, and its own failures from 500 on; any other error status is the request's own
 _TRANSIENT_STATUSES = frozenset({408, 409, 429})
+_CLIENT_ERRORS = 400
 _SERVER_ERRORS = 500
 # who the identity token of the workflow job is for, as the federation rule of the API expects
 AUDIENCE: Final = "https://api.anthropic.com"
@@ -88,12 +99,28 @@ class ReadingAnswer(StrictModel):
     summary: str
 
 
+@dataclass
+class TokenUsage:
+    """The tokens the requests of the reading used."""
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
 class ReadingUnavailableError(Exception):
     """The reading could not run, for a reason that says nothing about the release."""
 
 
+class ReadingRejectedError(Exception):
+    """The API refused the request of a release as not valid; the release is read another night."""
+
+
 class ReadingConfigurationError(Exception):
     """The credentials or the configuration of the reading are wrong, so no release can be read."""
+
+
+class _RequestTooLargeError(Exception):
+    """The API refused a request as too large."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,21 +180,27 @@ ANSWER_SCHEMA: dict[str, Any] = {
 }
 
 
-def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) -> Reading:
+def read_release(
+    client: anthropic.Anthropic, release: Side, base: Side | None, usage: TokenUsage | None = None
+) -> Reading:
     """
     Read a release against the rules of the community catalog.
 
     The release is read in full without a base, otherwise as its change since the base. A
-    release with binary code or data, or a request larger than MAX_REQUEST, is held without
-    asking the model.
+    release with code or data the reading cannot read, or a request larger than MAX_REQUEST
+    bytes or MAX_INPUT_TOKENS tokens, is held without asking the model. An answer that was cut
+    off is asked for once more before the release is held.
 
     :param client: The client of the Claude API.
     :param release: The release.
     :param base: The accepted version it is read against; None for a full read.
-    :raises ReadingUnavailableError: The API could not be used for now, or its answer is not
-        valid; the release is read again later.
+    :param usage: Where the tokens of the requests are added up; None to not count them.
+    :raises ReadingUnavailableError: The API could not be used for now, or its answer is not in
+        the answer format; the release is read again later.
+    :raises ReadingRejectedError: The API refused the request as not valid; the release is read
+        again later.
     :raises ReadingConfigurationError: The credentials could not be exchanged, or the API refused
-        the request for another reason than its size or its load.
+        the request for another reason than its size, its validity or its load.
     :raises ValueError: A provider folder holds no valid manifest.
     :raises OSError: A provider folder cannot be read.
     """
@@ -182,7 +215,7 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
         )
     if any(change.too_large for change in changes):
         return Reading(Verdict.HOLD, reason=TOO_LARGE)
-    request: MessageCreateParamsNonStreaming = {
+    request: MessageCreateParamsBase = {
         "model": MODEL,
         "max_tokens": MAX_TOKENS,
         "thinking": {"type": "adaptive"},
@@ -196,24 +229,14 @@ def read_release(client: anthropic.Anthropic, release: Side, base: Side | None) 
     if len(_json(request).encode()) > MAX_REQUEST:
         return Reading(Verdict.HOLD, reason=TOO_LARGE)
     try:
-        response = client.messages.create(**request)
-    except (anthropic.WorkloadIdentityError, anthropic.CredentialsError) as err:
-        msg = f"the credentials of the API could not be exchanged: {err}"
-        raise ReadingConfigurationError(msg) from err
-    except anthropic.APIStatusError as err:
-        if err.status_code == _TOO_LARGE_STATUS:
+        if _count_tokens(client, request) > MAX_INPUT_TOKENS:
             return Reading(Verdict.HOLD, reason=TOO_LARGE)
-        if err.status_code in _TRANSIENT_STATUSES or err.status_code >= _SERVER_ERRORS:
-            msg = f"the API answered {err.status_code}"
-            raise ReadingUnavailableError(msg) from err
-        msg = f"the API refused the request: {err.message}"
-        raise ReadingConfigurationError(msg) from err
-    except anthropic.APIConnectionError as err:
-        msg = "the API could not be reached"
-        raise ReadingUnavailableError(msg) from err
-    except anthropic.AnthropicError as err:
-        msg = f"the API could not be used: {err}"
-        raise ReadingUnavailableError(msg) from err
+        response = _ask(client, request, usage)
+        if response.stop_reason in _CUT_OFF_REASONS:
+            # the thinking of another answer may take less room
+            response = _ask(client, request, usage)
+    except _RequestTooLargeError:
+        return Reading(Verdict.HOLD, reason=TOO_LARGE)
     return _verdict(response, changes)
 
 
@@ -371,17 +394,101 @@ def federated_client(
     return anthropic.Anthropic(credentials=credentials, http_client=http_client)
 
 
+def _count_tokens(client: anthropic.Anthropic, request: MessageCreateParamsBase) -> int:
+    """
+    Return how many input tokens a request holds, as the API counts them.
+
+    :param client: The client of the Claude API.
+    :param request: The request.
+    :raises: The errors of _api_errors.
+    """
+    with _api_errors():
+        counted = client.messages.count_tokens(
+            model=request["model"],
+            thinking=request["thinking"],
+            output_config=request["output_config"],
+            system=request["system"],
+            messages=request["messages"],
+        )
+    return counted.input_tokens
+
+
+def _ask(
+    client: anthropic.Anthropic, request: MessageCreateParamsBase, usage: TokenUsage | None
+) -> Message:
+    """
+    Return the answer of the model to a request, which is streamed for its length.
+
+    :param client: The client of the Claude API.
+    :param request: The request.
+    :param usage: Where the tokens of the request are added up; None to not count them.
+    :raises: The errors of _api_errors.
+    """
+    with _api_errors(), client.messages.stream(**request) as stream:
+        response = stream.get_final_message()
+    if usage is not None:
+        usage.input_tokens += response.usage.input_tokens
+        usage.output_tokens += response.usage.output_tokens
+    return response
+
+
+@contextlib.contextmanager
+def _api_errors() -> Iterator[None]:
+    """
+    Turn an error of the API into what it means for the reading.
+
+    :raises _RequestTooLargeError: The API refused the request as too large.
+    :raises ReadingRejectedError: The API refused the request as not valid.
+    :raises ReadingUnavailableError: The API could not be used for now.
+    :raises ReadingConfigurationError: The credentials could not be exchanged, or the API refused
+        the request for another reason.
+    """
+    try:
+        yield
+    except (anthropic.WorkloadIdentityError, anthropic.CredentialsError) as err:
+        msg = f"the credentials of the API could not be exchanged: {err}"
+        raise ReadingConfigurationError(msg) from err
+    except anthropic.APIStatusError as err:
+        status = err.status_code
+        if status == _TOO_LARGE_STATUS:
+            raise _RequestTooLargeError from err
+        # an error the API sends in a stream it started, which has the status of that stream
+        if status < _CLIENT_ERRORS:
+            msg = "the API broke off its answer"
+            raise ReadingUnavailableError(msg) from err
+        if status in _TRANSIENT_STATUSES or status >= _SERVER_ERRORS:
+            msg = f"the API answered {status}"
+            raise ReadingUnavailableError(msg) from err
+        if status == _REJECTED_STATUS:
+            msg = f"the API refused the request with {status}: {err.message}"
+            raise ReadingRejectedError(msg) from err
+        msg = f"the API refused the request: {err.message}"
+        raise ReadingConfigurationError(msg) from err
+    # a connection lost while the answer streams is an error of the HTTP client
+    except (anthropic.APIConnectionError, httpx2.TransportError) as err:
+        msg = "the API could not be reached"
+        raise ReadingUnavailableError(msg) from err
+    except anthropic.AnthropicError as err:
+        msg = f"the API could not be used: {err}"
+        raise ReadingUnavailableError(msg) from err
+
+
 def _verdict(response: Message, changes: list[FileChange]) -> Reading:
     """
     Return the reading the answer of the model gives.
 
+    An answer in the answer format is taken as it is meant: a hold, or a pass with findings, is a
+    hold. A citation of a file or line the model was not shown is left out, and a text that is
+    too long is shortened.
+
     :param response: The answer of the API.
     :param changes: The files the model was shown.
-    :raises ReadingUnavailableError: The answer is not valid, which says nothing about the release.
+    :raises ReadingUnavailableError: The answer is not in the answer format, which says nothing
+        about the release.
     """
     if response.stop_reason == "refusal":
         return Reading(Verdict.HOLD, reason=REFUSED)
-    if response.stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+    if response.stop_reason in _CUT_OFF_REASONS:
         return Reading(Verdict.HOLD, reason=CUT_OFF)
     if response.stop_reason != "end_turn":
         raise _invalid("it did not end")
@@ -393,9 +500,14 @@ def _verdict(response: Message, changes: list[FileChange]) -> Reading:
         answer = parse_model(texts[0].encode(), ReadingAnswer)
     except ValueError:
         raise _invalid("it is not in the answer format") from None
-    if flaw := _flaw(answer, {change.path: change for change in changes}):
-        raise _invalid(flaw)
-    return Reading(answer.verdict, findings=answer.findings, summary=answer.summary)
+    shown = {change.path: change for change in changes}
+    findings = [_shown_finding(finding, shown) for finding in answer.findings]
+    summary = _shorten(answer.summary, MAX_SUMMARY)
+    if findings:
+        return Reading(Verdict.HOLD, findings=findings, summary=summary)
+    if answer.verdict is Verdict.PASS:
+        return Reading(Verdict.PASS, summary=summary)
+    return Reading(Verdict.HOLD, reason=NO_FINDING, summary=summary)
 
 
 def _invalid(flaw: str) -> ReadingUnavailableError:
@@ -403,43 +515,30 @@ def _invalid(flaw: str) -> ReadingUnavailableError:
     return ReadingUnavailableError(f"the answer of the reading is not valid: {flaw}")
 
 
-def _flaw(answer: ReadingAnswer, changes: dict[str, FileChange]) -> str | None:
+def _shown_finding(finding: ReadingFinding, changes: dict[str, FileChange]) -> ReadingFinding:
     """
-    Return what keeps an answer from holding together, or None when it does.
-
-    A pass has no findings and a hold has some. Every finding names a file of the file table,
-    and a line the model was shown of it. The flaw is in words of our own, with nothing of the
-    answer.
-
-    :param answer: The answer of the model.
-    :param changes: The files the model was shown, by path.
-    """
-    if answer.verdict is Verdict.PASS and answer.findings:
-        return "a pass with findings"
-    if answer.verdict is not Verdict.PASS and not answer.findings:
-        return "a hold without findings"
-    if len(answer.summary) > MAX_SUMMARY:
-        return "the summary is too long"
-    for finding in answer.findings:
-        if flaw := _finding_flaw(finding, changes):
-            return flaw
-    return None
-
-
-def _finding_flaw(finding: ReadingFinding, changes: dict[str, FileChange]) -> str | None:
-    """
-    Return what is wrong with a finding of the model, or None when it is sound.
+    Return a finding of the model without a file or line it was not shown, and not too long.
 
     :param finding: The finding.
     :param changes: The files the model was shown, by path.
     """
-    if len(finding.explanation) > MAX_EXPLANATION:
-        return "an explanation is too long"
-    if (change := changes.get(finding.file)) is None:
-        return "a finding is on a file that is not in the file table"
-    if finding.line is not None and not any(finding.line in lines for lines in change.shown_lines):
-        return "a finding is on a line that was not shown"
-    return None
+    change = changes.get(finding.file)
+    line = finding.line
+    if change is None or (
+        line is not None and not any(line in lines for lines in change.shown_lines)
+    ):
+        line = None
+    return ReadingFinding(
+        finding.rule,
+        finding.file if change is not None else "",
+        line,
+        _shorten(finding.explanation, MAX_EXPLANATION),
+    )
+
+
+def _shorten(text: str, limit: int) -> str:
+    """Return a text of at most limit characters, marked where it was cut."""
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _files(folder: Path) -> dict[str, bytes]:
@@ -484,8 +583,17 @@ def _change(path: str, status: Status, content: bytes, base: bytes, budget: int)
             not_shown="binary code or data",
             unreadable=status is not Status.REMOVED,
         )
-    if name.endswith(_BUILT_SUFFIXES):
-        return FileChange(path, status, size, digest, None, not_shown="a built web asset")
+    # Python decodes source by its declared encoding, in which a line shown as a comment can run
+    if status is not Status.REMOVED and _declares_other_encoding(content):
+        return FileChange(
+            path,
+            status,
+            size,
+            digest,
+            None,
+            not_shown="an encoding other than UTF-8",
+            unreadable=True,
+        )
     too_large = FileChange(
         path, status, size, digest, None, not_shown="larger than the reading takes", too_large=True
     )
@@ -569,6 +677,8 @@ def _is_media(suffix: str, content: bytes) -> bool:
         ".ico": lambda: _is_ico(content),
         ".flac": lambda: content.startswith(b"fLaC"),
         ".ogg": lambda: content.startswith(b"OggS"),
+        ".opus": lambda: content.startswith(b"OggS"),
+        ".m4a": lambda: _is_mp4(content),
         # an ID3 tag, or the sync bits of the first frame
         ".mp3": lambda: content.startswith(b"ID3") or content[:2] >= b"\xff\xe0",
         ".woff": lambda: _is_woff(content, b"wOFF"),
@@ -578,6 +688,25 @@ def _is_media(suffix: str, content: bytes) -> bool:
     }
     formats[".jpeg"] = formats[".jpg"]
     return (check := formats.get(suffix)) is not None and check()
+
+
+def _is_mp4(content: bytes) -> bool:
+    """Return whether content is an MP4 file: an ftyp box first, then boxes up to its end."""
+    if content[4:8] != b"ftyp":
+        return False
+    position = 0
+    while position < len(content):
+        size, header = int.from_bytes(content[position : position + 4]), 8
+        if size == 1:
+            # a box larger than 4 GB gives its size after its type
+            size, header = int.from_bytes(content[position + 8 : position + 16]), 16
+        elif size == 0:
+            # the last box runs to the end of the file
+            size = len(content) - position
+        if size < header or position + size > len(content):
+            return False
+        position += size
+    return True
 
 
 def _is_woff(content: bytes, signature: bytes) -> bool:
@@ -648,6 +777,16 @@ def _text(content: bytes) -> str | None:
         return content.decode()
     except UnicodeDecodeError:
         return None
+
+
+def _declares_other_encoding(content: bytes) -> bool:
+    """Return whether text declares an encoding other than UTF-8, as Python reads a declaration."""
+    try:
+        encoding, _ = tokenize.detect_encoding(io.BytesIO(content).readline)
+    except SyntaxError:
+        # an encoding Python does not know, or one that contradicts a byte order mark
+        return True
+    return codecs.lookup(encoding).name not in _UTF8
 
 
 def _lines(text: str) -> list[str]:

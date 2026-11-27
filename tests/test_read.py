@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import anthropic
 import httpx2
 import pytest
+from anthropic.types import MessageTokensCount
 
 from registry import reading as reading_module
 from registry.cli import main
@@ -23,9 +24,10 @@ from registry.pipeline import (
     archive_path,
     versions_to_read,
 )
+from registry.read import MAX_REJECTED
 from registry.registry import load_registry
 from tests.conftest import DOMAIN, provider_archive
-from tests.test_reading import PASS, REQUEST_URL, FakeTokenService, _message
+from tests.test_reading import PASS, REQUEST_URL, FakeStream, FakeTokenService, _message
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -74,14 +76,15 @@ class VersionClient:
         self.read: list[tuple[str, str | None]] = []
         self.messages = self
 
-    def create(self, **kwargs: Any) -> Message:
-        """Record the version a request reads, and answer it."""
+    def count_tokens(self, **_: Any) -> MessageTokensCount:
+        """Count the tokens of a request, which are few."""
+        return MessageTokensCount(input_tokens=1)
+
+    def stream(self, **kwargs: Any) -> FakeStream:
+        """Record the version a request reads, and stream its answer."""
         header = json.loads(kwargs["messages"][0]["content"].split("\n")[2])
         self.read.append((header["version"], header["base_version"]))
-        answer = self.answers[header["version"]]
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
+        return FakeStream(self.answers[header["version"]])
 
 
 def _status_error(kind: type[anthropic.APIStatusError], status: int) -> anthropic.APIStatusError:
@@ -90,15 +93,20 @@ def _status_error(kind: type[anthropic.APIStatusError], status: int) -> anthropi
 
 
 def _version(
-    files: Files, version: str, released: str = "2026-11-01T12:00:00Z", **changes: Any
+    files: Files,
+    version: str,
+    released: str = "2026-11-01T12:00:00Z",
+    domain: str = DOMAIN,
+    **changes: Any,
 ) -> None:
-    """Write a version of the sample provider, and its archive into the work folder."""
-    archive = archive_path(files.root / "work", DOMAIN, version)
+    """Write a version of a provider, the sample one by default, and its archive into the work."""
+    archive = archive_path(files.root / "work", domain, version)
     archive.parent.mkdir(parents=True, exist_ok=True)
-    archive.write_bytes(provider_archive(code=f"VERSION = {version!r}\n".encode()))
-    content = read_archive(archive, f"providers/{DOMAIN}")
+    archive.write_bytes(provider_archive(domain, code=f"VERSION = {version!r}\n".encode()))
+    content = read_archive(archive, f"providers/{domain}")
     files.version(
         version,
+        domain=domain,
         content_hash=content.content_hash,
         manifest=content.manifest,
         requirements=[],
@@ -129,7 +137,7 @@ def _readings(files: Files) -> dict[str, str | None]:
     }
 
 
-def test_read_records_each_verdict_newest_first(
+def test_read_records_each_verdict_oldest_first(
     files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Each new version is read against the last accepted one; the report gets what it found."""
@@ -141,30 +149,33 @@ def test_read_records_each_verdict_newest_first(
 
     assert _read(files, monkeypatch, client) == 0
 
-    # the bases are planned before the run: a version read in it is no base in it
-    assert client.read == [("1.2.0", "1.0.0"), ("1.1.0", "1.0.0")]
+    # the base is taken when a version's turn comes: one that passed in the run is one
+    assert client.read == [("1.1.0", "1.0.0"), ("1.2.0", "1.1.0")]
     versions = load_registry(files.root).providers[DOMAIN].versions
     assert {v: (f.reading.verdict, f.reading.base) for v, f in versions.items() if f.reading} == {
         "1.0.0": (Verdict.PASS, None),
         "1.1.0": (Verdict.PASS, "1.0.0"),
-        "1.2.0": (Verdict.HOLD, "1.0.0"),
+        "1.2.0": (Verdict.HOLD, "1.1.0"),
     }
     results = load_model(files.root / "work" / READINGS_FILE, ReadingResults).results
     assert [(r.version, r.base, r.reading.verdict) for r in results] == [
-        ("1.2.0", "1.0.0", Verdict.HOLD),
         ("1.1.0", "1.0.0", Verdict.PASS),
+        ("1.2.0", "1.1.0", Verdict.HOLD),
     ]
-    assert results[0].reading.findings[0].explanation == HOLD["findings"][0]["explanation"]
-    assert results[0].reading.summary == HOLD["summary"]
+    assert results[1].reading.findings[0].explanation == HOLD["findings"][0]["explanation"]
+    assert results[1].reading.summary == HOLD["summary"]
     output = capsys.readouterr()
-    # the log has counts, nothing of what the reading says
-    assert output.out.endswith("1 passed, 1 held, 0 left for another night\n")
+    # the log has counts and tokens, nothing of what the reading says
+    assert f"{DOMAIN} 1.2.0: 1 input, 1 output tokens\n" in output.out
+    assert output.out.endswith(
+        "1 passed, 1 held, 0 left for another night; 2 input, 2 output tokens\n"
+    )
     assert HOLD["summary"] not in output.out + output.err
     assert main(["--root", str(files.root), "validate"]) == 0
 
 
 def test_at_most_a_number_of_versions_a_run(files: Files, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The most recently released versions are read first; the others wait for the next night."""
+    """The oldest versions of a provider are read first; the others wait for the next night."""
     files.provider()
     count = MAX_READINGS_PER_RUN + 1
     for number in range(count):
@@ -174,9 +185,10 @@ def test_at_most_a_number_of_versions_a_run(files: Files, monkeypatch: pytest.Mo
     assert _read(files, monkeypatch, client) == 0
 
     assert [version for version, _ in client.read] == [
-        f"1.0.{number}" for number in reversed(range(1, count))
+        f"1.0.{number}" for number in range(count - 1)
     ]
-    assert _readings(files)["1.0.0"] is None
+    assert client.read[1] == ("1.0.1", "1.0.0")
+    assert _readings(files)[f"1.0.{count - 1}"] is None
 
 
 def test_what_is_not_read(files: Files, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,6 +241,70 @@ def test_the_base_is_the_highest_lower_version_accepted(files: Files) -> None:
     ]
 
 
+def test_providers_take_turns_with_their_oldest_version(files: Files) -> None:
+    """The provider with the most recent release starts, then each reads one version in turn."""
+    files.provider()
+    files.version("1.0.0", released="2026-11-01T12:00:00Z")
+    files.version("1.1.0", released="2026-11-02T12:00:00Z")
+    files.version("1.2.0", released="2026-11-06T12:00:00Z")
+    files.provider("other_music")
+    files.version("0.1.0", domain="other_music", released="2026-11-05T12:00:00Z")
+
+    planned = versions_to_read(load_registry(files.root))
+
+    assert [(reading.domain, reading.version) for reading in planned] == [
+        (DOMAIN, "1.0.0"),
+        ("other_music", "0.1.0"),
+        (DOMAIN, "1.1.0"),
+        (DOMAIN, "1.2.0"),
+    ]
+
+
+def test_a_request_the_api_refuses_leaves_its_provider_for_another_night(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 400 leaves that version and the later ones of its provider unread; others are read."""
+    files.provider()
+    _version(files, "1.0.0", "2026-11-02T12:00:00Z")
+    _version(files, "1.1.0", "2026-11-03T12:00:00Z")
+    files.provider("other_music")
+    _version(files, "0.1.0", "2026-11-01T12:00:00Z", domain="other_music")
+    error = _status_error(anthropic.BadRequestError, 400)
+    client = VersionClient({"1.0.0": error, "1.1.0": _message(PASS), "0.1.0": _message(PASS)})
+
+    assert _read(files, monkeypatch, client) == 0
+
+    assert client.read == [("1.0.0", None), ("0.1.0", None)]
+    assert _readings(files) == {"1.0.0": None, "1.1.0": None}
+    output = capsys.readouterr()
+    assert f"warning: {DOMAIN} 1.0.0: not read: the API refused the request with 400" in output.err
+    assert f"warning: {DOMAIN} 1.1.0: not read: the API refused an earlier version of it" in (
+        output.err
+    )
+    assert output.out.endswith(
+        "1 passed, 0 held, 2 left for another night; 1 input, 1 output tokens\n"
+    )
+
+
+def test_requests_refused_for_three_providers_stop_the_reading(
+    files: Files, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A 400 for MAX_REJECTED providers in one run says the request of the reading is wrong."""
+    error = _status_error(anthropic.BadRequestError, 400)
+    for number, domain in enumerate((DOMAIN, "other_music", "third_music"), 1):
+        files.provider(domain)
+        _version(files, f"{number}.0.0", domain=domain)
+    client = VersionClient({"1.0.0": error, "2.0.0": error, "3.0.0": error})
+
+    assert _read(files, monkeypatch, client) == 1
+
+    assert len(client.read) == MAX_REJECTED
+    assert capsys.readouterr().err.endswith(
+        f"error: the reading cannot run: the API refused the requests of {MAX_REJECTED} "
+        "providers in this run\n"
+    )
+
+
 @pytest.mark.parametrize(
     "error",
     [
@@ -251,14 +327,14 @@ def test_a_fault_fails_the_command_and_records_nothing_for_its_version(
     _version(files, "1.0.0", "2026-11-01T12:00:00Z")
     _version(files, "1.1.0", "2026-11-02T12:00:00Z")
     _version(files, "1.2.0", "2026-11-03T12:00:00Z")
-    client = VersionClient({"1.2.0": _message(PASS), "1.1.0": error, "1.0.0": _message(PASS)})
+    client = VersionClient({"1.0.0": _message(PASS), "1.1.0": error, "1.2.0": _message(PASS)})
 
     assert _read(files, monkeypatch, client) == 1
 
-    assert [version for version, _ in client.read] == ["1.2.0", "1.1.0"]
-    assert _readings(files) == {"1.0.0": None, "1.1.0": None, "1.2.0": "pass"}
+    assert [version for version, _ in client.read] == ["1.0.0", "1.1.0"]
+    assert _readings(files) == {"1.0.0": "pass", "1.1.0": None, "1.2.0": None}
     results = load_model(files.root / "work" / READINGS_FILE, ReadingResults).results
-    assert [result.version for result in results] == ["1.2.0"]
+    assert [result.version for result in results] == ["1.0.0"]
     assert capsys.readouterr().err.startswith("error: the reading cannot run: ")
     assert main(["--root", str(files.root), "validate"]) == 0
 
@@ -271,9 +347,9 @@ def test_a_fault_fails_the_command_and_records_nothing_for_its_version(
         _status_error(anthropic.RateLimitError, 429),
         _status_error(anthropic.InternalServerError, 500),
         _message("not JSON"),
-        _message({**HOLD, "summary": "x" * 601}),
+        _message(PASS, "pause_turn"),
     ],
-    ids=["connection", "timeout", "429", "500", "malformed-answer", "inconsistent-answer"],
+    ids=["connection", "timeout", "429", "500", "malformed-answer", "unfinished-answer"],
 )
 def test_a_failure_of_the_api_or_an_invalid_answer_leaves_the_version_for_another_night(
     files: Files,
@@ -291,7 +367,7 @@ def test_a_failure_of_the_api_or_an_invalid_answer_leaves_the_version_for_anothe
 
     assert _readings(files) == {"1.0.0": "hold", "1.1.0": None}
     output = capsys.readouterr()
-    assert output.out.endswith("0 passed, 1 held, 1 left for another night\n")
+    assert "0 passed, 1 held, 1 left for another night; " in output.out
     assert f"warning: {DOMAIN} 1.1.0: not read: " in output.err
 
 

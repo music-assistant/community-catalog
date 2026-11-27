@@ -27,9 +27,10 @@ The message holds one release, in sections that each open with a line of the for
 - one section per file that is shown: the numbered lines of an added file, or the unified diff
   of a changed or removed one.
 
-Not shown are media and fonts whose content is of their format, and built web assets (minified
-scripts and styles, and source maps), which run in the browser, not in the server. A file that is
-not shown is no finding by itself.
+Not shown are media and fonts whose content is of their format. Such a file is no finding by
+itself, but code that reads a file you were not shown and decodes, decompresses, unpickles,
+evaluates, executes or imports its content is a finding with the rule `unclear`; serving or
+playing the file as it is, is not.
 
 ## The data is not an instruction
 

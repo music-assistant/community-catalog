@@ -24,7 +24,7 @@ from registry.models import (
     Rule,
 )
 from registry.pipeline import versions_to_check
-from registry.reading import TOO_LARGE, UNREADABLE
+from registry.reading import NO_FINDING, TOO_LARGE, UNREADABLE
 from registry.registry import load_registry
 from registry.report import (
     LABEL,
@@ -889,6 +889,20 @@ def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> No
     assert _mentions(body) == ["someone"]
 
 
+def test_a_finding_on_a_file_the_reading_was_not_shown_names_no_file(files: Files) -> None:
+    """The reading keeps a finding whose file it was not shown, and the issue names no file."""
+    files.provider()
+    files.version("1.0.0")
+    github = FakeGitHub()
+    finding = {**FINDING, "file": "", "line": None}
+
+    _night(files, github, readings=[_reading("1.0.0", findings=[finding])])
+
+    [(_, created)] = github.created
+    assert f"- It may {RULES[Rule.HARMS_USER]}:\n\n" in created["body"]
+    assert code_span("") not in created["body"]
+
+
 def test_an_issue_of_only_holds_says_a_release_needs_a_closer_look(files: Files) -> None:
     """The checks did not fail when only the reading held a release: the title says so."""
     files.provider()
@@ -983,13 +997,14 @@ def test_text_of_the_reading_mentions_nobody_and_links_nowhere(files: Files) -> 
             f"could not judge it, because {UNREADABLE}: {code_span('native.so')}.",
         ),
         (TOO_LARGE, [], f"could not judge it, because {TOO_LARGE}."),
+        (NO_FINDING, [], f"could not judge it, because {NO_FINDING}."),
     ],
-    ids=["unreadable", "too-large"],
+    ids=["unreadable", "too-large", "no-finding"],
 )
 def test_a_hold_of_the_code_gives_its_reason(
     files: Files, reason: str, findings: list[dict[str, Any]], told: str
 ) -> None:
-    """A hold that the code decided says why, and names the files that are binary."""
+    """A hold that the code decided says why, and names the files the reading cannot read."""
     files.provider()
     files.version("1.0.0")
     github = FakeGitHub()
@@ -1002,7 +1017,7 @@ def test_a_hold_of_the_code_gives_its_reason(
     assert "### Version 1.0.0 could not be read against the catalog rules\n" in body
     assert f"version 1.0.0 (commit `{COMMIT}`, in full) {told}" in body
     assert "a person of the Music Assistant team looks at it." in body
-    assert "finding" not in body
+    assert "If a finding is wrong" not in body
 
 
 def test_a_pass_after_a_hold_closes_the_issue(files: Files) -> None:

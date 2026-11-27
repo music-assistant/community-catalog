@@ -7,12 +7,12 @@ import json
 import re
 import urllib.request
 import zlib
-from typing import TYPE_CHECKING, Any, BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Self, cast
 
 import anthropic
 import httpx2
 import pytest
-from anthropic.types import Message
+from anthropic.types import Message, MessageTokensCount
 
 from registry import reading as reading_module
 from registry.cli import main
@@ -25,16 +25,22 @@ from registry.reading import (
     CUT_OFF,
     EFFORT,
     INSTRUCTIONS_FOLDER,
+    MAX_EXPLANATION,
+    MAX_INPUT_TOKENS,
     MAX_REQUEST,
+    MAX_SUMMARY,
     MAX_TOKENS,
     MODEL,
+    NO_FINDING,
     REFUSED,
     TOO_LARGE,
     UNREADABLE,
     ReadingConfigurationError,
+    ReadingRejectedError,
     ReadingUnavailableError,
     Side,
     Status,
+    TokenUsage,
     compare_folders,
     federated_client,
     identity_token_provider,
@@ -78,6 +84,16 @@ def _sfnt(version: bytes = b"\x00\x01\x00\x00", offset: int = 28) -> bytes:
     return version + (1).to_bytes(2) + b"\x00" * 6 + record + b"\x00\x01\x00\x00"
 
 
+def _mp4(*boxes: bytes) -> bytes:
+    """Return an MP4 file: an ftyp box, then these boxes."""
+    return b"\x00\x00\x00\x14ftypM4A \x00\x00\x00\x00M4A " + b"".join(boxes)
+
+
+def _box(kind: bytes, body: bytes = b"", size: int | None = None) -> bytes:
+    """Return a box of an MP4 file, of its own size unless another is given."""
+    return (len(body) + 8 if size is None else size).to_bytes(4) + kind + body
+
+
 def _woff(signature: bytes, extra: int = 0) -> bytes:
     """Return a WOFF or WOFF2 font that gives its length."""
     return signature + b"\x00\x01\x00\x00" + (16 + extra).to_bytes(4) + b"\x00" * 4
@@ -93,6 +109,10 @@ MEDIA = {
     "icon.ico": _ico(),
     "sound.flac": b"fLaC\x00\x00\x00\x22",
     "sound.ogg": b"OggS\x00\x02",
+    "sound.opus": b"OggS\x00\x02",
+    "sound.m4a": _mp4(_box(b"moov", b"\x00" * 8), _box(b"mdat", b"audio")),
+    "last.m4a": _mp4(_box(b"mdat", b"audio to the end", size=0)),
+    "large.m4a": _mp4((1).to_bytes(4) + b"mdat" + (20).to_bytes(8) + b"\x00" * 4),
     "sound.mp3": b"ID3\x04\x00",
     "frames.mp3": b"\xff\xfb\x90\x00",
     "font.woff": _woff(b"wOFF"),
@@ -132,26 +152,61 @@ HOLD: dict[str, Any] = {
 }
 
 
-class FakeClient:
-    """A client of the API that records each request and answers with what it is given."""
+class FakeStream:
+    """A streamed answer of the API, which ends in a message or breaks off with an error."""
 
-    def __init__(self, answer: Message | Exception | None = None) -> None:
+    def __init__(self, answer: Message | Exception) -> None:
         """
-        Return a client that answers each request the same.
+        Return a streamed answer.
 
-        :param answer: The message to answer with or the error to raise; None for no request.
+        :param answer: The message it ends in, or the error it breaks off with.
         """
         self.answer = answer
-        self.requests: list[dict[str, Any]] = []
-        self.messages = self
 
-    def create(self, **kwargs: Any) -> Message:
-        """Record a request and answer it."""
-        self.requests.append(kwargs)
-        assert self.answer is not None, "the reading asked the API"
+    def __enter__(self) -> Self:
+        """Open the stream."""
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        """Close the stream."""
+
+    def get_final_message(self) -> Message:
+        """Return the message the stream ends in, or raise the error it breaks off with."""
         if isinstance(self.answer, Exception):
             raise self.answer
         return self.answer
+
+
+class FakeClient:
+    """A client of the API that records each request and answers with what it is given."""
+
+    def __init__(self, *answers: Message | Exception, tokens: int | Exception = 1) -> None:
+        """
+        Return a client that answers the requests in turn, and any after them as the last.
+
+        :param answers: The messages to answer with or the errors to raise; none for no request.
+        :param tokens: The input tokens of each request as the API counts them, or the error
+            counting them raises.
+        """
+        self.answers = answers
+        self.tokens = tokens
+        self.requests: list[dict[str, Any]] = []
+        self.counted: list[dict[str, Any]] = []
+        self.messages = self
+
+    def count_tokens(self, **kwargs: Any) -> MessageTokensCount:
+        """Record a request whose tokens are counted, and count them."""
+        self.counted.append(kwargs)
+        assert self.answers, "the reading asked the API"
+        if isinstance(self.tokens, Exception):
+            raise self.tokens
+        return MessageTokensCount(input_tokens=self.tokens)
+
+    def stream(self, **kwargs: Any) -> FakeStream:
+        """Record a request and stream the answer of its turn."""
+        self.requests.append(kwargs)
+        assert self.answers, "the reading asked the API"
+        return FakeStream(self.answers[min(len(self.requests), len(self.answers)) - 1])
 
 
 class FakeTokenService:
@@ -205,11 +260,15 @@ class FakeAPI:
             }
             return httpx2.Response(200, json=token)
         self.requests.append(request)
+        if request.url.path == "/v1/messages/count_tokens":
+            return httpx2.Response(200, json={"input_tokens": 1})
         if self.messages != 200:
             # tried again by the client at once
             error = {"type": "error", "error": {"type": "authentication_error", "message": "no"}}
             return httpx2.Response(self.messages, headers={"retry-after-ms": "1"}, json=error)
-        return httpx2.Response(200, json=_message(PASS).model_dump(mode="json"))
+        return httpx2.Response(
+            200, headers={"content-type": "text/event-stream"}, content=_events(_message(PASS))
+        )
 
     def client(self, service: FakeTokenService) -> anthropic.Anthropic:
         """Return the client of the read step, with the identity tokens of a token service."""
@@ -252,9 +311,31 @@ def _message(
     )
 
 
+def _events(message: Message) -> bytes:
+    """Return a message as the events of a stream of the API, each block whole at its start."""
+    content = message.model_dump(mode="json")["content"]
+    start = message.model_dump(mode="json") | {"content": [], "stop_reason": None}
+    events: list[dict[str, Any]] = [{"type": "message_start", "message": start}]
+    for index, block in enumerate(content):
+        events.append({"type": "content_block_start", "index": index, "content_block": block})
+        events.append({"type": "content_block_stop", "index": index})
+    events.append(
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": message.stop_reason, "stop_sequence": None},
+            "usage": {"output_tokens": message.usage.output_tokens},
+        }
+    )
+    events.append({"type": "message_stop"})
+    return "".join(
+        f"event: {event['type']}\ndata: {json.dumps(event)}\n\n" for event in events
+    ).encode()
+
+
 def _folder(tmp_path: Path, name: str, files: dict[str, bytes]) -> Path:
     """Return a provider folder unpacked from a GitHub archive of these files."""
     archive = tmp_path / f"{name}.tar.gz"
+    archive.parent.mkdir(parents=True, exist_ok=True)
     archive.write_bytes(build_archive({f"{FOLDER}/{path}": data for path, data in files.items()}))
     unpack(archive, FOLDER, target := tmp_path / name)
     return target
@@ -265,6 +346,7 @@ def _read(
     client: FakeClient | anthropic.Anthropic,
     release: dict[str, bytes] = RELEASE,
     base: dict[str, bytes] | None = BASE,
+    usage: TokenUsage | None = None,
 ) -> Reading:
     """Read a release against a base with a client, the fake one or one with a fake API."""
     return read_release(
@@ -273,6 +355,7 @@ def _read(
         Side(_folder(tmp_path, "base", base), "1.0.0", "https://github.com/a/b/commit/1")
         if base is not None
         else None,
+        usage,
     )
 
 
@@ -320,7 +403,7 @@ def test_changes_between_two_archives(tmp_path: Path) -> None:
         "logo.png": (Status.CHANGED, "media or font"),
         "manifest.json": (Status.CHANGED, None),
         "vendor/lib.py": (Status.ADDED, None),
-        "web/app.min.js": (Status.ADDED, "a built web asset"),
+        "web/app.min.js": (Status.ADDED, None),
         "web/page.js": (Status.ADDED, None),
     }
     assert not any(change.unreadable for change in changes.values())
@@ -358,7 +441,7 @@ def test_a_first_read_takes_every_file_as_added(tmp_path: Path) -> None:
     "path", ["code.py", "settings.json", "page.js", "style.css", "notes.txt", "page.html"]
 )
 def test_long_lines_are_shown(tmp_path: Path, path: str) -> None:
-    """Text with a long line is shown: only built web assets are left out."""
+    """Text with a long line is shown."""
     content = b'{"key": "' + b"x" * 2001 + b'"}\n'
 
     changes = compare_folders(_folder(tmp_path, "release", {path: content}), None)
@@ -367,11 +450,11 @@ def test_long_lines_are_shown(tmp_path: Path, path: str) -> None:
 
 
 @pytest.mark.parametrize("path", ["app.min.js", "style.min.css", "app.js.map", "APP.MIN.JS"])
-def test_built_web_assets_are_left_out(tmp_path: Path, path: str) -> None:
-    """Minified scripts and styles and source maps run in the browser, and are only listed."""
+def test_built_web_assets_are_shown(tmp_path: Path, path: str) -> None:
+    """Minified scripts and styles and source maps can reach the browser, so they are read too."""
     changes = compare_folders(_folder(tmp_path, "release", {path: b"var a=1;\n"}), None)
 
-    assert (changes[0].not_shown, changes[0].unreadable) == ("a built web asset", False)
+    assert (changes[0].not_shown, changes[0].text) == (None, "     1\tvar a=1;")
 
 
 @pytest.mark.parametrize("path", sorted(MEDIA))
@@ -397,6 +480,11 @@ def test_media_of_its_own_format_is_listed(tmp_path: Path, path: str) -> None:
         ("icon.ico", _ico()[:-3]),
         ("sound.flac", b"fLaX\x00\x00"),
         ("sound.ogg", b"OggX\x00\x02"),
+        ("sound.opus", b"OggX\x00\x02"),
+        ("sound.m4a", _box(b"moov") + _mp4()),
+        ("sound.m4a", _mp4(_box(b"mdat", b"audio", size=40))),
+        ("sound.m4a", _mp4(_box(b"mdat", size=4))),
+        ("sound.m4a", _mp4(b"\x7fELF")),
         ("sound.mp3", b"\xff\x10\x00\x00"),
         ("font.woff", _woff(b"wOFF", extra=1)),
         ("font.woff2", _woff(b"wOFF")),
@@ -416,6 +504,11 @@ def test_media_of_its_own_format_is_listed(tmp_path: Path, path: str) -> None:
         "ico-image-outside",
         "flac-magic",
         "ogg-magic",
+        "opus-magic",
+        "m4a-without-ftyp-first",
+        "m4a-box-past-the-end",
+        "m4a-box-smaller-than-its-header",
+        "m4a-data-after-the-boxes",
         "mp3-magic",
         "woff-of-another-length",
         "woff-named-woff2",
@@ -465,6 +558,8 @@ def test_a_pass(tmp_path: Path) -> None:
 
     assert reading == Reading(Verdict.PASS, summary="Adds an API module.")
     [request] = client.requests
+    # its tokens are counted with the same settings first
+    assert client.counted == [{key: request[key] for key in request if key != "max_tokens"}]
     assert set(request) == {
         "model",
         "max_tokens",
@@ -509,6 +604,7 @@ def test_the_data_lies_between_lines_of_a_random_boundary(tmp_path: Path) -> Non
         'file "helpers.py": unified diff',
         'file "manifest.json": unified diff',
         'file "vendor/lib.py": numbered lines',
+        'file "web/app.min.js": numbered lines',
         'file "web/page.js": numbered lines',
         "end",
     ]
@@ -560,10 +656,32 @@ def test_a_hold(tmp_path: Path) -> None:
 def test_a_refused_or_cut_off_answer_is_a_hold(
     tmp_path: Path, stop_reason: str, reason: str
 ) -> None:
-    """A refusal or an answer that was cut off is a hold, whatever text it holds."""
-    reading = _read(tmp_path, FakeClient(_message(PASS, stop_reason)))
+    """A refusal, or an answer that was cut off twice, is a hold, whatever text it holds."""
+    client = FakeClient(_message(PASS, stop_reason))
+
+    reading = _read(tmp_path, client)
 
     assert reading == Reading(Verdict.HOLD, reason=reason)
+    assert len(client.requests) == (1 if reason == REFUSED else 2)
+
+
+def test_a_cut_off_answer_is_asked_for_once_more(tmp_path: Path) -> None:
+    """An answer that ran out of tokens is asked for again, and the second answer counts."""
+    client = FakeClient(_message(HOLD, "max_tokens"), _message(PASS))
+
+    reading = _read(tmp_path, client)
+
+    assert reading == Reading(Verdict.PASS, summary="Adds an API module.")
+    assert client.requests[0] == client.requests[1]
+
+
+def test_the_tokens_of_the_requests_are_added_up(tmp_path: Path) -> None:
+    """The input and output tokens of every request of a reading are counted, retries too."""
+    usage = TokenUsage(input_tokens=10, output_tokens=20)
+
+    _read(tmp_path, FakeClient(_message(PASS, "max_tokens"), _message(PASS)), usage=usage)
+
+    assert usage == TokenUsage(input_tokens=12, output_tokens=22)
 
 
 @pytest.mark.parametrize("stop_reason", ["pause_turn", "tool_use"])
@@ -619,61 +737,86 @@ def test_an_answer_with_other_blocks_leaves_the_release_pending(
     _assert_not_valid(tmp_path, _message(PASS, extra=extra), "it is not one text")
 
 
+def test_a_pass_with_findings_is_a_hold(tmp_path: Path) -> None:
+    """Findings make a hold, whatever the verdict says."""
+    reading = _read(tmp_path, FakeClient(_message({**PASS, "findings": [FINDING]})))
+
+    assert reading == Reading(
+        Verdict.HOLD,
+        findings=[ReadingFinding(Rule.HARMS_USER, "api.py", 5, FINDING["explanation"])],
+        summary=PASS["summary"],
+    )
+
+
+def test_a_hold_without_findings_is_a_hold(tmp_path: Path) -> None:
+    """A hold that names no finding is held for a reason of the code's own."""
+    reading = _read(tmp_path, FakeClient(_message({**HOLD, "findings": []})))
+
+    assert reading == Reading(Verdict.HOLD, reason=NO_FINDING, summary=HOLD["summary"])
+
+
+def test_texts_that_are_too_long_are_shortened(tmp_path: Path) -> None:
+    """An explanation or summary beyond its length is cut, and marked where it was cut."""
+    answer = {
+        **HOLD,
+        "findings": [{**FINDING, "explanation": "e" * 401}],
+        "summary": "s" * 601,
+    }
+
+    reading = _read(tmp_path, FakeClient(_message(answer)))
+
+    assert reading.verdict is Verdict.HOLD
+    assert reading.findings[0].explanation == "e" * (MAX_EXPLANATION - 1) + "…"
+    assert reading.summary == "s" * (MAX_SUMMARY - 1) + "…"
+
+
+def test_a_pass_with_a_long_summary_is_a_pass(tmp_path: Path) -> None:
+    """A summary that is too long is shortened; the pass stays a pass."""
+    reading = _read(tmp_path, FakeClient(_message({**PASS, "summary": "s" * 601})))
+
+    assert reading == Reading(Verdict.PASS, summary="s" * (MAX_SUMMARY - 1) + "…")
+
+
 @pytest.mark.parametrize(
-    ("answer", "flaw"),
+    ("finding", "file", "line"),
     [
-        ({**PASS, "findings": [FINDING]}, "a pass with findings"),
-        ({**HOLD, "findings": []}, "a hold without findings"),
-        ({**PASS, "summary": "x" * 601}, "the summary is too long"),
-        (
-            {**HOLD, "findings": [{**FINDING, "explanation": "x" * 401}]},
-            "an explanation is too long",
-        ),
-        (
-            {**HOLD, "findings": [{**FINDING, "file": "elsewhere.py"}]},
-            "a finding is on a file that is not in the file table",
-        ),
-        (
-            {**HOLD, "findings": [{**FINDING, "line": 6}]},
-            "a finding is on a line that was not shown",
-        ),
-        (
-            {**HOLD, "findings": [{**FINDING, "line": 0}]},
-            "a finding is on a line that was not shown",
-        ),
-        (
-            {**HOLD, "findings": [{**FINDING, "file": "logo.png", "line": 1}]},
-            "a finding is on a line that was not shown",
-        ),
+        ({**FINDING, "file": "elsewhere.py"}, "", None),
+        ({**FINDING, "file": "unchanged.py", "line": None}, "", None),
+        ({**FINDING, "file": "API.PY", "line": None}, "", None),
+        ({**FINDING, "line": 6}, "api.py", None),
+        ({**FINDING, "line": 0}, "api.py", None),
+        ({**FINDING, "file": "logo.png", "line": 1}, "logo.png", None),
     ],
     ids=[
-        "pass-with-findings",
-        "hold-without-findings",
-        "long-summary",
-        "long-explanation",
         "file-not-in-the-table",
+        "unchanged-file",
+        "file-of-another-case",
         "line-past-the-end",
         "line-zero",
         "line-of-a-file-not-shown",
     ],
 )
-def test_an_inconsistent_answer_leaves_the_release_pending(
-    tmp_path: Path, answer: dict[str, Any], flaw: str
+def test_a_citation_the_model_was_not_shown_is_left_out(
+    tmp_path: Path, finding: dict[str, Any], file: str, line: int | None
 ) -> None:
-    """An answer whose verdict, findings, lines or lengths do not hold together is not valid."""
-    _assert_not_valid(tmp_path, _message(answer), flaw)
+    """A finding on a file or line the model was not shown stays, without that file or line."""
+    reading = _read(tmp_path, FakeClient(_message({**HOLD, "findings": [finding]})))
+
+    assert reading.verdict is Verdict.HOLD
+    assert reading.reason is None
+    assert [(found.file, found.line) for found in reading.findings] == [(file, line)]
 
 
 def test_the_flaw_of_an_answer_holds_nothing_of_it(tmp_path: Path) -> None:
     """The error names the check that failed in our own words, so a public log leaks no detail."""
     finding = {**FINDING, "file": "secret_name.py", "explanation": "secret explanation"}
-    answer = {**HOLD, "findings": [finding], "summary": "secret summary"}
+    answer = {**HOLD, "findings": [finding], "summary": "secret summary", "extra": "secret"}
 
     with pytest.raises(ReadingUnavailableError) as raised:
         _read(tmp_path, FakeClient(_message(answer)))
 
     message = str(raised.value)
-    assert message.endswith("a finding is on a file that is not in the file table")
+    assert message.endswith("it is not in the answer format")
     assert not any(
         secret in message for secret in ("secret_name", "secret explanation", "secret summary")
     )
@@ -689,36 +832,21 @@ def test_a_finding_may_cite_a_line_that_was_shown(tmp_path: Path, line: int | No
 
 
 @pytest.mark.parametrize("line", [11, 19, 5])
-def test_a_finding_on_a_line_outside_the_hunks_leaves_the_release_pending(
-    tmp_path: Path, line: int
-) -> None:
+def test_a_finding_on_a_line_outside_the_hunks_loses_its_line(tmp_path: Path, line: int) -> None:
     """A line of a changed file outside the hunks the diff shows is no evidence."""
-    with pytest.raises(ReadingUnavailableError) as raised:
-        _read_long_file(tmp_path, line)
+    reading = _read_long_file(tmp_path, line)
 
-    assert str(raised.value).endswith("a finding is on a line that was not shown")
-
-
-@pytest.mark.parametrize("file", ["unchanged.py", "elsewhere.py", "API.PY"])
-def test_a_finding_on_a_file_not_in_the_input_leaves_the_release_pending(
-    tmp_path: Path, file: str
-) -> None:
-    """A finding may only name a file of the file table: not an unchanged or an unknown one."""
-    answer = {**HOLD, "findings": [{**FINDING, "file": file, "line": None}]}
-
-    _assert_not_valid(
-        tmp_path, _message(answer), "a finding is on a file that is not in the file table"
-    )
+    assert [(finding.file, finding.line) for finding in reading.findings] == [("long.py", None)]
 
 
 def test_a_finding_on_a_whole_file_not_shown(tmp_path: Path) -> None:
     """A finding without a line may name a file that is listed but not shown."""
-    finding = {**FINDING, "file": "web/app.min.js", "line": None}
+    finding = {**FINDING, "file": "logo.png", "line": None}
 
     reading = _read(tmp_path, FakeClient(_message({**HOLD, "findings": [finding]})))
 
     assert reading.verdict is Verdict.HOLD
-    assert reading.reason is None
+    assert [(found.file, found.line) for found in reading.findings] == [("logo.png", None)]
 
 
 @pytest.mark.parametrize(
@@ -735,13 +863,17 @@ def test_a_finding_on_a_whole_file_not_shown(tmp_path: Path) -> None:
         _status_error(anthropic.RateLimitError, 429),
         _status_error(anthropic.InternalServerError, 500),
         _status_error(anthropic.OverloadedError, 529),
+        _status_error(anthropic.APIStatusError, 200),
+        httpx2.ReadError("connection lost"),
     ],
-    ids=["connection", "timeout", "408", "409", "429", "500", "529"],
+    ids=["connection", "timeout", "408", "409", "429", "500", "529", "in-the-stream", "read"],
 )
 def test_a_failure_of_the_api_leaves_the_release_pending(tmp_path: Path, error: Exception) -> None:
     """A failure that says nothing about the release gives no verdict: it is read again later."""
     with pytest.raises(ReadingUnavailableError):
         _read(tmp_path, FakeClient(error))
+    with pytest.raises(ReadingUnavailableError):
+        _read(tmp_path / "count", FakeClient(_message(PASS), tokens=error))
 
 
 @pytest.mark.parametrize(
@@ -749,14 +881,13 @@ def test_a_failure_of_the_api_leaves_the_release_pending(tmp_path: Path, error: 
     [
         anthropic.WorkloadIdentityError("Token exchange failed (HTTP 401)", status_code=401),
         anthropic.CredentialsError("no identity token of the workflow job"),
-        _status_error(anthropic.BadRequestError, 400),
         _status_error(anthropic.AuthenticationError, 401),
         _status_error(anthropic.PaymentRequiredError, 402),
         _status_error(anthropic.PermissionDeniedError, 403),
         _status_error(anthropic.NotFoundError, 404),
         _status_error(anthropic.UnprocessableEntityError, 422),
     ],
-    ids=["exchange", "identity-token", "400", "401", "402", "403", "404", "422"],
+    ids=["exchange", "identity-token", "401", "402", "403", "404", "422"],
 )
 def test_a_fault_of_the_credentials_or_the_request_gives_no_verdict(
     tmp_path: Path, error: Exception
@@ -764,6 +895,29 @@ def test_a_fault_of_the_credentials_or_the_request_gives_no_verdict(
     """A failed exchange, or a request the API refuses for its own sake, is a fault, no pending."""
     with pytest.raises(ReadingConfigurationError):
         _read(tmp_path, FakeClient(error))
+    with pytest.raises(ReadingConfigurationError):
+        _read(tmp_path / "count", FakeClient(_message(PASS), tokens=error))
+
+
+def test_a_request_the_api_refuses_as_not_valid_is_read_again(tmp_path: Path) -> None:
+    """A 400 may be the release's own, so only that release waits for another night."""
+    error = _status_error(anthropic.BadRequestError, 400)
+
+    with pytest.raises(ReadingRejectedError, match="the API refused the request with 400"):
+        _read(tmp_path, FakeClient(error))
+    with pytest.raises(ReadingRejectedError, match="the API refused the request with 400"):
+        _read(tmp_path / "count", FakeClient(_message(PASS), tokens=error))
+
+
+def test_a_request_of_too_many_tokens_is_held_without_asking(tmp_path: Path) -> None:
+    """A request the API counts above MAX_INPUT_TOKENS is a hold, and the model is not asked."""
+    client = FakeClient(_message(PASS), tokens=MAX_INPUT_TOKENS + 1)
+
+    assert _read(tmp_path, client) == Reading(Verdict.HOLD, reason=TOO_LARGE)
+    assert client.requests == []
+    assert _read(
+        tmp_path / "fits", FakeClient(_message(PASS), tokens=MAX_INPUT_TOKENS)
+    ).verdict is (Verdict.PASS)
 
 
 def test_every_call_requests_a_new_identity_token() -> None:
@@ -806,8 +960,19 @@ def test_the_client_exchanges_a_new_identity_token_for_each_token(tmp_path: Path
     readings = [_read(tmp_path / "one", client), _read(tmp_path / "two", client)]
 
     assert [reading.verdict for reading in readings] == [Verdict.PASS, Verdict.PASS]
-    # a token of ten seconds is exchanged again before the next request
-    assert [exchange["assertion"] for exchange in api.exchanges] == ["jwt-1", "jwt-2"]
+    # a token of ten seconds is exchanged again before the next request: the count of the tokens
+    # of a reading, then its message, which is streamed
+    assert [exchange["assertion"] for exchange in api.exchanges] == [
+        "jwt-1",
+        "jwt-2",
+        "jwt-3",
+        "jwt-4",
+    ]
+    assert [request.url.path for request in api.requests] == [
+        "/v1/messages/count_tokens",
+        "/v1/messages",
+    ] * 2
+    assert json.loads(api.requests[1].content)["stream"] is True
     assert {key: api.exchanges[0][key] for key in api.exchanges[0] if key != "assertion"} == {
         "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
         "federation_rule_id": "fdrl_rule",
@@ -818,6 +983,8 @@ def test_the_client_exchanges_a_new_identity_token_for_each_token(tmp_path: Path
     assert [request.headers["authorization"] for request in api.requests] == [
         "Bearer token-1",
         "Bearer token-2",
+        "Bearer token-3",
+        "Bearer token-4",
     ]
     assert not any("x-api-key" in request.headers for request in api.requests)
 
@@ -847,9 +1014,11 @@ def test_a_token_the_api_refuses_stops_the_reading(tmp_path: Path, status: int) 
 
 def test_a_request_too_large_for_the_api_is_a_hold(tmp_path: Path) -> None:
     """The API refusing the size of the request is a hold, as a change above MAX_SHOWN is."""
-    reading = _read(tmp_path, FakeClient(_status_error(anthropic.ContentTooLargeError, 413)))
+    error = _status_error(anthropic.ContentTooLargeError, 413)
 
-    assert reading == Reading(Verdict.HOLD, reason=TOO_LARGE)
+    assert _read(tmp_path, FakeClient(error)) == Reading(Verdict.HOLD, reason=TOO_LARGE)
+    held = _read(tmp_path / "count", FakeClient(_message(PASS), tokens=error))
+    assert held == Reading(Verdict.HOLD, reason=TOO_LARGE)
 
 
 def test_a_change_larger_than_the_reading_takes_is_held_without_a_request(tmp_path: Path) -> None:
@@ -952,6 +1121,52 @@ def test_removed_binary_code_is_no_hold(tmp_path: Path) -> None:
     assert (
         '"file": "native.so", "status": "removed"' in client.requests[0]["messages"][0]["content"]
     )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        b"# -*- coding: utf-7 -*-\n",
+        b"# coding=latin-1\n",
+        b"#!/usr/bin/env python\n# vim: set fileencoding=cp1252 :\n",
+        b"# coding: no-such-codec\n",
+    ],
+    ids=["utf-7", "latin-1", "second-line", "unknown"],
+)
+def test_a_file_that_declares_another_encoding_is_held(tmp_path: Path, declaration: bytes) -> None:
+    """Python decodes source by its declared encoding, in which a comment can hide code."""
+    code = declaration + b"# +AAo-print('runs in utf-7')\n"
+
+    reading = _read(tmp_path, FakeClient(), release={**RELEASE, "hidden.py": code})
+
+    assert reading == Reading(
+        Verdict.HOLD,
+        reason=UNREADABLE,
+        findings=[ReadingFinding(Rule.UNCLEAR, "hidden.py", None, UNREADABLE)],
+    )
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [b"# -*- coding: utf-8 -*-\n", b"# coding: UTF8\n", b"\xef\xbb\xbf# a byte order mark\n"],
+    ids=["utf-8", "utf8", "bom"],
+)
+def test_a_file_in_utf8_is_shown(tmp_path: Path, declaration: bytes) -> None:
+    """A declaration of UTF-8, or its byte order mark, decodes the file as it is shown."""
+    changes = compare_folders(_folder(tmp_path, "release", {"code.py": declaration}), None)
+
+    assert (changes[0].not_shown, changes[0].unreadable) == (None, False)
+
+
+def test_a_removed_file_that_declares_another_encoding_is_no_hold(tmp_path: Path) -> None:
+    """A file that leaves the provider runs nowhere."""
+    base = {**BASE, "old.py": b"# coding: utf-7\nOLD = 1\n"}
+
+    changes = compare_folders(
+        _folder(tmp_path, "release", RELEASE), _folder(tmp_path, "base", base)
+    )
+
+    assert not any(change.unreadable for change in changes)
 
 
 def test_rules_are_the_two_sections_of_the_rules_page() -> None:

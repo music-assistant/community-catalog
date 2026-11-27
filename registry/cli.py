@@ -225,6 +225,7 @@ def _read_archive(args: argparse.Namespace) -> int:
 
     from registry.reading import (  # noqa: PLC0415
         ReadingConfigurationError,
+        ReadingRejectedError,
         ReadingUnavailableError,
         Side,
         read_release,
@@ -238,7 +239,7 @@ def _read_archive(args: argparse.Namespace) -> int:
             if base is not None:
                 unpack(args.base, args.folder, base.folder)
             reading = read_release(anthropic.Anthropic(), release, base)
-        except ReadingUnavailableError as err:
+        except (ReadingUnavailableError, ReadingRejectedError) as err:
             print(f"pending: {err}", file=sys.stderr)
             return 1
         except (ReadingConfigurationError, ValueError, tarfile.TarError, EOFError) as err:
@@ -272,7 +273,10 @@ def _read(args: argparse.Namespace) -> None:
     except ReadingConfigurationError as err:
         msg = f"the reading cannot run: {err}"
         raise CommandError(msg) from err
-    print(f"{counts.passed} passed, {counts.held} held, {counts.pending} left for another night")
+    print(
+        f"{counts.passed} passed, {counts.held} held, {counts.pending} left for another night; "
+        f"{counts.usage.input_tokens} input, {counts.usage.output_tokens} output tokens"
+    )
 
 
 def _check_folder(args: argparse.Namespace) -> int:

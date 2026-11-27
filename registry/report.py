@@ -439,9 +439,10 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
     items = []
     for finding in shown:
         line = f", line {finding.line}" if finding.line is not None else ""
+        # a finding on a file the reading was not shown names no file
+        where = f"In {code_span(finding.file)}{line}, it" if finding.file else "It"
         items.append(
-            f"- In {code_span(finding.file)}{line}, it may {RULES[finding.rule]}:\n\n"
-            f"{code_block(finding.explanation, '  ')}"
+            f"- {where} may {RULES[finding.rule]}:\n\n{code_block(finding.explanation, '  ')}"
         )
     if more:
         items.append(f"- And {more} more findings.\n")
