@@ -46,6 +46,7 @@ from registry.models import (
     ProviderReport,
     ProviderStatus,
     ReservedDomains,
+    UnreadReport,
     VersionResult,
 )
 from registry.pipeline import (
@@ -53,6 +54,7 @@ from registry.pipeline import (
     CHANNELS_FOLDER,
     FETCH_REPORT,
     ISSUES_FOLDER,
+    UNREAD_REPORT,
     apply_results,
     archive_path,
     read_plan,
@@ -69,10 +71,13 @@ from registry.registry import (
 from registry.report import (
     build_channel_reports,
     build_reports,
+    build_unread_report,
     open_channel_issues,
     open_issues,
+    open_unread_issue,
     post_channel_report,
     post_report,
+    post_unread_report,
 )
 from registry.reserved import add_server_domains
 
@@ -302,12 +307,14 @@ def _report(args: argparse.Namespace) -> None:
     """
     Write the report of every provider: its failures in this run and what settles them.
 
-    Also the report of every channel with results: whether its checks could run.
+    Also the report of every channel with results: whether its checks could run; and the versions
+    that wait too long for their reading.
     """
     fetched = _load(args.work / FETCH_REPORT, FetchReport)
     results = read_results(args.results, read_plan(args.work))
     registry = load_registry(args.root)
-    reports = build_reports(registry, fetched, results, read_readings(args.work))
+    readings = read_readings(args.work)
+    reports = build_reports(registry, fetched, results, readings.results)
     folder = args.work / ISSUES_FOLDER
     (folder / CHANNELS_FOLDER).mkdir(parents=True, exist_ok=True)
     for report in reports:
@@ -318,11 +325,21 @@ def _report(args: argparse.Namespace) -> None:
         (folder / CHANNELS_FOLDER / f"{channel.channel}.json").write_bytes(dumps(channel.to_dict()))
         if channel.reason is not None:
             print(f"{channel.channel}: the checks cannot run: {channel.reason}")
+    unread = build_unread_report(registry, readings, now())
+    (folder / UNREAD_REPORT).parent.mkdir(parents=True, exist_ok=True)
+    (folder / UNREAD_REPORT).write_bytes(dumps(unread.to_dict()))
+    for entry in unread.versions:
+        print(f"{entry.domain} {entry.version}: waits for its reading")
     print(f"{len(reports)} report(s) written to {folder}")
 
 
 def _post_issues(args: argparse.Namespace) -> int:
-    """Open, add to or close the issue of each provider and channel, after its report."""
+    """
+    Open, add to or close the issues of the pipeline after the reports.
+
+    Those are the issue of each provider and channel, and the one about the versions that wait for
+    their reading.
+    """
     github = GitHub(_token())
     issues = open_issues(github, args.repository)
     failed = 0
@@ -358,6 +375,18 @@ def _post_issues(args: argparse.Namespace) -> int:
             continue
         if done is not None:
             print(f"{channel.channel}: {done}")
+    if (path := args.work / ISSUES_FOLDER / UNREAD_REPORT).is_file():
+        try:
+            unread = _load(path, UnreadReport)
+            done = post_unread_report(
+                unread, open_unread_issue(github, args.repository), github, args.repository
+            )
+        except OSError as err:
+            failed += 1
+            print(f"warning: versions that wait for their reading: {err}", file=sys.stderr)
+        else:
+            if done is not None:
+                print(f"versions that wait for their reading: {done}")
     return 1 if failed else 0
 
 
@@ -519,7 +548,7 @@ def _environment(*names: str) -> list[str]:
     return [os.environ[name] for name in names]
 
 
-def _load[T: (FetchReport, ProviderReport, ChannelReport, AdmissionReport)](
+def _load[T: (FetchReport, ProviderReport, ChannelReport, AdmissionReport, UnreadReport)](
     path: Path, model: type[T]
 ) -> T:
     """

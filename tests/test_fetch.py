@@ -33,6 +33,7 @@ REPOSITORY = "someone/ma-sample"
 COMMIT_1 = "1" * 40
 COMMIT_2 = "2" * 40
 COMMIT_3 = "3" * 40
+COMMIT_4 = "4" * 40
 
 
 @pytest.fixture
@@ -245,24 +246,27 @@ def test_archives_of_the_versions_to_check(files: Files, github: FakeGitHub) -> 
 
 def test_archives_of_the_versions_to_read(files: Files, github: FakeGitHub) -> None:
     """Each version the read step reads is downloaded, and the version it is read against."""
-    files.provider()
+    files.provider(cleared_versions={"1.2.0": "https://github.com/a/b/issues/1"})
     passed = {"nightly": True, "beta": True}
     read = {"verdict": "pass", "read": "2026-11-02T03:00:00Z"}
-    # the base of 1.2.0, which the check step does not need: below the latest, read already
+    # a hold is no base, and below the latest the check step does not need it
+    files.version("0.9.0", commit=COMMIT_4, channels=passed, reading={**read, "verdict": "hold"})
+    # the base of 1.1.0, which the check step does not need: below the latest, read already
     files.version("1.0.0", commit=COMMIT_1, channels=passed, reading=read)
-    # a hold is no base, and needs nothing
-    files.version("1.1.0", commit=COMMIT_2, channels=passed, reading={**read, "verdict": "hold"})
-    # the latest, without a reading
+    # without a reading, below the latest
+    files.version("1.1.0", commit=COMMIT_2, channels=passed)
+    # the latest, cleared
     files.version("1.2.0", commit=COMMIT_3, channels=passed)
     github.repository(REPOSITORY, [release("v1.2.0", COMMIT_3)])
-    for commit in (COMMIT_1, COMMIT_2, COMMIT_3):
+    for commit in (COMMIT_1, COMMIT_2, COMMIT_3, COMMIT_4):
         github.archives[REPOSITORY, commit] = provider_archive()
 
     _fetch(files, github)
 
     work = files.root / "work"
+    assert not archive_path(work, DOMAIN, "0.9.0").exists()
     assert archive_path(work, DOMAIN, "1.0.0").is_file()
-    assert not archive_path(work, DOMAIN, "1.1.0").exists()
+    assert archive_path(work, DOMAIN, "1.1.0").is_file()
     assert archive_path(work, DOMAIN, "1.2.0").is_file()
 
 

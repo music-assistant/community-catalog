@@ -11,7 +11,17 @@ import pytest
 
 from registry.index import build_index, render_indexes, stale_index_files
 from registry.registry import InvalidRegistryError, load_registry
-from tests.conftest import ADDED, COMMIT, CONTENT_HASH, DOMAIN, ICON, RELEASED, manifest
+from tests.conftest import (
+    ADDED,
+    CHECKED,
+    COMMIT,
+    CONTENT_HASH,
+    DOMAIN,
+    ICON,
+    PASSED,
+    RELEASED,
+    manifest,
+)
 
 if TYPE_CHECKING:
     from tests.conftest import Files
@@ -44,7 +54,7 @@ def _index(files: Files, channel: str = "nightly") -> dict[str, Any]:
 def test_index_has_the_shape_the_server_reads(files: Files) -> None:
     """The index has exactly the fields of the server's CatalogIndex, schema 1."""
     files.provider()
-    files.version()
+    files.version(reading=PASSED)
 
     index = _index(files)
 
@@ -81,10 +91,11 @@ def test_maintainers_are_the_owner_and_the_code_owners(files: Files) -> None:
     """The owner and the code owners of the highest version, each once, on every channel."""
     requirements = ["some-package==1.0"]
     files.provider(repository="Someone/ma-sample")
-    files.version("1.0.0", manifest={**manifest(DOMAIN, requirements), "codeowners": ["@old"]})
+    old = {**manifest(DOMAIN, requirements), "codeowners": ["@old"]}
+    files.version("1.0.0", manifest=old, reading=PASSED)
     codeowners = ["@someone", "@another", "@Another", "@music-assistant/core", "@third"]
     newest = {**manifest(DOMAIN, requirements), "codeowners": codeowners}
-    files.version("1.10.0", channels={"beta": True}, manifest=newest)
+    files.version("1.10.0", channels={"beta": True}, manifest=newest, reading=PASSED)
 
     expected = ["Someone", "another", "third"]
     assert _index(files)["providers"][DOMAIN]["maintainers"] == expected
@@ -92,27 +103,31 @@ def test_maintainers_are_the_owner_and_the_code_owners(files: Files) -> None:
 
 
 def test_code_owners_come_from_a_version_that_is_offered(files: Files) -> None:
-    """A blocked or failed version names no maintainer; without an offered one, the owner alone."""
+    """A blocked, failed or unaccepted version names no maintainer; without others, the owner."""
     requirements = ["some-package==1.0"]
 
     def owners(*handles: str) -> dict[str, Any]:
         return {**manifest(DOMAIN, requirements), "codeowners": list(handles)}
 
     files.provider(blocked_versions={"9.0.0": "Sends the library elsewhere"})
-    files.version("9.0.0", channels={"nightly": True}, manifest=owners("@victim"))
-    files.version("8.0.0", channels={"nightly": False, "beta": False}, manifest=owners("@another"))
-    files.version("1.0.0", channels={"beta": True}, manifest=owners("@first"))
+    files.version("9.0.0", channels={"nightly": True}, manifest=owners("@victim"), reading=PASSED)
+    held = {"verdict": "hold", "read": CHECKED}
+    files.version("8.1.0", channels={"nightly": True}, manifest=owners("@held"), reading=held)
+    files.version("8.0.1", channels={"nightly": True}, manifest=owners("@unread"))
+    failed = {"nightly": False, "beta": False}
+    files.version("8.0.0", channels=failed, manifest=owners("@another"), reading=PASSED)
+    files.version("1.0.0", channels={"beta": True}, manifest=owners("@first"), reading=PASSED)
 
     assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone", "first"]
-    files.version("1.0.0", channels={}, manifest=owners("@first"))
+    files.version("1.0.0", channels={}, manifest=owners("@first"), reading=PASSED)
     assert _index(files)["providers"][DOMAIN]["maintainers"] == ["someone"]
 
 
 def test_latest_is_the_highest_version_not_the_newest_text_or_date(files: Files) -> None:
     """Versions are compared as versions: 1.10.0 is above 1.9.0, also when released earlier."""
     files.provider()
-    files.version("1.9.0", released="2026-11-10T00:00:00Z")
-    files.version("1.10.0", released="2026-11-01T00:00:00Z")
+    files.version("1.9.0", released="2026-11-10T00:00:00Z", reading=PASSED)
+    files.version("1.10.0", released="2026-11-01T00:00:00Z", reading=PASSED)
 
     assert _index(files)["providers"][DOMAIN]["latest"] == "1.10.0"
 
@@ -120,9 +135,9 @@ def test_latest_is_the_highest_version_not_the_newest_text_or_date(files: Files)
 def test_only_versions_that_passed_for_the_channel(files: Files) -> None:
     """A channel lists the versions that passed for it; the manifest and icon are of its latest."""
     files.provider()
-    files.version("1.0.0", channels={"nightly": True, "beta": True})
-    files.version("2.0.0", channels={"nightly": True, "beta": False}, icon_svg=None)
-    files.version("3.0.0", channels={})
+    files.version("1.0.0", channels={"nightly": True, "beta": True}, reading=PASSED)
+    files.version("2.0.0", channels={"nightly": True, "beta": False}, icon_svg=None, reading=PASSED)
+    files.version("3.0.0", channels={}, reading=PASSED)
 
     nightly = _index(files, "nightly")["providers"][DOMAIN]
     beta = _index(files, "beta")["providers"][DOMAIN]
@@ -137,7 +152,7 @@ def test_the_five_highest_versions(files: Files) -> None:
     """A channel lists the five highest versions that passed for it."""
     files.provider()
     for minor in range(12):
-        files.version(f"1.{minor}.0")
+        files.version(f"1.{minor}.0", reading=PASSED)
 
     versions = _index(files)["providers"][DOMAIN]["versions"]
 
@@ -147,8 +162,8 @@ def test_the_five_highest_versions(files: Files) -> None:
 def test_a_blocked_version_is_never_latest(files: Files) -> None:
     """A blocked version is listed as blocked, not as a version to install."""
     files.provider(blocked_versions={"2.0.0": "Sends the library elsewhere"})
-    files.version("1.0.0")
-    files.version("2.0.0")
+    files.version("1.0.0", reading=PASSED)
+    files.version("2.0.0", reading=PASSED)
 
     provider = _index(files)["providers"][DOMAIN]
 
@@ -157,29 +172,44 @@ def test_a_blocked_version_is_never_latest(files: Files) -> None:
     assert provider["blocked_versions"] == {"2.0.0": "Sends the library elsewhere"}
 
 
-def test_the_index_does_not_use_readings_yet(files: Files) -> None:
-    """A version the reading held or did not read is offered as before, cleared or not."""
+def test_only_accepted_versions_are_offered(files: Files) -> None:
+    """A version the reading held or did not read is offered once a person clears it."""
     files.provider()
-    files.version("1.0.0", reading={"verdict": "pass", "read": "2026-11-03T03:00:00Z"})
-    files.version("1.1.0", reading={"verdict": "hold", "read": "2026-11-03T03:00:00Z"})
+    files.version("1.0.0", reading=PASSED)
+    files.version("1.1.0", reading={"verdict": "hold", "read": CHECKED})
     files.version("1.2.0")
-    before = _index(files)
-    files.provider(cleared_versions={"1.1.0": "https://github.com/a/b/issues/1"})
 
     provider = _index(files)["providers"][DOMAIN]
 
-    assert _index(files) == before
-    assert provider["latest"] == "1.2.0"
-    assert set(provider["versions"]) == {"1.0.0", "1.1.0", "1.2.0"}
+    assert (provider["latest"], set(provider["versions"])) == ("1.0.0", {"1.0.0"})
+    issue = "https://github.com/a/b/issues/1"
+    files.provider(cleared_versions={"1.1.0": issue, "1.2.0": issue})
+    provider = _index(files)["providers"][DOMAIN]
+    assert (provider["latest"], set(provider["versions"])) == ("1.2.0", {"1.0.0", "1.1.0", "1.2.0"})
+
+
+def test_a_pass_is_offered_while_its_base_is_accepted(files: Files) -> None:
+    """A version read against a base that is blocked, or no longer cleared, is not offered."""
+    issue = "https://github.com/a/b/issues/1"
+    files.provider(cleared_versions={"1.0.0": issue})
+    files.version("1.0.0", reading={"verdict": "hold", "read": CHECKED})
+    files.version("1.1.0", reading={**PASSED, "base": "1.0.0"})
+    files.version("1.2.0", reading={**PASSED, "base": "1.1.0"})
+
+    assert _index(files)["providers"][DOMAIN]["latest"] == "1.2.0"
+    files.provider(cleared_versions={"1.0.0": issue}, blocked_versions={"1.0.0": "x"})
+    assert _index(files)["providers"][DOMAIN]["latest"] is None
+    files.provider()
+    assert _index(files)["providers"][DOMAIN]["latest"] is None
 
 
 def test_blocked_and_withdrawn_providers_keep_their_versions(files: Files) -> None:
     """A blocked or withdrawn provider stays in the index with its versions and reason."""
     reason_url = "https://github.com/music-assistant/community-catalog/issues/1"
     files.provider(status="blocked", reason="Sends the library elsewhere", reason_url=reason_url)
-    files.version()
+    files.version(reading=PASSED)
     files.provider("other_music", status="withdrawn", reason="No longer maintained")
-    files.version(domain="other_music")
+    files.version(domain="other_music", reading=PASSED)
 
     providers = _index(files)["providers"]
 
@@ -195,8 +225,9 @@ def test_blocked_and_withdrawn_providers_keep_their_versions(files: Files) -> No
 def test_a_provider_without_a_version_for_the_channel(files: Files) -> None:
     """A provider without a version for a channel is shown by its newest version, with no latest."""
     files.provider()
-    files.version("1.0.0", channels={"beta": True})
-    files.version("2.0.0", channels={"beta": False}, manifest=manifest(), requirements=[])
+    files.version("1.0.0", channels={"beta": True}, reading=PASSED)
+    changes: dict[str, Any] = {"manifest": manifest(), "requirements": [], "reading": PASSED}
+    files.version("2.0.0", channels={"beta": False}, **changes)
 
     provider = _index(files)["providers"][DOMAIN]
 
@@ -208,17 +239,20 @@ def test_a_provider_without_a_version_for_the_channel(files: Files) -> None:
 def test_a_provider_without_a_version_for_the_channel_is_not_shown_by_a_blocked_one(
     files: Files,
 ) -> None:
-    """The newest version that is not blocked shows the provider; the newest when all are."""
+    """The newest accepted version shows the provider; the newest when none is accepted."""
     files.provider(blocked_versions={"2.0.0": "Sends the library elsewhere"})
-    files.version("1.0.0", channels={"beta": True})
-    files.version("2.0.0", channels={"nightly": False}, manifest=manifest(), requirements=[])
+    files.version("1.0.0", channels={"beta": True}, reading=PASSED)
+    changes: dict[str, Any] = {"manifest": manifest(), "requirements": [], "reading": PASSED}
+    files.version("2.0.0", channels={"nightly": False}, **changes)
+    unread = {**manifest(), "name": "Unread"}
+    files.version("3.0.0", channels={"nightly": False}, manifest=unread, requirements=[])
 
     provider = _index(files)["providers"][DOMAIN]
 
     assert provider["latest"] is None
     assert provider["manifest"] == manifest(DOMAIN, ["some-package==1.0"])
     files.provider(blocked_versions={"1.0.0": "x", "2.0.0": "x"})
-    assert _index(files)["providers"][DOMAIN]["manifest"] == manifest()
+    assert _index(files)["providers"][DOMAIN]["manifest"] == unread
 
 
 def test_a_provider_without_any_version_is_left_out(files: Files) -> None:
@@ -250,11 +284,11 @@ def test_indexes_are_deterministic(files: Files) -> None:
 def test_a_changed_index_gets_a_new_date(files: Files) -> None:
     """An index whose providers change is generated anew; the index of another channel is not."""
     files.provider()
-    files.version("1.0.0", channels={"nightly": True, "beta": True})
+    files.version("1.0.0", channels={"nightly": True, "beta": True}, reading=PASSED)
     for path, content in render_indexes(load_registry(files.root), NOW).items():
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-    files.version("1.1.0", channels={"nightly": True})
+    files.version("1.1.0", channels={"nightly": True}, reading=PASSED)
     registry = load_registry(files.root)
 
     later = render_indexes(registry, NOW + timedelta(days=1))

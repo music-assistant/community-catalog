@@ -321,10 +321,29 @@ class ReadingResult(StrictModel):
 
 
 @dataclass
+class UnreadVersion(StrictModel):
+    """A version that waits for its reading."""
+
+    domain: str
+    version: str
+    # why the read step did not read it in this run, in one line; None when it did not try
+    reason: str | None = None
+
+
+@dataclass
 class ReadingResults(StrictModel):
     """`readings.json`: what the read step read in this run, for the report."""
 
     results: list[ReadingResult]
+    # the versions it tried to read and could not
+    unread: list[UnreadVersion] = field(default_factory=list)
+
+
+@dataclass
+class UnreadReport(StrictModel):
+    """`issues/reading/unread.json`: the versions that wait too long for their reading."""
+
+    versions: list[UnreadVersion]
 
 
 @dataclass
@@ -398,6 +417,9 @@ class ProviderReport(StrictModel):
     admitted: bool
     # whether the newest version passed the reading
     reading_passed: bool
+    # the versions a registry maintainer cleared, and the blocked versions
+    cleared: list[str] = field(default_factory=list)
+    blocked: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -430,76 +430,41 @@ def test_the_base_of_a_reading_needs_a_version_file(files: Files) -> None:
     ]
 
 
-EARLIER = "2026-11-02T03:00:00Z"
-LATER = "2026-11-04T03:00:00Z"
+def test_the_accepted_versions(files: Files) -> None:
+    """
+    A version is accepted when it is cleared, or passed in full or against an accepted base.
+
+    A blocked version never is, and a pass on a base that is not accepted (any more) is valid.
+    """
+    held = {"verdict": "hold", "read": READ}
+    passed = {"verdict": "pass", "read": READ}
+    files.provider(
+        cleared_versions={"1.1.0": ISSUE, "2.0.0": ISSUE}, blocked_versions={"2.0.0": "x"}
+    )
+    files.version("1.0.0", reading=passed)
+    files.version("1.1.0", reading=held)
+    files.version("1.2.0", reading={**passed, "base": "1.1.0"})
+    files.version("1.3.0")
+    files.version("1.4.0", reading={**passed, "base": "1.3.0"})
+    files.version("1.5.0", reading={**passed, "base": "1.4.0"})
+    files.version("2.0.0", reading=held)
+    files.version("2.1.0", reading={**passed, "base": "2.0.0"})
+
+    assert load_registry(files.root).providers[DOMAIN].accepted() == {"1.0.0", "1.1.0", "1.2.0"}
 
 
 @pytest.mark.parametrize(
-    ("base", "cleared", "blocked", "accepted"),
-    [
-        (None, False, False, False),
-        ({"verdict": "hold", "read": EARLIER}, False, False, False),
-        ({"verdict": "pass", "read": LATER}, False, False, False),
-        ({"verdict": "pass", "read": EARLIER}, False, False, True),
-        ({"verdict": "pass", "read": READ}, False, False, True),
-        ({"verdict": "hold", "read": EARLIER}, True, False, True),
-        (None, True, False, True),
-        ({"verdict": "pass", "read": EARLIER}, False, True, True),
-        ({"verdict": "hold", "read": EARLIER}, True, True, True),
-    ],
-    ids=[
-        "pending",
-        "held",
-        "passed-later",
-        "passed-before",
-        "passed-at-once",
-        "held-and-cleared",
-        "pending-and-cleared",
-        "passed-then-blocked",
-        "cleared-then-blocked",
-    ],
+    "reading",
+    [None, {"verdict": "hold", "read": READ}, {"verdict": "pass", "read": READ}],
 )
-def test_the_base_of_a_reading_was_accepted(
-    files: Files, base: dict[str, str] | None, cleared: bool, blocked: bool, accepted: bool
-) -> None:
-    """A change is read against a version that had a pass or a clearance; a later block is fine."""
-    files.provider(
-        cleared_versions={"1.0.0": ISSUE} if cleared else {},
-        blocked_versions={"1.0.0": "Sends the library elsewhere"} if blocked else {},
-    )
-    files.version("1.0.0", reading=base)
-    files.version("1.1.0", reading={"verdict": "pass", "read": READ, "base": "1.0.0"})
-
-    if accepted:
-        load_registry(files.root)
-    else:
-        assert _problems(files) == [
-            (
-                f"providers/{DOMAIN}/versions/1.1.0.json: reading.base: 1.0.0 had neither a pass "
-                "of the reading nor a clearance when 1.1.0 was read"
-            )
-        ]
-
-
-@pytest.mark.parametrize("reading", [None, {"verdict": "hold", "read": READ}])
-def test_a_held_or_pending_version_may_be_cleared(
+def test_a_cleared_version_may_have_any_reading(
     files: Files, reading: dict[str, str] | None
 ) -> None:
-    """A person may clear a version the reading held or did not read yet."""
+    """A clearance stands whatever the reading of its version, also a pass recorded after it."""
     files.provider(cleared_versions={"1.0.0": ISSUE})
     files.version("1.0.0", reading=reading)
 
     assert load_registry(files.root).providers[DOMAIN].file.cleared_versions == {"1.0.0": ISSUE}
-
-
-def test_a_version_that_passed_is_not_cleared(files: Files) -> None:
-    """A version the reading passed needs no clearance, so one is refused."""
-    files.provider(cleared_versions={"1.0.0": ISSUE})
-    files.version("1.0.0", reading={"verdict": "pass", "read": READ})
-
-    assert _problems(files) == [
-        f"{PROVIDER}: cleared_versions: 1.0.0 passed the reading, so it needs no clearance"
-    ]
 
 
 def test_a_cleared_version_needs_a_version_file(files: Files) -> None:
