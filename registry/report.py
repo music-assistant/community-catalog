@@ -259,12 +259,19 @@ def post_report(
         if not new:
             return None
         mentions = " ".join(f"@{handle}" for handle in report.maintainers)
-        # a hold waits for a person of the team, who says what is needed
-        fix = (
-            "Publish a new release that fixes this. A refused release is not tried again. "
-            if any(failure.key.split(" ", 1)[0] in {"check", "refused"} for failure in new)
-            else ""
-        )
+        # the checks did not fail when only the reading held a release
+        held = all(failure.key.startswith("hold ") for failure in new)
+        if held:
+            # a hold waits for a person of the team, who says what is needed
+            fix = (
+                "Nothing for now: a person of the Music Assistant team reads the release and says "
+                "here if anything is needed. "
+            )
+        elif any(failure.key.split(" ", 1)[0] in {"check", "refused"} for failure in new):
+            fix = "Publish a new release that fixes this. A refused release is not tried again. "
+        else:
+            fix = ""
+        accepted = "when the team accepts the release, or " if held else ""
         passes = _passes([failure.key for failure in new])
         body = _fit(
             lambda room: (
@@ -272,12 +279,10 @@ def post_report(
                 f"The Music Assistant community catalog checks the releases of `{report.domain}`. "
                 f"This needs the attention of its maintainers:\n\n{_failures(new, room)}"
                 f"### What to do\n\n{fix}[Releasing updates]({README_URL}) tells how releases are "
-                f"checked. This issue closes by itself once the newest release passes {passes}."
-                f"\n\n{mentions}\n"
+                f"checked. This issue closes {accepted}by itself once the newest release passes "
+                f"{passes}.\n\n{mentions}\n"
             )
         )
-        # the checks did not fail when only the reading held a release
-        held = all(failure.key.startswith("hold ") for failure in new)
         outcome = "a release needs a closer look" if held else "release checks failed"
         return github.create_issue(repository, f"{report.subject}: {outcome}", body, [LABEL])
     if new:

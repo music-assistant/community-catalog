@@ -40,8 +40,9 @@ MODEL: Final = "claude-opus-5-5"
 EFFORT: Final = "high"
 # thinking included; an answer cut off at this limit is a hold
 MAX_TOKENS = 16000
-# the most the request may hold as JSON, about 115k tokens; a larger change waits for a person
-MAX_REQUEST = 400_000
+# the most the request may hold as JSON, about 430k tokens of the 1M the model takes; a larger
+# change waits for a person
+MAX_REQUEST = 1_500_000
 MAX_EXPLANATION = 400
 MAX_SUMMARY = 600
 # the instructions and the rules the reading follows, also for the summary of a submission
