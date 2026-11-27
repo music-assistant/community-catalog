@@ -1,5 +1,8 @@
 {
   "added": "2026-11-23T22:20:43Z",
+  "cleared_versions": {
+    "1.0.1": "https://github.com/music-assistant/community-catalog/issues/76"
+  },
   "domain": "entropy_fm",
   "folder": "entropy_fm",
   "owner_id": 60214390,
