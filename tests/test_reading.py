@@ -872,8 +872,13 @@ def test_text_beyond_the_cap_is_not_built(tmp_path: Path, monkeypatch: pytest.Mo
         return lines(text)
 
     monkeypatch.setattr(reading_module, "_lines", counted)
-    # a.py is shown in 260 kB of numbered lines; b.py alone is more than the 140 kB left
-    release = {"a.py": b"x = 1\n" * 20_000, "b.py": b"y = 2\n" * 25_000, "c.py": b"z = 3\n"}
+    # a.py is shown in two thirds of the cap, as numbered lines of 13 bytes; b.py alone is more
+    # than the third that is left
+    release = {
+        "a.py": b"x = 1\n" * (MAX_REQUEST * 2 // 3 // 13),
+        "b.py": b"y = 2\n" * (MAX_REQUEST // 2 // 6),
+        "c.py": b"z = 3\n",
+    }
 
     changes = compare_folders(_folder(tmp_path, "release", release), None)
 
@@ -901,7 +906,12 @@ def test_the_whole_request_counts_against_the_cap(tmp_path: Path) -> None:
 
 def test_the_file_table_counts_against_the_cap(tmp_path: Path) -> None:
     """A release of many files that are only listed is held when its file table is too large."""
-    release = {f"media/{number:04d}.png": _png(number.to_bytes(4)) for number in range(3000)}
+    # each row of the file table holds at least its path of 612 bytes
+    folder = f"{'d' * 200}/" * 3
+    release = {
+        f"{folder}{number:05d}.png": _png(number.to_bytes(4))
+        for number in range(MAX_REQUEST // 612 + 1)
+    }
 
     reading = _read(tmp_path, FakeClient(), release={**RELEASE, **release}, base=None)
 

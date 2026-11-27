@@ -404,7 +404,7 @@ version. The release pipeline reads every new version this way; `read-archive` r
   without findings or a hold with at least one, each finding on a file of the table; the code
   checks it, and is never led by it to run, open or fetch anything.
 - The code holds a release with binary code or data that is added or changed, or whose request
-  (instructions, header, file table and content together) would hold more than 400 kB, without
+  (instructions, header, file table and content together) would hold more than 1.5 MB, without
   asking the model; no text is numbered or diffed beyond that size. It also holds one the model
   refused or whose answer was cut off. A failure of the API for now (no connection, a time-out,
   408, 409, 429 or an error from 500 on) gives no verdict: the release is read again later. So
@@ -585,8 +585,9 @@ manifest only when it is plain text.
 
 The title is set when the issue is opened and a later comment never changes it. An issue that
 opens with only holds is titled `<name> (<domain>): a release needs a closer look`, because the
-checks passed. Any other issue is titled `<name> (<domain>): release checks failed`. The pipeline
-finds its issues by label, author and the first line, never by title.
+checks passed, and tells the maintainers that nothing is needed of them until a person of the team
+has read the release. Any other issue is titled `<name> (<domain>): release checks failed`. The
+pipeline finds its issues by label, author and the first line, never by title.
 
 A failure is settled when the newest version of the provider (the highest with a version file or
 a refusal) passed on a channel that is tested, and:

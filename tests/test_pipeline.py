@@ -879,7 +879,11 @@ def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> No
     assert "If a finding is wrong, say so in this issue." in body
     # a person of the team looks at a hold first
     assert "Publish a new release" not in body
-    assert "closes by itself once the newest release passes the checks and the reading." in body
+    assert "Nothing for now: a person of the Music Assistant team reads the release" in body
+    assert (
+        "closes when the team accepts the release, or by itself once the newest release passes "
+        "the checks and the reading." in body
+    )
     # the rules of the catalog, not the safety of the code
     assert not any(word in body.lower() for word in ("security", "vulnerability", "vulnerable"))
     assert _mentions(body) == ["someone"]
@@ -913,6 +917,10 @@ def test_an_issue_of_a_hold_and_a_failed_check_says_the_checks_failed(files: Fil
     [(_, created)] = github.created
     assert "hold 1.0.0" in created["body"].split("\n", 1)[0]
     assert created["title"] == "Sample music (sample_music): release checks failed"
+    # the failed check needs a new release, so the maintainers have something to do
+    assert "Publish a new release that fixes this." in created["body"]
+    assert "Nothing for now" not in created["body"]
+    assert "This issue closes by itself once" in created["body"]
 
 
 def test_the_title_of_only_holds_names_the_domain_for_a_name_that_is_not_plain(
