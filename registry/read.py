@@ -11,8 +11,8 @@ from typing import TYPE_CHECKING
 
 from registry.content import content_hash, unpack
 from registry.edit import now, write_indexes, write_version
-from registry.formats import format_date
-from registry.models import ReadingResult, Verdict, VersionReading
+from registry.formats import MAX_REASON, format_date
+from registry.models import ReadingResult, UnreadVersion, Verdict, VersionReading
 from registry.pipeline import archive_path, reading_base, versions_to_read, write_readings
 from registry.reading import (
     ReadingConfigurationError,
@@ -27,11 +27,14 @@ if TYPE_CHECKING:
     import anthropic
 
     from registry.models import Reading
+    from registry.pipeline import PlannedReading
     from registry.registry import Provider, Registry
 
 # the most providers whose request the API refuses as not valid in one run before the reading
 # stops: then the request of the reading is wrong, rather than those releases
 MAX_REJECTED = 3
+# why a version cannot be read now: the API, or its archives in the work folder
+_NOT_READ = (ReadingUnavailableError, ValueError, OSError, tarfile.TarError, EOFError)
 
 
 @dataclass
@@ -54,8 +57,9 @@ def read_versions(registry: Registry, client: anthropic.Anthropic, work: Path) -
     version whose archives are missing or do not hold its content, or that the API could not
     read for now, gets no verdict and is read on another night. So does one whose request the
     API refused as not valid, and the later versions of its provider in this run; once that
-    happened to MAX_REJECTED providers, the reading stops. After each verdict, the readings of
-    this run are written into the work folder for the report; at the end, the index files.
+    happened to MAX_REJECTED providers, the reading stops. After each version, what this run
+    read, and what it could not read and why, is written into the work folder for the report;
+    at the end, the index files.
 
     :param registry: The registry.
     :param client: The client of the Claude API.
@@ -65,25 +69,29 @@ def read_versions(registry: Registry, client: anthropic.Anthropic, work: Path) -
     """
     counts = ReadCounts()
     results: list[ReadingResult] = []
+    unread: list[UnreadVersion] = []
     rejected: set[str] = set()
     try:
         for planned in versions_to_read(registry):
-            if planned.domain in rejected:
-                _warn(planned.domain, planned.version, "the API refused an earlier version of it")
-                counts.pending += 1
-                continue
             provider = registry.providers[planned.domain]
             base = reading_base(provider, planned.version)
             try:
+                if planned.domain in rejected:
+                    msg = "the API refused an earlier version of it"
+                    raise ReadingUnavailableError(msg)
                 reading = _read(provider, planned.version, base, client, work, counts.usage)
             except ReadingRejectedError as err:
-                _warn(planned.domain, planned.version, err)
                 rejected.add(planned.domain)
+                _leave(planned, err, unread)
+                write_readings(results, unread, work)
+                counts.pending += 1
                 if len(rejected) >= MAX_REJECTED:
                     msg = f"the API refused the requests of {len(rejected)} providers in this run"
                     raise ReadingConfigurationError(msg) from err
-                reading = None
-            if reading is None:
+                continue
+            except _NOT_READ as err:
+                _leave(planned, err, unread)
+                write_readings(results, unread, work)
                 counts.pending += 1
                 continue
             file = provider.versions[planned.version]
@@ -94,7 +102,7 @@ def read_versions(registry: Registry, client: anthropic.Anthropic, work: Path) -
                     domain=planned.domain, version=planned.version, base=base, reading=reading
                 )
             )
-            write_readings(results, work)
+            write_readings(results, unread, work)
             if reading.verdict is Verdict.PASS:
                 counts.passed += 1
             else:
@@ -111,9 +119,9 @@ def _read(
     client: anthropic.Anthropic,
     work: Path,
     usage: TokenUsage,
-) -> Reading | None:
+) -> Reading:
     """
-    Return the reading of a version, or None after a warning when it cannot be read now.
+    Return the reading of a version.
 
     The tokens its requests used are logged and added to the usage.
 
@@ -123,9 +131,12 @@ def _read(
     :param client: The client of the Claude API.
     :param work: The work folder, with the archives.
     :param usage: Where the tokens of the requests of the run are added up.
+    :raises ReadingUnavailableError: The API could not read it for now.
     :raises ReadingRejectedError: The API refused the request as not valid.
     :raises ReadingConfigurationError: The credentials or the configuration of the reading are
         wrong.
+    :raises ValueError: An archive does not hold the content of its version file.
+    :raises OSError: An archive is not in the work folder or cannot be read.
     """
     domain, used = provider.file.domain, TokenUsage()
     try:
@@ -135,9 +146,6 @@ def _read(
             if base is not None:
                 base_side = _side(provider, base, work, Path(folder, "base"))
             return read_release(client, release, base_side, used)
-    except (ReadingUnavailableError, ValueError, OSError, tarfile.TarError, EOFError) as err:
-        _warn(domain, version, err)
-        return None
     finally:
         if used.input_tokens or used.output_tokens:
             print(
@@ -172,6 +180,16 @@ def _side(provider: Provider, version: str, work: Path, target: Path) -> Side:
     return Side(target, version, commit_url)
 
 
-def _warn(domain: str, version: str, reason: object) -> None:
-    """Print the warning of a version that is read on another night, with the reason."""
-    print(f"warning: {domain} {version}: not read: {reason}", file=sys.stderr)
+def _leave(planned: PlannedReading, reason: object, unread: list[UnreadVersion]) -> None:
+    """
+    Warn that a version is read on another night, with the reason, and add it to the unread.
+
+    :param planned: The version.
+    :param reason: Why it is not read now.
+    :param unread: The versions of this run that could not be read.
+    """
+    print(f"warning: {planned.domain} {planned.version}: not read: {reason}", file=sys.stderr)
+    line = " ".join(str(reason).split()) or type(reason).__name__
+    if len(line) > MAX_REASON:
+        line = f"{line[: MAX_REASON - 1]}…"
+    unread.append(UnreadVersion(domain=planned.domain, version=planned.version, reason=line))

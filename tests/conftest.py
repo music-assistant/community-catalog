@@ -29,6 +29,8 @@ DOMAIN = "sample_music"
 ADDED = "2026-10-01T12:00:00Z"
 RELEASED = "2026-11-01T12:00:00Z"
 CHECKED = "2026-11-02T03:00:00Z"
+# the reading of a version the reading passed in full, which the index offers
+PASSED = {"verdict": "pass", "read": CHECKED}
 COMMIT = "0123456789abcdef0123456789abcdef01234567"
 CONTENT_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 ICON = (

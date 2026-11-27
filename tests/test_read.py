@@ -241,6 +241,30 @@ def test_the_base_is_the_highest_lower_version_accepted(files: Files) -> None:
     ]
 
 
+def test_a_pass_whose_base_is_no_longer_accepted_is_read_again(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A version read against a base that was blocked since is read again, against its base now."""
+    files.provider(blocked_versions={"1.1.0": "Sends the library away"})
+    _version(files, "1.0.0", reading={"verdict": "pass", "read": READ})
+    _version(files, "1.1.0", reading={"verdict": "pass", "read": READ, "base": "1.0.0"})
+    _version(files, "1.2.0", reading={"verdict": "pass", "read": READ, "base": "1.1.0"})
+    # a hold waits for a person, whatever its base
+    _version(files, "1.3.0", reading={"verdict": "hold", "read": READ, "base": "1.2.0"})
+    client = VersionClient({"1.2.0": _message(HOLD)})
+
+    assert _read(files, monkeypatch, client) == 0
+
+    assert client.read == [("1.2.0", "1.0.0")]
+    versions = load_registry(files.root).providers[DOMAIN].versions
+    assert {v: (f.reading.verdict, f.reading.base) for v, f in versions.items() if f.reading} == {
+        "1.0.0": (Verdict.PASS, None),
+        "1.1.0": (Verdict.PASS, "1.0.0"),
+        "1.2.0": (Verdict.HOLD, "1.0.0"),
+        "1.3.0": (Verdict.HOLD, "1.2.0"),
+    }
+
+
 def test_providers_take_turns_with_their_oldest_version(files: Files) -> None:
     """The provider with the most recent release starts, then each reads one version in turn."""
     files.provider()
@@ -390,7 +414,13 @@ def test_a_version_without_its_archives_waits(
     err = capsys.readouterr().err
     assert f"{DOMAIN} 1.2.0: not read: the archive of 1.0.0 is not in the work folder" in err
     assert f"{DOMAIN} 1.3.0: not read: the archive of 1.3.0 does not hold the content" in err
-    assert not (work / READINGS_FILE).exists()
+    readings = load_model(work / READINGS_FILE, ReadingResults)
+    assert readings.results == []
+    assert [(entry.version, entry.reason) for entry in readings.unread] == [
+        ("1.1.0", "the archive of 1.0.0 is not in the work folder"),
+        ("1.2.0", "the archive of 1.0.0 is not in the work folder"),
+        ("1.3.0", "the archive of 1.3.0 does not hold the content of its version file"),
+    ]
 
 
 def test_read_needs_the_identity_token_and_the_ids(

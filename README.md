@@ -82,16 +82,18 @@ the issue withdraws the submission.
 After admission, you release whenever you want: publish a GitHub release, and nothing else is
 needed. The registry looks for new releases once a night and checks the newest one on each
 channel (nightly, beta, and one per stable version such as stable 2.11). A release that passes
-reaches the servers on that channel without review. A release that is refused or fails gets an
-issue on this repository that mentions you, with the reason; it closes by itself when a later
-release passes. A refused release is not tried again; publish a new version.
+the checks and the reading below reaches the servers on that channel without waiting for anyone.
+A release that is refused or fails gets an issue on this repository that mentions you, with the
+reason; it closes by itself when a later release passes. A refused release is not tried again;
+publish a new version.
 
 Each new release is also read by Claude, an AI model, against the
-[rules of the community catalog](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md).
-It reads your provider folder, not the packages in its requirements. This reading is on trial:
-it holds no release back yet. When it finds something, the issue tells
-you what and where, and a person of the Music Assistant team looks at it. If a finding is wrong,
-say so in the issue.
+[rules of the community catalog](https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATALOG_RULES.md):
+your first release in full, and each later one as its change since the last accepted release. It
+reads your provider folder, not the packages in its requirements. When it finds something, the
+release is held: the issue tells you what and where, and the release waits until a person of the
+Music Assistant team has read it. Until then, servers keep the release they have. If a finding is
+wrong, say so in the issue.
 
 ## Changing or leaving
 

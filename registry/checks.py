@@ -186,37 +186,16 @@ def check_kept_versions(provider: ProviderFile, versions: Mapping[str, VersionFi
     return problems
 
 
-def check_reading_base(
-    version: VersionFile, provider: ProviderFile, versions: Mapping[str, VersionFile]
-) -> list[str]:
+def check_reading_base(version: VersionFile, versions: Mapping[str, VersionFile]) -> list[str]:
     """
-    Return what is wrong in the base of the reading of a version.
-
-    The base was accepted when the version was read: it had a pass recorded no later, or a
-    clearance. A block of the base after that changes nothing.
+    Return what is wrong in the base of the reading of a version: it has a version file.
 
     :param version: The version file.
-    :param provider: The provider the version belongs to.
     :param versions: The version files of the provider, by version.
     """
-    if (reading := version.reading) is None or reading.base is None:
+    if (reading := version.reading) is None or reading.base is None or reading.base in versions:
         return []
-    if (base := versions.get(reading.base)) is None:
-        return [f"reading.base: {reading.base} has no version file"]
-    # dates in the one format of the registry compare as text
-    passed = (
-        base.reading is not None
-        and base.reading.verdict is Verdict.PASS
-        and base.reading.read <= reading.read
-    )
-    if passed or reading.base in provider.cleared_versions:
-        return []
-    return [
-        (
-            f"reading.base: {reading.base} had neither a pass of the reading nor a clearance "
-            f"when {version.version} was read"
-        )
-    ]
+    return [f"reading.base: {reading.base} has no version file"]
 
 
 def check_refused(release: RefusedRelease, provider: ProviderFile) -> list[str]:

@@ -66,8 +66,8 @@ The bot writes it from the submission (see [Admission](#admission)): the ids fro
 domain from the manifest of the latest release. A key that has its default value is left out.
 Who decided on the admission, and when, is in the history of its pull request. The maintainers
 of a provider are the owner of its repository and the code owners in the manifest of its highest
-version that is offered (not blocked, and passed on a channel); without such a version, the
-owner alone.
+version that is offered (accepted, see [The index](#the-index), and passed on a channel); without
+such a version, the owner alone.
 
 | Key | Rule |
 |---|---|
@@ -80,7 +80,7 @@ owner alone.
 | `status` | Optional, default `listed`. `listed`, `withdrawn` (not offered; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
 | `blocked_versions` | Optional. Version to reason. A blocked version is loaded by no server. |
-| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while the [reading](#versionsversionjson) held it or had not read it yet (for example when the reading cannot run). A version the reading passed is never cleared. The index does not use it yet. |
+| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while the [reading](#versionsversionjson) held it or had not read it yet (for example when the reading cannot run). A version the reading passed is never cleared. A clearance may be removed again: the version, and a pass read against it, are then no longer accepted. |
 
 ### versions/\<version\>.json
 
@@ -115,7 +115,7 @@ owner alone.
 | `icon_svg` | The provider's `icon.svg`, when it has one that passes the icon rules below. |
 | `released` | When the version was released. |
 | `checks` | The result per channel in `channels.json`: passed or not, when, and why not, in one line of at most 300 printable characters. |
-| `reading` | Absent until the version is read against the rules. `verdict` is `pass` or `hold` (waits for a person), `read` when. `base` is the lower version whose change was read, or `null` when the version was read in full; it has a version file, and when the version was read it was accepted: a pass recorded no later, or a clearance. A block of the base after that changes nothing. The index does not use it yet. |
+| `reading` | Absent until the version is read against the rules. `verdict` is `pass` or `hold` (waits for a person), `read` when. `base` is the lower version whose change was read, or `null` when the version was read in full; it has a version file. A pass accepts the version only while its base is accepted (see [The index](#the-index)). |
 
 ### refused/\<version\>.json
 
@@ -148,12 +148,18 @@ Each `site/v1/<channel>.json` holds, for every provider with at least one versio
 - its status, reason and reason link, repository, maintainers (see
   [provider.json](#providerjson), as handles without `@`), the date it entered the catalog, and
   its blocked versions;
-- `latest`: the highest version that passed the checks for this channel and is not blocked.
-  Versions are compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
+- `latest`: the highest accepted version that passed the checks for this channel. Versions are
+  compared as versions (`1.10.0` is above `1.9.0`), not as text and not by date;
 - `versions`: the five highest of those, each with its commit, folder, content hash,
   requirements and release date;
 - the manifest and icon of `latest`; when no version passed for this channel, those of the
-  highest version that is not blocked, or of the highest version when all are blocked.
+  highest accepted version, or of the highest version when none is accepted.
+
+A version is accepted when it is not blocked, and a registry maintainer cleared it or the
+[reading](#the-reading-of-a-release) passed it: in full, or against a base that is accepted
+itself. So a version the reading held or has not read yet is not offered, and neither is a pass
+whose base was blocked, or lost its clearance, since; the previous accepted version stays
+`latest`.
 
 Blocked and withdrawn providers stay in the index with their versions, so a server recognises
 what it has installed. The output is deterministic: an unchanged registry gives byte-identical
@@ -209,7 +215,7 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
 | `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
-| `uv run python -m registry clear-version <domain> <version> --reason <url>` | Accepts a version the reading held or did not read yet, after a person read it, with an `https` link to why, and writes the index files. A version the reading passed is refused: it needs no clearance. A clearance is withdrawn with `block-version`. |
+| `uv run python -m registry clear-version <domain> <version> --reason <url>` | Accepts a version the reading held or did not read yet, after a person read it, with an `https` link to why, and writes the index files, which then offer it. A version the reading passed is refused: it needs no clearance. A clearance is withdrawn by removing it from `cleared_versions` and running `build`, or by blocking the version. |
 
 Blocking is one command and one commit:
 
@@ -227,9 +233,9 @@ The commands of the release pipeline, which the workflows run:
 | `check --channel <channel> --domain <domain> --version <version> --stage install\|load --scratch <folder> --output <file>` | Runs inside the server image of the channel. One stage of the checks of one version (see below); writes the results file when the stage has a verdict, and changes nothing else. |
 | `check-folder <folder>` | Runs inside a server image. Checks one provider folder, for a provider's own CI. |
 | `apply-results <folder>` | Records the results the plan names in the version files and writes the index files. A check that could not run in the server image removes a failed result of its version on that channel. |
-| `read` | Reads the new versions against the rules, at most 25 a run, records each verdict in its version file and writes the index files (see [In the release pipeline](#in-the-release-pipeline)). Writes `readings.json` into the work folder, with what the reading found, for the report. Needs the identity token of the workflow job and the ids of the federation. |
-| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, versions the reading held, a repository that is not the admitted one), and what settles them. Also the report of every channel with results: whether its checks could run. |
-| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider and of each channel whose checks cannot run on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
+| `read` | Reads the new versions against the rules, at most 25 a run, records each verdict in its version file and writes the index files (see [In the release pipeline](#in-the-release-pipeline)). Writes `readings.json` into the work folder, with what the reading found and the versions it could not read with why, for the report. Needs the identity token of the workflow job and the ids of the federation. |
+| `report <folder>` | Writes the report of every provider into the work folder: its failures in this run that are not settled (failed checks, refused releases, versions the reading held, a repository that is not the admitted one), and what settles them. Also the report of every channel with results: whether its checks could run; and of the versions that wait too long for their reading. |
+| `post-issues --repository <owner/name>` | Opens, adds to or closes the issue of each provider, of each channel whose checks cannot run and of the versions that wait for their reading on the registry after those reports (see [Release issues](#release-issues)). Needs `GITHUB_TOKEN`. |
 | `prepare-admission --repository <owner/name> --issue <number>` | The admission checks of a submission that need GitHub: reads the issue through the API, finds the provider in the latest release, writes the `provider.json` it leads to and the version file of that release into the checkout, and the report and the plan into the work folder. An issue that is no valid submission gets a report with the refusal. Needs `GITHUB_TOKEN`. |
 | `check-admission <folder> [--comment <file>] [--run-url <url>] [--proposal <result>] [--outcome <outcome>] [--pull-request <url>] [--others <urls>]` | Prints the result of the admission checks with the check results of the latest release, and writes it as the comment for the issue. What happens next follows from the result of the propose job and its outcome. Exits with 1 when the checks did not pass. |
 | `propose-admission <folder> --repository <owner/name> --issue <number> --author <account> --run-url <url> [--output <file>]` | Opens the pull request of a submission whose checks passed, leaves standing the open one that holds the same, or closes it (see [Admission](#admission)). Adds its outcome (`opened`, `stands`, `not-passed`, `closed`, `changed` or `conflict`), the address of its pull request and those of other submissions of the domain to the outputs file of the job. Needs `GITHUB_TOKEN` of the app. |
@@ -320,7 +326,8 @@ only a run on `main` records or reports anything. Its jobs share only files:
    and writes the plan: per channel that is tested, the versions to check whose archive it has.
    Those are the versions without a result for the channel, the current `latest` of each provider
    on the channel, and the three newest versions above it that are not blocked, so a version that
-   failed once (on a night the server image was broken, say) can pass again.
+   failed once (on a night the server image was broken, say) can pass again. A version that waits
+   for its reading or for a person is above `latest` too, and keeps a recent result that way.
 2. **Check** runs once per channel that is not frozen, inside the official server image of that
    channel. For each version of the plan, `scripts/check-channel.sh` runs two containers:
    * **install**, with network, runs no provider code: the provider folder is unpacked from the
@@ -348,8 +355,9 @@ only a run on `main` records or reports anything. Its jobs share only files:
    [Release issues](#release-issues)). The provider's own tests are not run.
 3. **Apply** records the results with the rules of `record-check`, writes the index files, reads
    the new versions against the rules (see [In the release pipeline](#in-the-release-pipeline)),
-   validates and pushes to `main` with the token of the Music Assistant Bot app, which it makes
-   once the reading is done: the token lives an hour. A version that stops passing on a channel
+   writes the index files again (also when the read step was stopped before it did), validates
+   and pushes to `main` with the token of the Music Assistant Bot app, which it makes once the
+   reading is done: the token lives an hour. A version that stops passing on a channel
    leaves that channel's index: the newest version that still passes there becomes `latest`. A
    check that could not run removes a failed result of its version on that channel and keeps a
    passed one, so the version is not offered there until it passes. The push starts the Publish
@@ -357,7 +365,8 @@ only a run on `main` records or reports anything. Its jobs share only files:
 4. **Report** tells the maintainers of a provider about every version that failed a check on a
    channel (first checks and versions that stopped passing), every release refused in this run,
    every version the reading held in this run and a repository that is not the admitted one, in
-   one issue per provider on this repository (see [Release issues](#release-issues)). It runs once
+   one issue per provider on this repository (see [Release issues](#release-issues)), and the
+   registry maintainers about the versions that wait too long for their reading. It runs once
    the results are on `main`, also when the reading failed. It writes the issues with the
    workflow's own token, which may write issues and nothing else.
 
@@ -427,35 +436,45 @@ version. The release pipeline reads every new version this way; `read-archive` r
 ### In the release pipeline
 
 The apply job runs `read` after the results are recorded and before `validate`. It reads the
-versions without a reading that are neither cleared nor blocked, of a provider that is not
-blocked, and that did not fail on every channel they were checked on: at most 25 a night, and the
-others the next night. The providers take turns, the one with the most recently released version
-first, and the versions of a provider come oldest first. Each is read against the highest lower
-version that is accepted (the reading passed it, or a registry maintainer cleared it) and not
-blocked, chosen when its turn comes, so a version that passed earlier in the run can be it; or in
-full when there is none. The fetch step downloads the archives of each version and of its base
+versions that are neither accepted nor blocked, without a reading or with a pass whose base is no
+longer accepted, of a provider that is not blocked, and that did not fail on every channel they
+were checked on: at most 25 a night, and the others the next night. The providers take turns, the
+one with the most recently released version first, and the versions of a provider come oldest
+first. Each is read against the highest lower version that is accepted (see
+[The index](#the-index)), chosen when its turn comes, so a version that passed earlier in the run
+can be it; or in full when there is none. So the first version of a provider is read in full, and
+each later one as its change since the last accepted version. The fetch step downloads the archives of each version and of its base
 as planned (a base chosen later is a version read earlier in the run, whose archive is there),
 and the read step reads them only when they hold the content of their version files.
 
 The verdict goes into the version file, and what the reading found into `readings.json`, which the
 report gets as an artifact; the log shows counts, the input and output tokens of each reading and
-of the run, and a warning with the reason for each version left for another night. A version the
+of the run, and a warning with the reason for each version left for another night, which
+`readings.json` lists too. A version the
 API could not read for now, or whose answer was not in the answer format (the warning names the
 check that failed, without the answer), is read on another night. So is a version whose request
 the API refused with 400, and the later versions of its provider in that run; a 400 for three
 providers in one run says the request of the reading is wrong, and stops it as a fault of the
 configuration. A fault of the credentials or the configuration stops the reading: the version it
 was reading gets no verdict, those before keep theirs, and the run fails once the results are
-pushed and reported. So does a reading that takes more than four hours.
+pushed and reported. So does a reading that takes more than four hours. A version that was not
+read is not offered: servers keep the version they have.
 
-**On trial.** The index does not use the verdict yet, so a held version is offered as before. A
-hold goes into the release issue of the provider (see [Release issues](#release-issues)): the
-version, each finding with the rule in plain words, its file and line, and the explanation and
-summary of the reading as code, or, for a hold the code decided, its reason. The issue says that
-the reading is on trial and that a person of the Music Assistant team looks at the release. If a
-finding is wrong, the maintainer says so in the issue. That person reads the release, and then
-accepts the version with `clear-version <domain> <version> --reason <issue>` or blocks it with
-`block-version`, in a pull request, and closes the issue when nothing else in it waits.
+**A hold.** A version the reading held is not offered either. The hold goes into the release
+issue of the provider (see [Release issues](#release-issues)): the version, each finding with the
+rule in plain words, its file and line, and the explanation and summary of the reading as code,
+or, for a hold the code decided, its reason. The issue says that a person of the Music Assistant
+team reads the release, and that servers are not offered it until then. If a finding is wrong,
+the maintainer says so in the issue. That person reads the release, and then accepts the version
+with `clear-version <domain> <version> --reason <issue>` or blocks it with `block-version`, in a
+pull request; the next run closes the issue when nothing else in it waits. A new provider is
+offered once the reading passed its first version or a registry maintainer cleared it: the
+admission accepts no version.
+
+**Waiting.** A version of a listed provider that passed the checks on a channel and still waits
+for its reading on the third night after its release (two days after it) goes into one issue for
+the registry maintainers, with why the read step did not read it in the last run (see
+[Release issues](#release-issues)).
 
 **Authentication.** The reading has no key of the API: it uses workload identity federation. The
 apply job has the permission `id-token: write`, and the environment `releases` holds four
@@ -602,8 +621,9 @@ checks passed, and tells the maintainers that nothing is needed of them until a 
 has read the release. Any other issue is titled `<name> (<domain>): release checks failed`. The
 pipeline finds its issues by label, author and the first line, never by title.
 
-A failure is settled when the newest version of the provider (the highest with a version file or
-a refusal) passed on a channel that is tested, and:
+A version the reading held is settled once a registry maintainer cleared or blocked it. Any
+failure is also settled when the newest version of the provider (the highest with a version file
+or a refusal) passed on a channel that is tested, and:
 
 - for a failed check, also on the channel of the check, unless that channel is not tested in this
   run (no longer tested, or its checks could not run);
@@ -612,8 +632,9 @@ a refusal) passed on a channel that is tested, and:
 
 A failure that is settled when it happens is not told. A hold is told only in the run that read
 the version, so a later run does not open a closed issue for it again. Once every failure an
-issue tells is settled, the pipeline comments that the newest version passed and closes the issue
-as completed; a failure after that opens a new issue.
+issue tells is settled, the pipeline comments what settled them (the newest version that passed,
+the versions the team accepted or blocked) and closes the issue as completed; a failure after
+that opens a new issue.
 
 An issue that stays open without a reaction of the provider's maintainer is a reason to withdraw
 the provider: `set-status <domain> withdrawn --reason <text> --reason-url <issue>`. Nothing does
@@ -625,13 +646,18 @@ maintainers, with the same label, titled "The release checks cannot run on the b
 names the channel. Its text shows the newest output and is kept up to date while the checks
 cannot run, and the pipeline closes it once they run on that channel again.
 
+While versions wait too long for their reading (see
+[In the release pipeline](#in-the-release-pipeline)), one issue
+for the registry maintainers, with the same label, titled "Versions wait for their reading" and
+without mentions, lists them (at most 50), each with why the read step did not read it in the
+last run; its first line is `<!-- release-check unread -->`. Its text is kept up to date, and the
+pipeline closes it once none waits.
+
 ## Still open
 
 - The app token of `propose` could write to `main` if that job were ever compromised, since the
   same app pushes the commits of the release pipeline to `main`. A separate app for the pull
   requests would remove that.
 - Running the provider's own tests in the check step.
-- Using the verdict of the reading in the index: the reading runs on trial, and holds no release
-  back yet.
 - A summary by a review bot of Music Assistant on the pull request of a submission.
 - Making the changes a maintainer asks for with the form "Report or change a provider" by the bot.

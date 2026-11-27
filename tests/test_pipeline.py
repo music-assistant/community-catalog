@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -22,26 +23,33 @@ from registry.models import (
     RefusedRelease,
     RepositoryState,
     Rule,
+    UnreadReport,
+    UnreadVersion,
 )
 from registry.pipeline import versions_to_check
 from registry.reading import NO_FINDING, TOO_LARGE, UNREADABLE
 from registry.registry import load_registry
 from registry.report import (
     LABEL,
+    MAX_UNREAD,
     RULES,
     build_channel_reports,
     build_reports,
+    build_unread_report,
     is_settled,
     open_channel_issues,
     open_issues,
+    open_unread_issue,
     post_channel_report,
     post_report,
+    post_unread_report,
 )
 from tests.conftest import (
     CHECKED,
     COMMIT,
     DOMAIN,
     OWNER_ID,
+    PASSED,
     RELEASED,
     REPOSITORY_ID,
     FakeGitHub,
@@ -160,8 +168,8 @@ def test_versions_to_check(files: Files) -> None:
 def test_a_version_that_failed_once_gets_another_chance(files: Files) -> None:
     """A latest version that failed on a broken night is checked again, and comes back."""
     files.provider()
-    files.version("1.4.0", channels={"nightly": True})
-    files.version("1.5.0", channels={"nightly": True})
+    files.version("1.4.0", channels={"nightly": True}, reading=PASSED)
+    files.version("1.5.0", channels={"nightly": True}, reading=PASSED)
     _plan(files, {"nightly": ["1.4.0", "1.5.0"]})
     _write_result(files, "nightly", _result("1.5.0", "load: ImportError in the server"))
     assert _apply(files) == 0
@@ -179,7 +187,7 @@ def test_a_version_that_failed_once_gets_another_chance(files: Files) -> None:
 def test_only_the_newest_versions_above_the_latest_are_checked_again(files: Files) -> None:
     """Of the versions above the latest that failed, the three newest are checked again."""
     files.provider()
-    files.version("1.0.0", channels={"nightly": True})
+    files.version("1.0.0", channels={"nightly": True}, reading=PASSED)
     for version in ("1.1.0", "1.2.0", "1.3.0", "1.4.0", "1.5.0"):
         files.version(version, channels={"nightly": False})
 
@@ -194,7 +202,7 @@ def test_only_the_newest_versions_above_the_latest_are_checked_again(files: File
 def test_apply_results(files: Files) -> None:
     """The results of every channel are recorded and the index files written."""
     files.provider()
-    files.version("1.0.0", channels={})
+    files.version("1.0.0", channels={}, reading=PASSED)
     _plan(files, {"nightly": ["1.0.0"], "beta": ["1.0.0"]})
     _write_result(files, "nightly", _result("1.0.0"))
     _write_result(files, "beta", _result("1.0.0", "load: no module"))
@@ -213,9 +221,9 @@ def test_apply_results(files: Files) -> None:
 def test_a_version_that_stops_passing_falls_back(files: Files) -> None:
     """When the latest version stops passing, the newest version that still passes is latest."""
     files.provider()
-    files.version("1.0.0", channels={"nightly": True})
-    files.version("1.1.0", channels={"nightly": False})
-    files.version("1.2.0", channels={"nightly": True})
+    files.version("1.0.0", channels={"nightly": True}, reading=PASSED)
+    files.version("1.1.0", channels={"nightly": False}, reading=PASSED)
+    files.version("1.2.0", channels={"nightly": True}, reading=PASSED)
     assert _run(files, "build") == 0
     assert _index(files, "nightly")["providers"][DOMAIN]["latest"] == "1.2.0"
     _plan(files, {"nightly": ["1.2.0"]})
@@ -284,8 +292,8 @@ def test_a_result_counts_only_for_its_own_version(
     files.provider("aaa_evil", repository="someone/aaa-evil", folder="aaa_evil")
     files.version("1.0.0", "aaa_evil", folder="aaa_evil", channels={"nightly": True})
     files.provider()
-    victim = files.version("1.0.0", channels={"nightly": True})
-    files.version("1.1.0", channels={"nightly": True})
+    victim = files.version("1.0.0", channels={"nightly": True}, reading=PASSED)
+    files.version("1.1.0", channels={"nightly": True}, reading=PASSED)
     before = victim.read_bytes()
     assert _run(files, "build") == 0
     _plan(files, {"nightly": ["1.0.0"], "beta": ["1.0.0"]}, domain="aaa_evil")
@@ -362,8 +370,8 @@ def test_a_missing_result_and_a_frozen_channel(
 def test_a_check_that_could_not_run_removes_a_failure(files: Files) -> None:
     """A check that could not run removes a failed result of its version there, not a pass."""
     files.provider()
-    files.version("1.0.0", channels={"beta": True, "nightly": True})
-    files.version("1.1.0", channels={"beta": False, "nightly": True})
+    files.version("1.0.0", channels={"beta": True, "nightly": True}, reading=PASSED)
+    files.version("1.1.0", channels={"beta": False, "nightly": True}, reading=PASSED)
     assert _run(files, "build") == 0
     _plan(files, {"beta": ["1.0.0", "1.1.0"]})
     _write_result(files, "beta", _unavailable("1.0.0"))
@@ -606,6 +614,7 @@ def test_a_new_issue_mentions_at_most_ten(files: Files) -> None:
         "1.0.0",
         channels={"beta": True},
         manifest={**manifest(requirements=["some-package==1.0"]), "codeowners": owners},
+        reading=PASSED,
     )
     github = FakeGitHub()
 
@@ -875,7 +884,7 @@ def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> No
     assert code_block(FINDING["explanation"], "  ") in body
     assert f"in the words of the reading:\n\n{code_block(SUMMARY)}" in body
     assert "harms_user" not in body
-    assert "The reading is on trial: nothing changes for this release, and a person" in body
+    assert "Until then, servers are not offered it and keep the version they have." in body
     assert "If a finding is wrong, say so in this issue." in body
     # a person of the team looks at a hold first
     assert "Publish a new release" not in body
@@ -996,7 +1005,7 @@ def test_text_of_the_reading_mentions_nobody_and_links_nowhere(files: Files) -> 
     assert outside.count("### What to do") == 1
     assert code_block(hostile, "  ") in body
     assert code_block(hostile) in body
-    assert "The reading is on trial" in outside
+    assert "Until then, servers are not offered it" in outside
     assert body.endswith("@someone\n")
     # only the first line of the pipeline names what it told
     issue = open_issues(GitHub("a-token", github), REGISTRY)[DOMAIN]
@@ -1031,7 +1040,7 @@ def test_a_hold_of_the_code_gives_its_reason(
     body = created["body"]
     assert "### Version 1.0.0 could not be read against the catalog rules\n" in body
     assert f"version 1.0.0 (commit `{COMMIT}`, in full) {told}" in body
-    assert "a person of the Music Assistant team looks at it." in body
+    assert "A person of the Music Assistant team reads the release. Until then" in body
     assert "If a finding is wrong" not in body
 
 
@@ -1054,6 +1063,58 @@ def test_a_pass_after_a_hold_closes_the_issue(files: Files) -> None:
         "Version 1.1.0 passed the checks and the reading, so this issue is closed."
     )
     assert len(github.created) == 1
+
+
+@pytest.mark.parametrize(
+    ("kept", "told"),
+    [
+        ("cleared_versions", "The team accepted version 1.0.0"),
+        ("blocked_versions", "The team blocked version 1.0.0"),
+    ],
+)
+def test_a_hold_is_settled_once_the_team_clears_or_blocks_it(
+    files: Files, kept: str, told: str
+) -> None:
+    """A cleared or blocked version is settled, also while the newest version passes no check."""
+    files.provider()
+    files.version("1.0.0", channels={})
+    github = FakeGitHub()
+    _night(files, github, readings=[_reading("1.0.0")])
+    files.version("1.0.0", channels={}, reading={"verdict": "hold", "read": READ})
+    assert _night(files, github) is None
+
+    decided: dict[str, Any] = {kept: {"1.0.0": "https://github.com/a/b/issues/1"}}
+    files.provider(**decided)
+    done = _night(files, github)
+
+    assert done == "#1: closed"
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"] == f"{told}, so this issue is closed."
+
+
+def test_the_closing_comment_tells_what_settled_each_failure(files: Files) -> None:
+    """A version that passed, and each version the team cleared or blocked, are named."""
+    files.provider()
+    files.version("1.0.0")
+    files.version("1.1.0")
+    files.version("1.2.0")
+    github = FakeGitHub()
+    holds = [_reading("1.0.0"), _reading("1.1.0"), _reading("1.2.0")]
+    _night(files, github, readings=holds)
+    for version in ("1.0.0", "1.1.0", "1.2.0"):
+        files.version(version, reading={"verdict": "hold", "read": READ})
+    issue = "https://github.com/a/b/issues/1"
+    files.provider(cleared_versions={"1.0.0": issue}, blocked_versions={"1.1.0": "x"})
+    files.version("1.3.0")
+
+    done = _night(files, github, readings=[_reading("1.3.0", "pass", base="1.0.0")])
+
+    assert done == "#1: closed"
+    [comment] = github.comments[REGISTRY, 1]
+    assert comment["body"] == (
+        "Version 1.3.0 passed the checks and the reading, and the team accepted version 1.0.0, "
+        "and the team blocked version 1.1.0, so this issue is closed."
+    )
 
 
 def test_a_hold_is_not_told_again_after_its_issue_was_closed(files: Files) -> None:
@@ -1255,3 +1316,110 @@ def test_report_and_post_issues_for_a_channel_whose_checks_cannot_run(
     assert [data["title"] for _, data in github.created] == [
         "The release checks cannot run on the beta channel"
     ]
+
+
+def test_versions_that_wait_for_their_reading_on_their_third_night(files: Files) -> None:
+    """A version of a listed provider that would be offered once read, and why it was not."""
+    now = datetime(2026, 11, 20, 6, 30, tzinfo=UTC)
+    old, new = "2026-11-18T06:00:00Z", "2026-11-18T07:00:00Z"
+    files.provider(blocked_versions={"1.7.0": "x"})
+    files.version("1.0.0", released=old, reading=PASSED)
+    # waits since before its third night, with the reason of this run
+    files.version("1.1.0", released=old)
+    # its third night is the next one
+    files.version("1.2.0", released=new)
+    # fails every check, so it would not be offered
+    files.version("1.3.0", released=old, channels={"nightly": False})
+    # read in this run
+    files.version("1.4.0", released=old)
+    # a hold waits for a person, not for the reading
+    files.version("1.5.0", released=old, reading={"verdict": "hold", "read": READ})
+    # not tried in this run
+    files.version("1.6.0", released=old)
+    files.version("1.7.0", released=old)
+    files.provider("other_music", status="withdrawn", reason="No longer kept up")
+    files.version("1.0.0", domain="other_music", released=old)
+    readings = ReadingResults(
+        results=[_reading("1.4.0", "pass", base="1.0.0")],
+        unread=[UnreadVersion(domain=DOMAIN, version="1.1.0", reason="the API is unavailable")],
+    )
+
+    report = build_unread_report(load_registry(files.root), readings, now)
+
+    assert report.versions == [
+        UnreadVersion(domain=DOMAIN, version="1.1.0", reason="the API is unavailable"),
+        UnreadVersion(domain=DOMAIN, version="1.6.0", reason=None),
+    ]
+
+
+def test_one_issue_while_versions_wait_for_their_reading() -> None:
+    """The maintainers of the catalog get one issue, kept up to date, closed once none waits."""
+    github = FakeGitHub()
+    client = GitHub("a-token", github)
+    # an issue of a stranger with the label and the first line of the pipeline does not count
+    github.issue(REGISTRY, 1, "<!-- release-check unread -->\n", labels=[{"name": LABEL}])
+    hostile = "`` @someone ```\ninjected"
+    waiting = UnreadReport(
+        versions=[
+            UnreadVersion(domain=DOMAIN, version="1.1.0", reason=hostile),
+            UnreadVersion(domain=DOMAIN, version="1.2.0"),
+        ]
+    )
+
+    def night(report: UnreadReport) -> str | None:
+        return post_unread_report(report, open_unread_issue(client, REGISTRY), client, REGISTRY)
+
+    assert night(waiting) == f"https://github.com/{REGISTRY}/issues/2"
+    assert night(waiting) is None
+    [(_, created)] = github.created
+    assert created["title"] == "Versions wait for their reading"
+    assert created["labels"] == [LABEL]
+    body = created["body"]
+    assert body.startswith("<!-- release-check unread -->\n")
+    assert f"- {code_span(DOMAIN)} 1.1.0: {code_span(hostile)}\n" in body
+    assert f"- {code_span(DOMAIN)} 1.2.0: not tried in the last run, which reads at most" in body
+    assert "injected" not in _outside_code(body)
+    assert _mentions(body) == []
+    # another reason replaces the text of the issue
+    fewer = UnreadReport(versions=[UnreadVersion(domain=DOMAIN, version="1.2.0", reason="x")])
+    assert night(fewer) == "#2: updated"
+    assert "1.1.0" not in _issues(github)[1]["body"]
+    # once none waits, the issue is closed, once
+    assert night(UnreadReport(versions=[])) == "#2: closed"
+    assert night(UnreadReport(versions=[])) is None
+    [comment] = github.comments[REGISTRY, 2]
+    assert comment["body"] == "No version waits for its reading any more, so this issue is closed."
+    assert len(github.created) == 1
+
+
+def test_the_issue_about_waiting_versions_lists_a_number_of_them() -> None:
+    """Beyond MAX_UNREAD versions, the issue says how many more wait."""
+    github = FakeGitHub()
+    client = GitHub("a-token", github)
+    versions = [UnreadVersion(domain=DOMAIN, version=f"1.{n}.0") for n in range(MAX_UNREAD + 2)]
+
+    post_unread_report(UnreadReport(versions=versions), None, client, REGISTRY)
+
+    [(_, created)] = github.created
+    assert created["body"].count(f"- {code_span(DOMAIN)} 1.") == MAX_UNREAD
+    assert "- And 2 more.\n" in created["body"]
+
+
+def test_report_and_post_issues_for_versions_that_wait_for_their_reading(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report of the versions that wait is written, and the maintainers get an issue."""
+    files.provider()
+    files.version("1.0.0")
+    _plan(files, {})
+    files.write("work/fetch.json", _fetched().to_dict())
+    github = FakeGitHub()
+    monkeypatch.setenv("GITHUB_TOKEN", "a-token")
+    monkeypatch.setattr("registry.cli.GitHub", lambda token: GitHub(token, github))
+
+    assert _run(files, "report", str(files.root / "results")) == 0
+    assert _run(files, "post-issues", "--repository", REGISTRY) == 0
+
+    report = load_model(files.root / "work" / "issues" / "reading" / "unread.json", UnreadReport)
+    assert report.versions == [UnreadVersion(domain=DOMAIN, version="1.0.0")]
+    assert [data["title"] for _, data in github.created] == ["Versions wait for their reading"]

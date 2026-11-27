@@ -24,7 +24,7 @@ from registry.registry import InvalidRegistryError
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from registry.models import ReadingResult, VersionFile
+    from registry.models import ReadingResult, UnreadVersion
     from registry.registry import Provider, Registry
 
 # the files in the work folder
@@ -35,6 +35,8 @@ READINGS_FILE = "readings.json"
 ISSUES_FOLDER = "issues"
 # the reports of the channels, in the issues folder
 CHANNELS_FOLDER = "channels"
+# the report of the versions that wait too long for their reading, in the issues folder
+UNREAD_REPORT = "reading/unread.json"
 _ARCHIVES_FOLDER = "archives"
 # the versions above the latest of a channel that are checked again every night, newest first
 RECHECKED_ABOVE_LATEST = 3
@@ -222,21 +224,17 @@ def versions_to_read(registry: Registry) -> list[PlannedReading]:
     """
     Return the versions the read step reads in a run, in the order it reads them.
 
-    Those are the versions without a reading that are neither cleared nor blocked, of a provider
-    that is not blocked, and that did not fail on every channel they were checked on: at most
-    MAX_READINGS_PER_RUN of them. The providers take turns, the one with the most recently
-    released version first, and the versions of a provider come oldest first, so a version that
-    passes can be the base of the next.
+    Those are the versions that wait for their reading, as waits_for_reading says, of a provider
+    that is not blocked: at most MAX_READINGS_PER_RUN of them. The providers take turns, the one
+    with the most recently released version first, and the versions of a provider come oldest
+    first, so a version that passes can be the base of the next.
 
     :param registry: The registry.
     """
     queues = [
         [
-            (provider, file)
-            for file in sorted(
-                provider.versions.values(), key=lambda file: version_key(file.version)
-            )
-            if _readable(provider, file)
+            (provider, provider.versions[version])
+            for version in sorted(waits_for_reading(provider), key=version_key)
         ]
         for _, provider in sorted(registry.providers.items())
         if provider.file.status != ProviderStatus.BLOCKED
@@ -253,43 +251,54 @@ def versions_to_read(registry: Registry) -> list[PlannedReading]:
     ]
 
 
+def waits_for_reading(provider: Provider) -> set[str]:
+    """
+    Return the versions of a provider that wait for their reading.
+
+    Those are the versions that are neither accepted nor blocked, that did not fail on every
+    channel they were checked on, and that have no reading yet, or a pass whose base is no longer
+    accepted: such a version is read again, against the base it has now.
+
+    :param provider: The provider.
+    """
+    accepted = provider.accepted()
+    return {
+        version
+        for version, file in provider.versions.items()
+        if version not in accepted
+        and version not in provider.file.blocked_versions
+        and (file.reading is None or file.reading.verdict is Verdict.PASS)
+        and (not file.checks or any(check.passed for check in file.checks.values()))
+    }
+
+
 def reading_base(provider: Provider, version: str) -> str | None:
     """
     Return the version a version is read against, or None to read it in full.
 
-    That is the highest lower version that is accepted (the reading passed it, or a registry
-    maintainer cleared it) and not blocked.
+    That is the highest lower version that is accepted, as Provider.accepted says.
 
     :param provider: The provider.
     :param version: The version.
     """
-    kept = provider.file
-    accepted = [
-        other
-        for other, file in provider.versions.items()
-        if version_key(other) < version_key(version)
-        and other not in kept.blocked_versions
-        and (
-            other in kept.cleared_versions
-            or (file.reading is not None and file.reading.verdict is Verdict.PASS)
-        )
-    ]
-    return max(accepted, key=version_key, default=None)
+    lower = [other for other in provider.accepted() if version_key(other) < version_key(version)]
+    return max(lower, key=version_key, default=None)
 
 
-def write_readings(results: list[ReadingResult], work: Path) -> None:
+def write_readings(results: list[ReadingResult], unread: list[UnreadVersion], work: Path) -> None:
     """
     Write what the read step read in this run into the work folder, for the report.
 
     :param results: The reading of each version, in the order they were read.
+    :param unread: The versions it tried to read and could not, with the reason.
     :param work: The work folder.
     """
     path = work / READINGS_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(dumps(ReadingResults(results=results).to_dict()))
+    path.write_bytes(dumps(ReadingResults(results=results, unread=unread).to_dict()))
 
 
-def read_readings(work: Path) -> list[ReadingResult]:
+def read_readings(work: Path) -> ReadingResults:
     """
     Return what the read step read in this run; nothing when it wrote no readings file.
 
@@ -298,9 +307,9 @@ def read_readings(work: Path) -> list[ReadingResult]:
     """
     path = work / READINGS_FILE
     if not path.exists():
-        return []
+        return ReadingResults(results=[])
     try:
-        return load_model(path, ReadingResults).results
+        return load_model(path, ReadingResults)
     except (ValueError, OSError) as err:
         msg = f"{path}: {err}"
         raise CommandError(msg) from err
@@ -336,17 +345,6 @@ def _read_result(path: Path, channel: str, entry: ProviderVersion) -> ChannelRes
         _warn(f"{path}: ignored, a failed check has one line of reason and a pass none")
         return None
     return file
-
-
-def _readable(provider: Provider, file: VersionFile) -> bool:
-    """Return whether a version waits for its reading, as versions_to_read says."""
-    kept = provider.file
-    return (
-        file.reading is None
-        and file.version not in kept.cleared_versions
-        and file.version not in kept.blocked_versions
-        and (not file.checks or any(check.passed for check in file.checks.values()))
-    )
 
 
 def _warn(text: str) -> None:

@@ -20,6 +20,7 @@ from registry.models import (
     ProviderFile,
     RefusedRelease,
     ReservedDomains,
+    Verdict,
     VersionFile,
 )
 
@@ -62,19 +63,41 @@ class Provider:
     # the releases that did not become a version, by version
     refused: dict[str, RefusedRelease]
 
+    def accepted(self) -> set[str]:
+        """
+        Return the versions the catalog may offer.
+
+        A version is accepted when it is not blocked, and a registry maintainer cleared it or the
+        reading passed it: in full, or against a base that is accepted itself.
+        """
+        result: set[str] = set()
+        # a base is a lower version, so it is judged before the versions read against it
+        for version in sorted(self.versions, key=version_key):
+            reading = self.versions[version].reading
+            if version not in self.file.blocked_versions and (
+                version in self.file.cleared_versions
+                or (
+                    reading is not None
+                    and reading.verdict is Verdict.PASS
+                    and (reading.base is None or reading.base in result)
+                )
+            ):
+                result.add(version)
+        return result
+
     def maintainers(self) -> list[str]:
         """
         Return the GitHub handles of the maintainers, without @ and each once.
 
         They are the owner of the repository and the code owners in the manifest of the highest
-        version that is offered: not blocked, and passed on a channel. Without such a version
-        the owner is the only one.
+        version that is offered: accepted, and passed on a channel. Without such a version the
+        owner is the only one.
         """
+        accepted = self.accepted()
         offered = [
             file
             for file in self.versions.values()
-            if file.version not in self.file.blocked_versions
-            and any(check.passed for check in file.checks.values())
+            if file.version in accepted and any(check.passed for check in file.checks.values())
         ]
         newest = max(offered, key=lambda file: version_key(file.version), default=None)
         codeowners = newest.manifest.get("codeowners", []) if newest else []
@@ -201,7 +224,7 @@ def _load_provider(
     problems += [
         f"{where}/{VERSIONS_FOLDER}/{version}.json: {p}"
         for version, file in versions.items()
-        for p in check_reading_base(file, provider, versions)
+        for p in check_reading_base(file, versions)
     ]
     return Provider(provider, versions, refused)
 

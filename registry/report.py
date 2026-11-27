@@ -1,25 +1,44 @@
 """
 The report step: one issue on the registry for each provider whose releases need attention.
 
-Also one issue for each channel whose checks cannot run, for the maintainers of the registry.
+Also one issue for each channel whose checks cannot run, and one while versions wait too long for
+their reading, for the maintainers of the registry.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from registry.formats import channel_name, version_key
+from registry.formats import channel_name, format_date, version_key
 from registry.github import ACTIONS_LOGIN
 from registry.markdown import code_block, code_span
-from registry.models import ChannelReport, Failure, ProviderReport, Rule, Verdict
+from registry.models import (
+    ChannelReport,
+    Failure,
+    ProviderReport,
+    ProviderStatus,
+    Rule,
+    UnreadReport,
+    UnreadVersion,
+    Verdict,
+)
+from registry.pipeline import MAX_READINGS_PER_RUN, waits_for_reading
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
+    from datetime import datetime
 
     from registry.github import GitHub, IssueInfo
-    from registry.models import ChannelResults, FetchReport, ReadingResult, VersionResult
+    from registry.models import (
+        ChannelResults,
+        FetchReport,
+        ReadingResult,
+        ReadingResults,
+        VersionResult,
+    )
     from registry.registry import Provider, Registry
 
 # the label of the issues of the release pipeline
@@ -33,6 +52,11 @@ RULES_URL = "https://github.com/music-assistant/.github/blob/main/COMMUNITY_CATA
 MAX_MENTIONS = 10
 # the most findings, or files, of one reading a post shows
 MAX_FINDINGS = 10
+# a version of a listed provider that still waits for its reading this long after its release,
+# on its third night, goes into the issue about the versions that wait for their reading
+UNREAD_AFTER = timedelta(days=2)
+# the most of those versions that issue lists
+MAX_UNREAD = 50
 # each line of the rules in the words of the rules page, following "it may"
 RULES = {
     Rule.NO_RIGHTS: "give access to music the user has no right to",
@@ -65,6 +89,8 @@ _MARKER = re.compile(r"<!-- release-check: ([a-z][a-z0-9_]*)((?:; [a-z0-9. ]+)*)
 # the first line of an issue of the pipeline about a channel whose checks cannot run; an open
 # issue may still name it with "line", which its next update replaces
 _CHANNEL_MARKER = re.compile(r"<!-- release-check (?:channel|line): ([a-z0-9.]+) -->")
+# the first line of the issue of the pipeline about the versions that wait for their reading
+_UNREAD_MARKER = "<!-- release-check unread -->"
 # a manifest name a title shows; any other name is left out of the title
 _TITLE_NAME = re.compile(r"[\w .,()&'+-]{1,60}")
 
@@ -153,6 +179,8 @@ def build_reports(
             passed=[channel for channel in tested if passed.get((domain, newest or "", channel))],
             admitted=state is not None and (state.repository_id, state.owner_id) == ids,
             reading_passed=verdicts.get((domain, newest or "")) is Verdict.PASS,
+            cleared=sorted(provider.file.cleared_versions, key=version_key),
+            blocked=sorted(provider.file.blocked_versions, key=version_key),
         )
         found = failures.get(domain, [])
         if state is not None and not report.admitted:
@@ -166,27 +194,30 @@ def is_settled(report: ProviderReport, key: str) -> bool:
     """
     Return whether a failure of a provider no longer needs its maintainers.
 
-    That is when the newest version passed on a tested channel, and also on the channel of a failed
-    check, unless that channel is not tested in this run; for a version the reading held, the
-    newest version must also have passed the reading; for a repository that was not the admitted
-    one, GitHub must give the admitted one again.
+    A version the reading held is settled once a registry maintainer cleared or blocked it. Else a
+    failure is settled when the newest version passed on a tested channel, and also on the channel
+    of a failed check, unless that channel is not tested in this run; for a version the reading
+    held, the newest version must also have passed the reading; for a repository that was not the
+    admitted one, GitHub must give the admitted one again.
 
     :param report: The report of the provider.
     :param key: The key of the failure.
     """
     kind, *rest = key.split(" ")
-    if not report.passed:
-        return False
     match kind, rest:
-        case "check", [_, channel]:
-            return channel in report.passed or channel not in report.tested
-        case "refused", [_]:
+        case "hold", [version] if version in report.cleared or version in report.blocked:
             return True
+        case "check", [_, channel]:
+            settled = channel in report.passed or channel not in report.tested
+        case "refused", [_]:
+            settled = True
         case "hold", [_]:
-            return report.reading_passed
+            settled = report.reading_passed
         case "repository", [_, _]:
-            return report.admitted
-    return False
+            settled = report.admitted
+        case _:
+            settled = False
+    return bool(report.passed) and settled
 
 
 def build_channel_reports(registry: Registry, results: list[ChannelResults]) -> list[ChannelReport]:
@@ -290,8 +321,7 @@ def post_report(
         github.add_comment(repository, issue.number, body)
         return f"#{issue.number}: {len(new)} new failure(s)"
     if all(is_settled(report, key) for key in told):
-        line = f"Version {report.newest} passed {_passes(told)}, so this issue is closed."
-        github.add_comment(repository, issue.number, line)
+        github.add_comment(repository, issue.number, _closing(report, told))
         github.close_issue(repository, issue.number)
         return f"#{issue.number}: closed"
     return None
@@ -372,6 +402,104 @@ def post_channel_report(
     return f"#{issue.number}: updated"
 
 
+def build_unread_report(
+    registry: Registry, readings: ReadingResults, now: datetime
+) -> UnreadReport:
+    """
+    Return the versions of listed providers that still wait for their reading on their third night.
+
+    Those are the versions that wait for their reading, as waits_for_reading says, that passed the
+    checks on a channel, were released more than UNREAD_AFTER ago and were not read in this run,
+    each with why the read step did not read it in this run.
+
+    :param registry: The registry, with the files of the fetch step.
+    :param readings: What the read step read in this run, as read_readings returns it.
+    :param now: When the report is made.
+    """
+    read = {(result.domain, result.version) for result in readings.results}
+    reasons = {(entry.domain, entry.version): entry.reason for entry in readings.unread}
+    # dates in the one format of the registry compare as text
+    released_before = format_date(now - UNREAD_AFTER)
+    return UnreadReport(
+        versions=[
+            UnreadVersion(domain=domain, version=version, reason=reasons.get((domain, version)))
+            for domain, provider in sorted(registry.providers.items())
+            if provider.file.status == ProviderStatus.LISTED
+            for version in sorted(waits_for_reading(provider), key=version_key)
+            if (domain, version) not in read
+            and provider.versions[version].released < released_before
+            and any(check.passed for check in provider.versions[version].checks.values())
+        ]
+    )
+
+
+def open_unread_issue(github: GitHub, repository: str) -> IssueInfo | None:
+    """
+    Return the open issue of the pipeline about the versions that wait for their reading, if any.
+
+    Only what the pipeline's own account wrote counts.
+
+    :param github: A client.
+    :param repository: The repository of the registry, as owner/name.
+    :raises OSError: The issues could not be listed.
+    """
+    for issue in sorted(github.issues(repository, LABEL), key=lambda issue: issue.number):
+        if issue.author == ACTIONS_LOGIN and issue.body.split("\n", 1)[0] == _UNREAD_MARKER:
+            return issue
+    return None
+
+
+def post_unread_report(
+    report: UnreadReport, issue: IssueInfo | None, github: GitHub, repository: str
+) -> str | None:
+    """
+    Tell the maintainers of the registry about the versions that wait too long for their reading.
+
+    While versions wait, an issue lists them, and its text is kept up to date; once none waits,
+    the issue is closed. Returns what was done, or None when nothing was.
+
+    :param report: The versions that wait, as build_unread_report returns them.
+    :param issue: The open issue of the pipeline about them.
+    :param github: A client whose token may write issues on the registry.
+    :param repository: The repository of the registry, as owner/name.
+    :raises GitHubError: GitHub refused a request.
+    """
+    if not report.versions:
+        if issue is None:
+            return None
+        text = "No version waits for its reading any more, so this issue is closed."
+        github.add_comment(repository, issue.number, text)
+        github.close_issue(repository, issue.number)
+        return f"#{issue.number}: closed"
+    not_tried = (
+        f"not tried in the last run, which reads at most {MAX_READINGS_PER_RUN} versions and "
+        "stops at a fault of its credentials or configuration"
+    )
+    shown = report.versions[:MAX_UNREAD]
+    items = "".join(
+        f"- {code_span(entry.domain)} {entry.version}: "
+        f"{code_span(entry.reason) if entry.reason else not_tried}\n"
+        for entry in shown
+    )
+    if more := len(report.versions) - len(shown):
+        items += f"- And {more} more.\n"
+    body = (
+        f"{_UNREAD_MARKER}\n"
+        "The Music Assistant community catalog has not read these versions against its rules by "
+        "their third night, so servers are not offered them. This needs the attention of the "
+        f"maintainers of the catalog:\n\n{items}\n### What to do\n\n"
+        "Find out why the reading did not read them; the log of the last run of the release "
+        "pipeline has more. A person may also read a version and accept it with `clear-version`. "
+        "This issue is kept up to date while versions wait, and closes by itself once none does.\n"
+    )
+    if issue is None:
+        return github.create_issue(repository, "Versions wait for their reading", body, [LABEL])
+    if issue.body == body:
+        return None
+    github.update_issue(repository, issue.number, body)
+    return f"#{issue.number}: updated"
+
+
 def _check_failure(provider: Provider, channel: str, result: VersionResult) -> Failure:
     """Return the failure of a version that failed the checks on a channel."""
     version = result.version
@@ -421,9 +549,9 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
     )
     shown = reading.findings[:MAX_FINDINGS]
     more = len(reading.findings) - len(shown)
-    trial = (
-        "The reading is on trial: nothing changes for this release, and a person of the Music "
-        "Assistant team looks at it."
+    waits = (
+        "A person of the Music Assistant team reads the release. Until then, servers are not "
+        "offered it and keep the version they have."
     )
     # without a summary, the code held the release instead of the model
     if reading.summary is None:
@@ -434,7 +562,7 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
             heading=f"Version {version} could not be read against the catalog rules",
             text=(
                 f"{intro} could not judge it, because {reading.reason}"
-                f"{': ' if files else ''}{files}.\n\n{trial}"
+                f"{': ' if files else ''}{files}.\n\n{waits}"
             ),
         )
     items = []
@@ -458,7 +586,7 @@ def _hold(provider: Provider, result: ReadingResult) -> Failure:
         text=(
             f"{intro} {found}What the change does, in the words of the reading:\n\n"
             f"{code_block(reading.summary)}\n"
-            f"{trial} If {'a finding' if items else 'the hold'} is wrong, say so in this issue."
+            f"{waits} If {'a finding' if items else 'the hold'} is wrong, say so in this issue."
         ),
     )
 
@@ -520,6 +648,31 @@ def _failures(failures: list[Failure], room: int) -> str:
             output = code_block(shown)
             text += f"<details><summary>{summary}</summary>\n\n{output}\n</details>\n\n"
     return text
+
+
+def _closing(report: ProviderReport, told: Iterable[str]) -> str:
+    """
+    Return the comment that closes the issue of a provider: what settled the failures it tells.
+
+    :param report: The report of the provider.
+    :param told: The keys of the failures the issue tells, all settled.
+    """
+    held = {key.removeprefix("hold ") for key in told if key.startswith("hold ")}
+    blocked = sorted(held & set(report.blocked), key=version_key)
+    cleared = sorted(held & set(report.cleared) - set(blocked), key=version_key)
+    rest = [key for key in told if key.removeprefix("hold ") not in {*blocked, *cleared}]
+    done = [f"version {report.newest} passed {_passes(rest)}"] if rest else []
+    done += [f"the team accepted {_versions(cleared)}"] if cleared else []
+    done += [f"the team blocked {_versions(blocked)}"] if blocked else []
+    text = ", and ".join(done)
+    return f"{text[:1].upper()}{text[1:]}, so this issue is closed."
+
+
+def _versions(versions: list[str]) -> str:
+    """Return versions in words, such as version 1.0.0 or versions 1.0.0 and 1.1.0."""
+    if len(versions) == 1:
+        return f"version {versions[0]}"
+    return f"versions {', '.join(versions[:-1])} and {versions[-1]}"
 
 
 def _passes(keys: Iterable[str]) -> str:

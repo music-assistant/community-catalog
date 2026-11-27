@@ -137,8 +137,8 @@ jobs:
       # the results files are data from containers that ran provider code; only those the plan
       # names are read, and only as data
       - run: uv run --no-dev python -m registry apply-results results
-      # on trial: a reading that does not finish fails the run at its end, after the push, so the
-      # check results are recorded and reported all the same
+      # a reading that does not finish fails the run at its end, after the push, so the check
+      # results are recorded and reported all the same; what it did not read is not offered
       - id: read
         name: Read the new versions against the catalog rules
         continue-on-error: true
@@ -149,6 +149,9 @@ jobs:
           ANTHROPIC_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_SERVICE_ACCOUNT_ID }}
           ANTHROPIC_WORKSPACE_ID: ${{ vars.ANTHROPIC_WORKSPACE_ID }}
         run: uv run --no-dev python -m registry read
+      # the index offers what the reading accepted, also when the read step was stopped before it
+      # wrote the index files
+      - run: uv run --no-dev python -m registry build
       - run: uv run --no-dev python -m registry validate
       # the token of the app lives an hour, so it is made once the reading is done
       - id: token

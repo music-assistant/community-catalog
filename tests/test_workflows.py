@@ -270,6 +270,7 @@ def test_the_apply_job_reads_before_it_makes_the_token_of_the_app() -> None:
     order = [
         _step(steps, run="registry apply-results"),
         read := _step(steps, run="registry read"),
+        build := _step(steps, run="registry build"),
         _step(steps, run="registry validate"),
         token := _step(steps, uses=APP_TOKEN),
         push := _step(steps, run="git push"),
@@ -288,6 +289,8 @@ def test_the_apply_job_reads_before_it_makes_the_token_of_the_app() -> None:
     assert read["continue-on-error"] is True
     assert read["timeout-minutes"] < job["timeout-minutes"]
     assert fail["if"] == "steps.read.outcome != 'success'"
+    # the index follows the verdicts, also when the read step was stopped before it wrote them
+    assert "if" not in build
 
 
 def test_the_report_runs_once_the_results_are_on_main() -> None:

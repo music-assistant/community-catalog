@@ -17,6 +17,7 @@ from tests.conftest import (
     COMMIT,
     DOMAIN,
     ICON,
+    PASSED,
     FakeGitHub,
     build_archive,
     manifest,
@@ -78,7 +79,8 @@ def test_a_provider_folder_named_otherwise(files: Files, tmp_path: Path) -> None
 
     assert _add(files, archive) == 0
     assert _run(files, "record-check", DOMAIN, "1.0.0", "nightly", "--passed") == 0
-    assert _run(files, "build") == 0
+    issue = "https://github.com/music-assistant/community-catalog/issues/31"
+    assert _run(files, "clear-version", DOMAIN, "1.0.0", "--reason", issue) == 0
     assert _run(files, "validate") == 0
 
     version = load_registry(files.root).providers[DOMAIN].versions["1.0.0"]
@@ -335,8 +337,8 @@ def test_set_status(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
 def test_block_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
     """A version is blocked and unblocked in one command, with its index."""
     files.provider()
-    files.version("1.0.0")
-    files.version("1.1.0")
+    files.version("1.0.0", reading=PASSED)
+    files.version("1.1.0", reading=PASSED)
 
     assert _run(files, "block-version", DOMAIN, "1.1.0", "--reason", "Sends data elsewhere") == 0
     provider = json.loads((files.root / "site/v1/nightly.json").read_text())["providers"][DOMAIN]
@@ -354,20 +356,22 @@ def test_block_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None
 
 
 def test_clear_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None:
-    """A held or pending version is cleared with a link to why; the index does not change yet."""
+    """A held or pending version is cleared with a link to why, and its index offers it."""
     issue = "https://github.com/music-assistant/community-catalog/issues/31"
     files.provider()
     files.version("1.0.0")
     files.version("1.1.0", reading={"verdict": "hold", "read": "2026-11-03T03:00:00Z"})
     assert _run(files, "build") == 0
-    index = (files.root / "site/v1/nightly.json").read_bytes()
+    index = files.root / "site/v1/nightly.json"
+    assert json.loads(index.read_text())["providers"][DOMAIN]["latest"] is None
 
     assert _run(files, "clear-version", DOMAIN, "1.1.0", "--reason", issue) == 0
     assert _run(files, "clear-version", DOMAIN, "1.0.0", "--reason", issue) == 0
 
     cleared = load_registry(files.root).providers[DOMAIN].file.cleared_versions
     assert cleared == {"1.0.0": issue, "1.1.0": issue}
-    assert (files.root / "site/v1/nightly.json").read_bytes() == index
+    provider = json.loads(index.read_text())["providers"][DOMAIN]
+    assert (provider["latest"], set(provider["versions"])) == ("1.1.0", {"1.0.0", "1.1.0"})
     assert _run(files, "validate") == 0
     capsys.readouterr()
     assert _run(files, "clear-version", DOMAIN, "2.0.0", "--reason", issue) == 1
@@ -545,7 +549,7 @@ def test_an_index_beyond_the_limit_is_refused(
 ) -> None:
     """Build and validate refuse an index that a server may not download within 10 seconds."""
     files.provider()
-    files.version("1.0.0")
+    files.version("1.0.0", reading=PASSED)
     assert _run(files, "build") == 0
     monkeypatch.setattr("registry.index.MAX_INDEX_SIZE", 1000)
 
@@ -562,8 +566,8 @@ def test_blocks_and_withdrawals_reach_a_frozen_channel(files: Files) -> None:
         {"channels": {"2.11": {"image": "ghcr.io/music-assistant/server:2.11", "frozen": True}}},
     )
     files.provider()
-    files.version("1.0.0", channels={"2.11": True})
-    files.version("1.1.0", channels={"2.11": True})
+    files.version("1.0.0", channels={"2.11": True}, reading=PASSED)
+    files.version("1.1.0", channels={"2.11": True}, reading=PASSED)
     index = files.root / "site" / "v1" / "2.11.json"
 
     assert _run(files, "block-version", DOMAIN, "1.1.0", "--reason", "Sends data elsewhere") == 0

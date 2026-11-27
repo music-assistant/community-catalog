@@ -109,19 +109,19 @@ def _index_provider(provider: Provider, channel: str) -> IndexProvider:
     :param provider: The provider, with at least one version.
     :param channel: The channel.
     """
-    file = provider.file
+    file, accepted = provider.file, provider.accepted()
     newest_first = sorted(
         provider.versions.values(), key=lambda version: version_key(version.version), reverse=True
     )
-    allowed = [version for version in newest_first if version.version not in file.blocked_versions]
+    allowed = [version for version in newest_first if version.version in accepted]
     passed = [
         version
         for version in allowed
         if (result := version.checks.get(channel)) is not None and result.passed
     ]
     latest = passed[0] if passed else None
-    # without a version for this channel the app still shows the provider, by its newest version
-    # that is not blocked; a provider with only blocked versions stays in the index all the same
+    # without a version for this channel the app still shows the provider, by its newest accepted
+    # version; a provider without one stays in the index all the same
     shown = latest or (allowed or newest_first)[0]
     return IndexProvider(
         status=file.status,
