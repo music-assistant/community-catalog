@@ -890,8 +890,8 @@ def test_a_hold_tells_the_maintainers_what_the_reading_found(files: Files) -> No
     assert "Publish a new release" not in body
     assert "Nothing for now: a person of the Music Assistant team reads the release" in body
     assert (
-        "closes when the team accepts the release, or by itself once the newest release passes "
-        "the checks and the reading." in body
+        "closes when the team accepts or blocks the release, or by itself once the newest release "
+        "passes the checks and the reading." in body
     )
     # the rules of the catalog, not the safety of the code
     assert not any(word in body.lower() for word in ("security", "vulnerability", "vulnerable"))

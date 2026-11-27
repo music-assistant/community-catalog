@@ -13,7 +13,7 @@ from registry.files import dumps
 from registry.formats import format_date
 from registry.icon import check_icon
 from registry.index import render_indexes
-from registry.models import CheckResult, ProviderStatus, RefusedRelease, Verdict, VersionFile
+from registry.models import CheckResult, ProviderStatus, RefusedRelease, VersionFile
 from registry.registry import PROVIDER_FILE, PROVIDERS_FOLDER, InvalidRegistryError, load_registry
 
 if TYPE_CHECKING:
@@ -195,20 +195,19 @@ def block_version(registry: Registry, domain: str, version: str, reason: str | N
 
 def clear_version(registry: Registry, domain: str, version: str, reason_url: str) -> None:
     """
-    Accept a version that the reading held or did not read yet, after a person read it.
+    Accept a version that is not accepted yet, after a person read it.
 
     :param registry: The registry.
     :param domain: The domain of the provider.
     :param version: The version.
     :param reason_url: An https link to why the version is accepted, such as its issue.
-    :raises CommandError: There is no such provider, or the version passed the reading.
+    :raises CommandError: There is no such provider, or the version is accepted already.
     :raises InvalidRegistryError: The provider would not be valid, such as a version without
         a version file or a link that is not https.
     """
     provider = get_provider(registry, domain)
-    file = provider.versions.get(version)
-    if file is not None and file.reading is not None and file.reading.verdict is Verdict.PASS:
-        msg = f"{domain} {version} passed the reading, so it needs no clearance"
+    if version in provider.accepted():
+        msg = f"{domain} {version} is accepted already, so it needs no clearance"
         raise CommandError(msg)
     cleared = {**provider.file.cleared_versions, version: reason_url}
     _write_provider(registry, provider, replace(provider.file, cleared_versions=cleared))

@@ -383,10 +383,10 @@ def test_clear_version(files: Files, capsys: pytest.CaptureFixture[str]) -> None
     assert "there is no provider other_music" in capsys.readouterr().err
 
 
-def test_a_version_that_passed_is_not_cleared(
+def test_an_accepted_version_is_not_cleared(
     files: Files, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Clearing a version the reading passed is refused, and changes nothing."""
+    """Clearing a version that is accepted already is refused, and changes nothing."""
     files.provider()
     files.version("1.0.0", reading={"verdict": "pass", "read": "2026-11-03T03:00:00Z"})
     before = (files.root / f"providers/{DOMAIN}/provider.json").read_bytes()
@@ -397,9 +397,24 @@ def test_a_version_that_passed_is_not_cleared(
 
     assert code == 1
     assert capsys.readouterr().err == (
-        f"error: {DOMAIN} 1.0.0 passed the reading, so it needs no clearance\n"
+        f"error: {DOMAIN} 1.0.0 is accepted already, so it needs no clearance\n"
     )
     assert (files.root / f"providers/{DOMAIN}/provider.json").read_bytes() == before
+
+
+def test_a_pass_whose_base_is_no_longer_accepted_may_be_cleared(files: Files) -> None:
+    """A version whose pass was read against a base that was blocked since may be cleared."""
+    issue = "https://github.com/a/b/issues/1"
+    read = "2026-11-03T03:00:00Z"
+    files.provider(blocked_versions={"1.0.0": "Sends the library away"})
+    files.version("1.0.0", reading={"verdict": "pass", "read": read})
+    files.version("1.1.0", reading={"verdict": "pass", "read": read, "base": "1.0.0"})
+
+    assert _run(files, "clear-version", DOMAIN, "1.1.0", "--reason", issue) == 0
+
+    provider = load_registry(files.root).providers[DOMAIN]
+    assert provider.file.cleared_versions == {"1.1.0": issue}
+    assert provider.accepted() == {"1.1.0"}
 
 
 def test_check_admission(files: Files, capsys: pytest.CaptureFixture[str]) -> None:

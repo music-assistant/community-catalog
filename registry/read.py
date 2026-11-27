@@ -13,7 +13,13 @@ from registry.content import content_hash, unpack
 from registry.edit import now, write_indexes, write_version
 from registry.formats import MAX_REASON, format_date
 from registry.models import ReadingResult, UnreadVersion, Verdict, VersionReading
-from registry.pipeline import archive_path, reading_base, versions_to_read, write_readings
+from registry.pipeline import (
+    archive_path,
+    reading_base,
+    versions_to_read,
+    waits_for_reading,
+    write_readings,
+)
 from registry.reading import (
     ReadingConfigurationError,
     ReadingRejectedError,
@@ -53,7 +59,8 @@ def read_versions(registry: Registry, client: anthropic.Anthropic, work: Path) -
     Read the versions versions_to_read gives, and record the verdict of each in its version file.
 
     A version is read from its archive in the work folder, against the archive of the base
-    reading_base gives when its turn comes, so one that passed earlier in the run can be it. A
+    reading_base gives when its turn comes, so one that passed earlier in the run can be it; a
+    version that such a pass made accepted again is not read. A
     version whose archives are missing or do not hold its content, or that the API could not
     read for now, gets no verdict and is read on another night. So does one whose request the
     API refused as not valid, and the later versions of its provider in this run; once that
@@ -74,6 +81,8 @@ def read_versions(registry: Registry, client: anthropic.Anthropic, work: Path) -
     try:
         for planned in versions_to_read(registry):
             provider = registry.providers[planned.domain]
+            if planned.version not in waits_for_reading(provider):
+                continue
             base = reading_base(provider, planned.version)
             try:
                 if planned.domain in rejected:

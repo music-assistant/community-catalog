@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from registry import formats
 from registry.icon import check_icon
-from registry.models import ProviderStatus, Verdict
+from registry.models import ProviderStatus
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -167,7 +167,7 @@ def check_kept_versions(provider: ProviderFile, versions: Mapping[str, VersionFi
     :param provider: The content of the provider.json.
     :param versions: The version files of the provider, by version.
     """
-    problems = [
+    return [
         f"{key}: {version} has no version file"
         for key, kept in (
             ("blocked_versions", provider.blocked_versions),
@@ -176,14 +176,6 @@ def check_kept_versions(provider: ProviderFile, versions: Mapping[str, VersionFi
         for version in kept
         if version not in versions
     ]
-    problems += [
-        f"cleared_versions: {version} passed the reading, so it needs no clearance"
-        for version in provider.cleared_versions
-        if (file := versions.get(version)) is not None
-        and file.reading is not None
-        and file.reading.verdict is Verdict.PASS
-    ]
-    return problems
 
 
 def check_reading_base(version: VersionFile, versions: Mapping[str, VersionFile]) -> list[str]:

@@ -302,7 +302,7 @@ def post_report(
             fix = "Publish a new release that fixes this. A refused release is not tried again. "
         else:
             fix = ""
-        accepted = "when the team accepts the release, or " if held else ""
+        accepted = "when the team accepts or blocks the release, or " if held else ""
         passes = _passes([failure.key for failure in new])
         body = _fit(
             lambda room: (

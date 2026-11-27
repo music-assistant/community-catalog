@@ -80,7 +80,7 @@ such a version, the owner alone.
 | `status` | Optional, default `listed`. `listed`, `withdrawn` (not offered; what is installed keeps loading) or `blocked` (loaded by no server). |
 | `reason`, `reason_url` | Why the provider is withdrawn or blocked, and an `https` link to more. Required for those two, absent for `listed`. |
 | `blocked_versions` | Optional. Version to reason. A blocked version is loaded by no server. |
-| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while the [reading](#versionsversionjson) held it or had not read it yet (for example when the reading cannot run). A version the reading passed is never cleared. A clearance may be removed again: the version, and a pass read against it, are then no longer accepted. |
+| `cleared_versions` | Optional. Version to an `https` link to why: a version a registry maintainer accepted after reading it, while it was not accepted: the [reading](#versionsversionjson) held it, had not read it yet (for example when the reading cannot run), or passed it against a base that is no longer accepted. A clearance may be removed again: the version, and a pass read against it, are then no longer accepted. |
 
 ### versions/\<version\>.json
 
@@ -215,7 +215,7 @@ Requires [uv](https://docs.astral.sh/uv/). `uv sync` sets up the environment;
 | `uv run python -m registry refresh-reserved <server checkout>...` | Adds the built-in providers and core controllers of server checkouts to `reserved_domains.json`. |
 | `uv run python -m registry set-status <domain> listed\|withdrawn\|blocked [--reason <text>] [--reason-url <url>]` | Withdraws, blocks or lists a provider again, and writes the index files. |
 | `uv run python -m registry block-version <domain> <version> --reason <text>` | Blocks a version, and writes the index files; `unblock-version <domain> <version>` lifts it. |
-| `uv run python -m registry clear-version <domain> <version> --reason <url>` | Accepts a version the reading held or did not read yet, after a person read it, with an `https` link to why, and writes the index files, which then offer it. A version the reading passed is refused: it needs no clearance. A clearance is withdrawn by removing it from `cleared_versions` and running `build`, or by blocking the version. |
+| `uv run python -m registry clear-version <domain> <version> --reason <url>` | Accepts a version that is not accepted yet, after a person read it, with an `https` link to why, and writes the index files, which then offer it on the channels where it passed its checks. A version that is accepted already is refused: it needs no clearance. A clearance is withdrawn by removing it from `cleared_versions` and running `build`, or by blocking the version. |
 
 Blocking is one command and one commit:
 

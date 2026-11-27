@@ -453,25 +453,18 @@ def test_the_accepted_versions(files: Files) -> None:
     assert load_registry(files.root).providers[DOMAIN].accepted() == {"1.0.0", "1.1.0", "1.2.0"}
 
 
-@pytest.mark.parametrize("reading", [None, {"verdict": "hold", "read": READ}])
-def test_a_held_or_pending_version_may_be_cleared(
+@pytest.mark.parametrize(
+    "reading",
+    [None, {"verdict": "hold", "read": READ}, {"verdict": "pass", "read": READ}],
+)
+def test_a_cleared_version_may_have_any_reading(
     files: Files, reading: dict[str, str] | None
 ) -> None:
-    """A person may clear a version the reading held or did not read yet."""
+    """A clearance stands whatever the reading of its version, also a pass recorded after it."""
     files.provider(cleared_versions={"1.0.0": ISSUE})
     files.version("1.0.0", reading=reading)
 
     assert load_registry(files.root).providers[DOMAIN].file.cleared_versions == {"1.0.0": ISSUE}
-
-
-def test_a_version_that_passed_is_not_cleared(files: Files) -> None:
-    """A version the reading passed needs no clearance, so one is refused."""
-    files.provider(cleared_versions={"1.0.0": ISSUE})
-    files.version("1.0.0", reading={"verdict": "pass", "read": READ})
-
-    assert _problems(files) == [
-        f"{PROVIDER}: cleared_versions: 1.0.0 passed the reading, so it needs no clearance"
-    ]
 
 
 def test_a_cleared_version_needs_a_version_file(files: Files) -> None:

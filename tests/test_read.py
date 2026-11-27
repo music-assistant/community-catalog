@@ -16,7 +16,7 @@ from registry.cli import main
 from registry.content import read_archive
 from registry.files import load_model
 from registry.github import GitHub
-from registry.models import ReadingResults, Verdict
+from registry.models import ReadingResults, Verdict, VersionReading
 from registry.pipeline import (
     MAX_READINGS_PER_RUN,
     READINGS_FILE,
@@ -263,6 +263,25 @@ def test_a_pass_whose_base_is_no_longer_accepted_is_read_again(
         "1.2.0": (Verdict.HOLD, "1.0.0"),
         "1.3.0": (Verdict.HOLD, "1.2.0"),
     }
+
+
+def test_a_version_accepted_again_in_the_run_is_not_read(
+    files: Files, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pass in the run that makes the base of a later version accepted again spares its read."""
+    files.provider(blocked_versions={"1.1.0": "Sends the library away"})
+    _version(files, "1.0.0", reading={"verdict": "pass", "read": READ})
+    _version(files, "1.1.0", reading={"verdict": "pass", "read": READ, "base": "1.0.0"})
+    _version(files, "1.2.0", reading={"verdict": "pass", "read": READ, "base": "1.1.0"})
+    _version(files, "1.3.0", reading={"verdict": "pass", "read": READ, "base": "1.2.0"})
+    client = VersionClient({"1.2.0": _message(PASS)})
+
+    assert _read(files, monkeypatch, client) == 0
+
+    assert client.read == [("1.2.0", "1.0.0")]
+    provider = load_registry(files.root).providers[DOMAIN]
+    assert provider.versions["1.3.0"].reading == VersionReading(Verdict.PASS, READ, "1.2.0")
+    assert provider.accepted() == {"1.0.0", "1.2.0", "1.3.0"}
 
 
 def test_providers_take_turns_with_their_oldest_version(files: Files) -> None:
