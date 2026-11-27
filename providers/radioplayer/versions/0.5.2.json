@@ -1,0 +1,48 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-27T05:23:50Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-27T05:23:50Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-27T05:23:41Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "e51e7bb1b026608da3dc7be476e9324887a2f8a2",
+  "content_hash": "56bb12a6882b32fa0fa2639ecf38644baa05536a71401be10b4701bf3224c09f",
+  "folder": "radioplayer",
+  "icon_svg": "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 24 24\"><rect width=\"24\" height=\"24\" rx=\"5\" fill=\"#0f766e\"/><path fill=\"none\" stroke=\"#fff\" stroke-width=\"1.8\" stroke-linecap=\"round\" d=\"M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M6 6a8.5 8.5 0 0 0 0 12M18 6a8.5 8.5 0 0 1 0 12\"/><circle cx=\"12\" cy=\"12\" r=\"2\" fill=\"#fff\"/></svg>\n",
+  "manifest": {
+    "codeowners": [
+      "@riqiu"
+    ],
+    "description": "Radio stations from Radioplayer, found by search, browsed by letter or listed by you, showing the artist, title and cover of what plays now, and the songs they played last, from the public Radioplayer feed; a song opens the matching tracks of your other music providers.",
+    "documentation": "https://github.com/riqiu/ma-radioplayer#readme",
+    "domain": "radioplayer",
+    "multi_instance": false,
+    "name": "Radioplayer",
+    "provides": [
+      "radio"
+    ],
+    "requirements": [],
+    "stage": "alpha",
+    "type": "music"
+  },
+  "reading": {
+    "base": "0.5.1",
+    "read": "2026-11-27T05:24:54Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-26T20:36:01Z",
+  "requirements": [],
+  "tag": "v0.5.2",
+  "version": "0.5.2"
+}
