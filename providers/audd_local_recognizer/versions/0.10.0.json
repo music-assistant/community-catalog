@@ -1,17 +1,17 @@
 {
   "checks": {
     "2.11": {
-      "checked": "2026-11-27T05:22:57Z",
+      "checked": "2026-11-28T05:21:36Z",
       "passed": true,
       "reason": null
     },
     "beta": {
-      "checked": "2026-11-27T05:23:00Z",
+      "checked": "2026-11-28T05:21:35Z",
       "passed": true,
       "reason": null
     },
     "nightly": {
-      "checked": "2026-11-27T05:22:48Z",
+      "checked": "2026-11-28T05:21:40Z",
       "passed": true,
       "reason": null
     }
@@ -34,6 +34,11 @@
     ],
     "stage": "experimental",
     "type": "audio_analysis"
+  },
+  "reading": {
+    "base": "0.9.0",
+    "read": "2026-11-28T05:23:46Z",
+    "verdict": "pass"
   },
   "released": "2026-11-26T05:53:04Z",
   "requirements": [

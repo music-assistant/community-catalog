@@ -1,0 +1,58 @@
+{
+  "checks": {
+    "2.11": {
+      "checked": "2026-11-28T05:22:22Z",
+      "passed": true,
+      "reason": null
+    },
+    "beta": {
+      "checked": "2026-11-28T05:22:22Z",
+      "passed": true,
+      "reason": null
+    },
+    "nightly": {
+      "checked": "2026-11-28T05:22:25Z",
+      "passed": true,
+      "reason": null
+    }
+  },
+  "commit": "629944480ac8610e4be328c2784af9b8aa74d818",
+  "content_hash": "73dd67bcbd09b1a39fa853afc45e83ed3e1d82fd1494a939693167d570cf17c8",
+  "folder": "providers/qqmusic",
+  "icon_svg": null,
+  "manifest": {
+    "codeowners": [
+      "@music-assistant"
+    ],
+    "credits": [
+      "[QQMusicApi](https://github.com/L-1124/QQMusicApi)"
+    ],
+    "description": "Stream QQ Music catalog, playlists, lyrics, and personalized recommendations.",
+    "documentation": "https://music-assistant.io/music-providers/qqmusic",
+    "domain": "qqmusic",
+    "multi_instance": true,
+    "name": "QQ Music",
+    "provides": [
+      "artist",
+      "album",
+      "track",
+      "playlist"
+    ],
+    "requirements": [
+      "qqmusic-api-python==0.8.2"
+    ],
+    "stage": "unmaintained",
+    "type": "music"
+  },
+  "reading": {
+    "base": null,
+    "read": "2026-11-28T05:23:37Z",
+    "verdict": "pass"
+  },
+  "released": "2026-11-27T18:58:03Z",
+  "requirements": [
+    "qqmusic-api-python==0.8.2"
+  ],
+  "tag": "qqmusic-1.0.0",
+  "version": "1.0.0"
+}

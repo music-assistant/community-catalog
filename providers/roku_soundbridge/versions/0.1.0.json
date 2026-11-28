@@ -1,19 +1,19 @@
 {
   "checks": {
     "2.11": {
-      "checked": "2026-11-27T05:24:08Z",
+      "checked": "2026-11-28T05:22:48Z",
       "passed": true,
       "reason": null
     },
     "beta": {
-      "checked": "2026-11-27T05:24:07Z",
+      "checked": "2026-11-28T05:22:47Z",
       "passed": true,
       "reason": null
     },
     "nightly": {
-      "checked": "2026-11-27T05:23:59Z",
-      "passed": true,
-      "reason": null
+      "checked": "2026-11-28T05:22:50Z",
+      "passed": false,
+      "reason": "load: ImportError: cannot import name 'CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3' from 'music_assistant.constants' (/app/venv/lib/python3.14/site-packages/music_assistant/constants.py)"
     }
   },
   "commit": "1f5bbeb47c14bad4eec5a33a5938e871bd1eb8e8",
